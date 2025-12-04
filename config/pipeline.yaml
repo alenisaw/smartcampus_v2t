@@ -1,0 +1,45 @@
+paths:
+  root_dir: ..
+  raw_dir: data/raw
+  prepared_dir: data/prepared
+  results_dir: results/runs
+  models_dir: models
+  qwen_vl_dir: models/qwen3-vl-2b-instruct
+
+  dnn_face_proto: models/face_detector/deploy.prototxt
+  dnn_face_model: models/face_detector/res10_300x300_ssd_iter_140000.caffemodel
+
+video:
+  target_fps: 3.0
+  model_input_size: [448, 448]
+  min_change_threshold: 0.03
+  dark_threshold: 30.0
+  save_small_frames: false
+
+  face_blur: true
+  face_detector_type: dnn
+  max_frames: 5000
+
+clips:
+  window_sec: 4.0
+  stride_sec: 2.0
+  min_clip_frames: 2
+  max_clip_frames: 32
+
+model:
+  model_name_or_path: models/qwen3-vl-2b-instruct
+  language: "ru"
+  device: cuda
+  dtype: auto
+  max_new_tokens: 128
+  temperature: 0.4
+  top_p: 0.9
+  repetition_penalty: 1.05
+  timeout_sec: 60
+
+
+runtime:
+  seed: 42
+  num_workers: 2
+  log_level: INFO
+  overwrite_existing: false
