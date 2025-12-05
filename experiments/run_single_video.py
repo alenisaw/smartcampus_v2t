@@ -24,7 +24,6 @@ from typing import Any, Dict, List, Tuple
 
 import sys
 
-# --- project root / imports ---------------------------------------------------
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -37,9 +36,6 @@ from src.core.types import VideoMeta, FrameInfo, Annotation, RunMetrics
 
 RAW_DIR = PROJECT_ROOT / "data" / "raw"
 RESULTS_ROOT = PROJECT_ROOT / "experiments" / "results"
-
-
-# --- helpers ------------------------------------------------------------------
 
 
 def dataclass_to_dict(obj) -> Dict[str, Any]:
@@ -57,13 +53,7 @@ def build_clips_from_video_meta(
     min_clip_frames: int,
     max_clip_frames: int,
 ) -> Tuple[List[List[str]], List[Tuple[float, float]]]:
-    """
-    Build temporal clips from frame-level metadata.
 
-    We slide a window over [0, duration] with stride_sec, collect frames whose
-    timestamps fall into [t, t+window_sec], optionally downsample to
-    max_clip_frames frames per clip.
-    """
     if not video_meta.frames:
         return [], []
 
@@ -100,7 +90,13 @@ def build_clips_from_video_meta(
     return clips, clip_timestamps
 
 
-# --- main runner --------------------------------------------------------------
+def format_time_mmss(t: float) -> str:
+    if t < 0:
+        t = 0.0
+    total_seconds = int(round(t))
+    m = total_seconds // 60
+    s = total_seconds % 60
+    return f"{m}:{s:02d}"
 
 
 def run_single_video(
@@ -116,11 +112,11 @@ def run_single_video(
     print(f"\n[run_single_video] Video path: {video_path}")
     print(f"[run_single_video] Video id:   {video_id}")
 
-    # 1) Load config from YAML
+
     cfg = load_pipeline_config(PROJECT_ROOT / "config" / "pipeline.yaml")
     cfg.model.device = device
 
-    # 2) Preprocess video → VideoMeta
+
     print("\n=== STEP 1 — Preprocessing video ===")
     video_meta: VideoMeta = preprocess_video(video_path, cfg)
 
@@ -133,7 +129,7 @@ def run_single_video(
     print(f"Frames:     {video_meta.num_frames}")
     print(f"Preprocess: {preprocess_time_sec:.2f} sec")
 
-    # 3) Build clips for Qwen from frames
+
     print("\n=== STEP 2 — Building clips ===")
     clips, clip_timestamps = build_clips_from_video_meta(
         video_meta=video_meta,
@@ -163,7 +159,6 @@ def run_single_video(
 
 
     else:
-        # 4) Run Qwen3-VL pipeline
         print("\n=== STEP 3 — Running Qwen3-VL pipeline ===")
         pipeline = VideoToTextPipeline(cfg)
         annotations, metrics = pipeline.run(
@@ -174,28 +169,46 @@ def run_single_video(
             preprocess_time_sec=preprocess_time_sec,
         )
 
-    # 5) Print semantic output
+
     print("\n=== SEMANTIC OUTPUT (first 5 clips) ===")
     if not annotations:
         print("❌ No annotations returned.")
     else:
         print(f"Total annotations: {len(annotations)}\n")
         for a in annotations[:5]:
+            start_str = format_time_mmss(a.start_sec)
+            end_str = format_time_mmss(a.end_sec)
             print(
                 f"[clip {a.clip_index:03d}] "
-                f"{a.start_sec:.2f}s—{a.end_sec:.2f}s → {a.description}"
+                f"[{start_str} - {end_str}] → {a.description}"
             )
 
-    # 6) Metrics
+
     print("\n=== TIMING METRICS (sec) ===")
     print(f"preprocess:  {metrics.preprocess_time_sec:.3f}")
     print(f"model:       {metrics.model_time_sec:.3f}")
     print(f"postprocess: {metrics.postprocess_time_sec:.3f}")
     print(f"total:       {metrics.total_time_sec:.3f}")
 
-    # 7) Save results
     if save_json:
-        out_dir = RESULTS_ROOT / video_id
+        base_dir = RESULTS_ROOT / video_id
+        base_dir.mkdir(parents=True, exist_ok=True)
+
+        existing = [
+            p for p in base_dir.iterdir()
+            if p.is_dir() and p.name.startswith("run_")
+        ]
+        if existing:
+            nums = []
+            for p in existing:
+                name = p.name.replace("run_", "")
+                if name.isdigit():
+                    nums.append(int(name))
+            next_id = (max(nums) + 1) if nums else 1
+        else:
+            next_id = 1
+
+        out_dir = base_dir / f"run_{next_id:03d}"
         out_dir.mkdir(parents=True, exist_ok=True)
 
         ann_dicts = [
@@ -218,9 +231,6 @@ def run_single_video(
             json.dump(metrics_dict, f, indent=2, ensure_ascii=False)
 
         print(f"\nResults saved to: {out_dir}")
-
-
-# --- CLI ----------------------------------------------------------------------
 
 
 def parse_args():

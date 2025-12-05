@@ -5,8 +5,9 @@ End-to-end video→text pipeline for SmartCampus (Qwen3-VL only).
 
 Pipeline:
 1) Takes temporal clips = lists of frame paths
-2) For each clip calls Qwen3-VL backend to generate description
-3) Returns list of Annotation + aggregated RunMetrics
+2) For each clip calls Qwen3-VL backend with language-specific prompt
+3) Formats timestamps as [0:00 - 0:04]
+4) Returns Annotation list + RunMetrics
 """
 
 import time
@@ -16,6 +17,38 @@ from typing import List, Sequence, Tuple
 from src.core.qwen_vl_backend import QwenVLBackend
 from src.core.types import Annotation, RunMetrics
 from src.pipeline.pipeline_config import PipelineConfig
+
+
+def build_prompt(lang: str) -> str:
+    if lang == "ru":
+        return (
+            "Ты — аналитик видеонаблюдения. Кратко и ясно опиши, что происходит на "
+            "этом фрагменте видео. Укажи основное действие, участников, их поведение "
+            "и любые необычные события. Опирайся только на визуально видимую информацию. "
+            "Пиши на русском языке."
+        )
+
+    elif lang == "kz":
+        return (
+            "Сен — бейнебақылау аналитигісің. Бұл бейне үзіндісінде не болып жатқанын "
+            "қысқа әрі анық сипатта. Негізгі әрекетті, қатысушыларды, олардың "
+            "іс-әрекеттерін және ерекше жайттарды көрсет. Тек көзге көрінетін "
+            "ақпаратқа сүйен. Жауапты қазақ тілінде жаз."
+        )
+
+    else:
+        return (
+            "You are a video surveillance analyst. Briefly and clearly describe what is "
+            "happening in this video segment. Mention the main action, people involved, "
+            "their behavior, and any unusual events. Describe only what is visible. "
+            "Answer in English."
+        )
+
+
+def format_ts(sec: float) -> str:
+    m = int(sec // 60)
+    s = int(sec % 60)
+    return f"{m}:{s:02d}"
 
 
 class VideoToTextPipeline:
@@ -55,43 +88,21 @@ class VideoToTextPipeline:
         avg_clip_duration = float(sum(clip_durations) / len(clip_durations))
 
         annotations: List[Annotation] = []
+        lang = self.cfg.model.language
+        prompt = build_prompt(lang)
 
         t_gen_start = time.perf_counter()
-        for idx, (frame_paths, (start, end)) in enumerate(
-            zip(clips, clip_timestamps)
-        ):
+
+        for idx, (frame_paths, (start, end)) in enumerate(zip(clips, clip_timestamps)):
             paths_seq: Sequence[Path] = [Path(p) for p in frame_paths]
-
-            lang = self.cfg.model.language
-
-            if lang == "ru":
-                prompt = (
-                    "Ты — умный ассистент видеонаблюдения. "
-                    "Кратко и понятно опиши, что происходит на этом фрагменте видео. "
-                    "Сфокусируйся на людях, их действиях, взаимодействиях "
-                    "и любых необычных событиях. Пиши на русском языке."
-                )
-
-            elif lang == "kz":
-                prompt = (
-                    "Сен — бейнебақылаудың ақылды көмекшісісің. "
-                    "Бұл бейне үзіндісінде не болып жатқанын қысқаша және нақты сипатта. "
-                    "Адамдарға, олардың әрекеттеріне, өзара байланысына "
-                    "және кез келген ерекше оқиғаға назар аудар. "
-                    "Жауапты қазақ тілінде жаз."
-                )
-
-            else:  # default = English
-                prompt = (
-                    "You are a smart surveillance assistant. "
-                    "Describe briefly and clearly what is happening in this video segment. "
-                    "Focus on people, their actions, interactions, and any unusual events."
-                )
 
             description = self.backend.describe_clip(
                 frame_paths=paths_seq,
                 prompt=prompt,
             )
+
+            ts_str = f"[{format_ts(start)} - {format_ts(end)}] "
+            description = ts_str + description
 
             annotations.append(
                 Annotation(
