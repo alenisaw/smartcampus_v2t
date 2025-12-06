@@ -12,8 +12,10 @@ Pipeline:
 2) Run preprocess_video() with this config → VideoMeta (frames + stats)
 3) Build temporal clips from frames using ClipsConfig (window_sec / stride_sec)
 4) Run VideoToTextPipeline (Qwen3-VL backend)
-5) Print first 5 clip descriptions and timing metrics
-6) Save annotations.json and metrics.json into experiments/results/<video_id>/
+5) Print GLOBAL SUMMARY + first 5 clip descriptions and timing metrics
+6) Save annotations.json and metrics.json:
+   - data/annotations/<video_id>/run_xxx/annotations.json
+   - data/metrics/<video_id>/run_xxx/metrics.json
 """
 
 import argparse
@@ -34,8 +36,10 @@ from src.pipeline.video_to_text import VideoToTextPipeline
 from src.preprocessing.video_io import preprocess_video
 from src.core.types import VideoMeta, FrameInfo, Annotation, RunMetrics
 
-RAW_DIR = PROJECT_ROOT / "data" / "raw"
-RESULTS_ROOT = PROJECT_ROOT / "experiments" / "results"
+DATA_ROOT = PROJECT_ROOT / "data"
+RAW_DIR = DATA_ROOT / "raw"
+ANNOTATIONS_ROOT = DATA_ROOT / "annotations"
+METRICS_ROOT = DATA_ROOT / "metrics"
 
 
 def dataclass_to_dict(obj) -> Dict[str, Any]:
@@ -99,6 +103,30 @@ def format_time_mmss(t: float) -> str:
     return f"{m}:{s:02d}"
 
 
+def _prepare_run_dir(root: Path, video_id: str) -> Path:
+
+    base_dir = root / video_id
+    base_dir.mkdir(parents=True, exist_ok=True)
+
+    existing = [
+        p for p in base_dir.iterdir()
+        if p.is_dir() and p.name.startswith("run_")
+    ]
+    if existing:
+        nums: List[int] = []
+        for p in existing:
+            suffix = p.name.replace("run_", "")
+            if suffix.isdigit():
+                nums.append(int(suffix))
+        next_id = (max(nums) + 1) if nums else 1
+    else:
+        next_id = 1
+
+    run_dir = base_dir / f"run_{next_id:03d}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return run_dir
+
+
 def run_single_video(
     video_path: Path,
     device: str = "cuda",
@@ -112,10 +140,8 @@ def run_single_video(
     print(f"\n[run_single_video] Video path: {video_path}")
     print(f"[run_single_video] Video id:   {video_id}")
 
-
     cfg = load_pipeline_config(PROJECT_ROOT / "config" / "pipeline.yaml")
     cfg.model.device = device
-
 
     print("\n=== STEP 1 — Preprocessing video ===")
     video_meta: VideoMeta = preprocess_video(video_path, cfg)
@@ -128,7 +154,6 @@ def run_single_video(
     print(f"Duration:   {duration_sec:.2f} sec")
     print(f"Frames:     {video_meta.num_frames}")
     print(f"Preprocess: {preprocess_time_sec:.2f} sec")
-
 
     print("\n=== STEP 2 — Building clips ===")
     clips, clip_timestamps = build_clips_from_video_meta(
@@ -156,8 +181,6 @@ def run_single_video(
             extra={"reason": "no_clips"},
         )
         annotations: List[Annotation] = []
-
-
     else:
         print("\n=== STEP 3 — Running Qwen3-VL pipeline ===")
         pipeline = VideoToTextPipeline(cfg)
@@ -169,6 +192,13 @@ def run_single_video(
             preprocess_time_sec=preprocess_time_sec,
         )
 
+    # === GLOBAL SUMMARY ===
+    extra = metrics.extra or {}
+    global_summary = extra.get("global_summary")
+
+    if global_summary:
+        print("\n=== GLOBAL SUMMARY ===")
+        print(global_summary)
 
     print("\n=== SEMANTIC OUTPUT (first 5 clips) ===")
     if not annotations:
@@ -180,9 +210,8 @@ def run_single_video(
             end_str = format_time_mmss(a.end_sec)
             print(
                 f"[clip {a.clip_index:03d}] "
-                f"[{start_str} - {end_str}] → {a.description}"
+                f"[{start_str} - {end_str}]\n{a.description}\n"
             )
-
 
     print("\n=== TIMING METRICS (sec) ===")
     print(f"preprocess:  {metrics.preprocess_time_sec:.3f}")
@@ -191,25 +220,8 @@ def run_single_video(
     print(f"total:       {metrics.total_time_sec:.3f}")
 
     if save_json:
-        base_dir = RESULTS_ROOT / video_id
-        base_dir.mkdir(parents=True, exist_ok=True)
-
-        existing = [
-            p for p in base_dir.iterdir()
-            if p.is_dir() and p.name.startswith("run_")
-        ]
-        if existing:
-            nums = []
-            for p in existing:
-                name = p.name.replace("run_", "")
-                if name.isdigit():
-                    nums.append(int(name))
-            next_id = (max(nums) + 1) if nums else 1
-        else:
-            next_id = 1
-
-        out_dir = base_dir / f"run_{next_id:03d}"
-        out_dir.mkdir(parents=True, exist_ok=True)
+        ann_run_dir = _prepare_run_dir(ANNOTATIONS_ROOT, video_id)
+        met_run_dir = _prepare_run_dir(METRICS_ROOT, video_id)
 
         ann_dicts = [
             {
@@ -224,13 +236,17 @@ def run_single_video(
         ]
         metrics_dict = dataclass_to_dict(metrics)
 
-        with (out_dir / "annotations.json").open("w", encoding="utf-8") as f:
-            json.dump(ann_dicts, f, indent=2, ensure_ascii=False)
+        (ann_run_dir / "annotations.json").write_text(
+            json.dumps(ann_dicts, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        (met_run_dir / "metrics.json").write_text(
+            json.dumps(metrics_dict, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
 
-        with (out_dir / "metrics.json").open("w", encoding="utf-8") as f:
-            json.dump(metrics_dict, f, indent=2, ensure_ascii=False)
-
-        print(f"\nResults saved to: {out_dir}")
+        print(f"\nAnnotations saved to: {ann_run_dir}")
+        print(f"Metrics saved to:     {met_run_dir}")
 
 
 def parse_args():
