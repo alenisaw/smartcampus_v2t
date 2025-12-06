@@ -54,6 +54,7 @@ class ModelConfig:
     dtype: str
 
     language: str
+    batch_size: int
 
     max_new_tokens: int
     temperature: float
@@ -78,3 +79,4 @@ class PipelineConfig:
     clips: ClipsConfig
     model: ModelConfig
     runtime: RuntimeConfig
+

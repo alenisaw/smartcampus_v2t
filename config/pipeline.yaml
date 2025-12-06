@@ -27,19 +27,20 @@ clips:
   max_clip_frames: 32
 
 model:
-  model_name_or_path: models/qwen3-vl-2b-instruct
-  language: ru
+  model_name_or_path: models/qwen3_vl_2b_instruct
   device: cuda
-  dtype: auto
-  max_new_tokens: 128
-  temperature: 0.4
+  dtype: fp16
+  language: ru
+  batch_size: 5
+  max_new_tokens: 192
+  temperature: 0.1
   top_p: 0.9
   repetition_penalty: 1.05
+  do_sample: false
   timeout_sec: 60
-
 
 runtime:
   seed: 42
-  num_workers: 2
+  num_workers: 4
   log_level: INFO
   overwrite_existing: false

@@ -29,15 +29,11 @@ def _to_bool(v: Any) -> bool:
 
 
 def load_pipeline_config(config_path: Path) -> PipelineConfig:
-
     config_path = Path(config_path).resolve()
     with config_path.open("r", encoding="utf-8") as f:
         raw: Dict[str, Any] = yaml.safe_load(f)
 
-
     paths_raw = raw["paths"]
-
-
     root_dir = (config_path.parent / paths_raw.get("root_dir", ".")).resolve()
 
     def rel(p: str) -> Path:
@@ -54,7 +50,6 @@ def load_pipeline_config(config_path: Path) -> PipelineConfig:
         dnn_face_model=rel(paths_raw["dnn_face_model"]),
     )
 
-
     video_raw = raw["video"]
     video = VideoConfig(
         target_fps=float(video_raw["target_fps"]),
@@ -67,7 +62,6 @@ def load_pipeline_config(config_path: Path) -> PipelineConfig:
         max_frames=video_raw.get("max_frames"),
     )
 
-
     clips_raw = raw["clips"]
     clips = ClipsConfig(
         window_sec=float(clips_raw["window_sec"]),
@@ -76,21 +70,19 @@ def load_pipeline_config(config_path: Path) -> PipelineConfig:
         max_clip_frames=int(clips_raw["max_clip_frames"]),
     )
 
-
     model_raw = raw["model"]
     model = ModelConfig(
-
         model_name_or_path=str(paths.qwen_vl_dir),
         device=str(model_raw.get("device", "cuda")),
-        dtype=str(model_raw.get("dtype", "fp8")),
-        language=str(model_raw.get("language", "en")),
+        dtype=str(model_raw.get("dtype", "fp16")),
+        language=str(model_raw.get("language", "ru")),
+        batch_size=int(model_raw.get("batch_size", 1)),
         max_new_tokens=int(model_raw["max_new_tokens"]),
         temperature=float(model_raw["temperature"]),
         top_p=float(model_raw["top_p"]),
         repetition_penalty=float(model_raw["repetition_penalty"]),
         timeout_sec=int(model_raw["timeout_sec"]),
     )
-
 
     runtime_raw = raw["runtime"]
     runtime = RuntimeConfig(
