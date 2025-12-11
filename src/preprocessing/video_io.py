@@ -57,15 +57,26 @@ def prepare_video(
     start_time = time.perf_counter()
     video_info = _get_video_info(str(video_path))
 
-    fps = video_info["fps"]
+    source_fps = float(video_info["fps"])
+    fps = source_fps
+    clamped = False
     if fps < 1:
         fps = 25.0
-    if fps > 120:
+        clamped = True
+    elif fps > 120:
         fps = 30.0
+        clamped = True
+
     fps = float(round(fps))
 
+    if clamped:
+        print(
+            f"[prepare_video] Unstable FPS {source_fps:.3f} for {video_path}, "
+            f"using fallback {fps:.1f}"
+        )
+
     target_fps = float(video_cfg.target_fps)
-    step_frames = max(1, int(round(fps / target_fps)))
+    step_frames = max(1, int(round(fps / target_fps))) if target_fps > 0 else 1
 
     if video_cfg.face_blur:
         face_detector = _load_face_detector_dnn(
@@ -88,6 +99,7 @@ def prepare_video(
     num_dark_skipped = 0
     num_lazy_skipped = 0
     num_scene_cuts = 0
+    raw_read_frames = 0
 
     prev_small_kept: Optional[np.ndarray] = None
     frame_idx = 0
@@ -107,22 +119,23 @@ def prepare_video(
         if not ok:
             break
 
+        raw_read_frames += 1
+
+        # подвыборка по FPS
         if frame_idx % step_frames != 0:
             frame_idx += 1
             continue
 
         timestamp = frame_idx / fps
         num_sampled_frames += 1
+
         small_gray = _downscale_for_analysis(frame)
 
 
         is_dark = _is_dark_frame(small_gray, brightness_threshold=dark_threshold)
-
         if is_dark:
             num_dark_skipped += 1
-
             mean_brightness = float(np.mean(small_gray))
-
 
             if mean_brightness < dark_threshold * 0.4:
                 frame_idx += 1
@@ -139,14 +152,13 @@ def prepare_video(
 
         if not warmup_done:
             if prev_small_kept is not None:
-                warmup_diffs.append(_compute_frame_change_cpu(prev_small_kept, small_gray))
+                warmup_diffs.append(
+                    _compute_frame_change_cpu(prev_small_kept, small_gray)
+                )
             prev_small_kept = small_gray
-
 
             if len(warmup_diffs) >= 8:
                 scene_motion = float(np.mean(warmup_diffs)) if warmup_diffs else 0.0
-
-
                 adaptive_threshold = max(
                     base_threshold * 0.25,
                     min(base_threshold * 0.7, scene_motion * 1.2),
@@ -155,6 +167,7 @@ def prepare_video(
 
             frame_idx += 1
             continue
+
 
         lazy_ok = True
         if prev_small_kept is not None:
@@ -169,6 +182,7 @@ def prepare_video(
             frame_idx += 1
             continue
 
+
         if face_detector is not None:
             frame = _anonymize_faces_dnn(
                 frame,
@@ -176,6 +190,7 @@ def prepare_video(
                 blur_strength=31,
                 conf_threshold=0.5,
             )
+
 
         resized = _letterbox_resize(frame, target_size=model_input_size)
 
@@ -209,6 +224,14 @@ def prepare_video(
     cap.release()
     preprocess_time_sec = time.perf_counter() - start_time
 
+    early_stop = False
+    if num_raw_frames > 0 and raw_read_frames < int(0.9 * num_raw_frames):
+        early_stop = True
+        print(
+            f"[prepare_video] Warning: read only {raw_read_frames}/{num_raw_frames} frames "
+            f"for {video_path} (~{100.0 * raw_read_frames / max(1, num_raw_frames):.1f}%)."
+        )
+
     video_meta = VideoMeta(
         video_id=video_id,
         original_path=video_path,
@@ -222,12 +245,15 @@ def prepare_video(
         frames=frames,
         extra={
             "frame_stats": {
+                "source_fps": source_fps,
                 "num_raw_frames": num_raw_frames,
+                "raw_read_frames": raw_read_frames,
                 "num_sampled_frames": num_sampled_frames,
                 "num_saved_frames": num_saved_frames,
                 "num_dark_skipped": num_dark_skipped,
                 "num_lazy_skipped": num_lazy_skipped,
                 "num_scene_cuts": num_scene_cuts,
+                "early_stop": early_stop,
             },
             "sampling": {"step_frames": int(step_frames)},
             "adaptive_threshold": float(adaptive_threshold),
@@ -301,7 +327,14 @@ def _get_video_info(video_path: str) -> Dict[str, float]:
 
     fps = cap.get(cv2.CAP_PROP_FPS)
     total_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
-    duration = total_frames / fps if fps > 0 else 0.0
+
+    # если FPS кривой, даём разумный фоллбек для оценки длительности
+    if fps <= 0 or fps > 240:
+        fps_for_duration = 25.0 if total_frames > 0 else 0.0
+    else:
+        fps_for_duration = fps
+
+    duration = total_frames / fps_for_duration if fps_for_duration > 0 else 0.0
     cap.release()
 
     return {

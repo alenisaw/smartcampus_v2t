@@ -160,142 +160,96 @@ def build_global_summary_prompt(
 
     if lang == "ru":
         header.append(
-            "Ты — аналитик системы видеонаблюдения университета. Ниже приведены описания фрагментов одного видео."
+            "Ты — аналитик системы видеонаблюдения университета. Ниже приведены краткие описания фрагментов одного видео."
         )
         header.append(
-            "На их основе составь обобщённое описание всего видео. Используй только факты из описаний, "
-            "не выдумывай новые объекты, людей, игры или события."
+            "Составь итоговое обобщённое описание всего видео, используя ТОЛЬКО факты из этих фрагментов. "
+            "Не добавляй новых людей, объектов, действий или интерпретаций. Если что-то не указано явно — считай, что этого нет."
         )
         header.append(
-            "Ответ должен быть на русском языке и строго состоять из следующих пунктов "
-            "(каждый пункт 1–2 предложения, без угловых скобок):"
+            "Ответ должен быть строго в следующей структуре (каждый пункт 1–2 предложения, без угловых скобок):"
+        )
+
+        header.append(
+            "Краткое описание: одно короткое предложение, отражающее общий смысл видео."
         )
         header.append(
-            "Краткое описание: общее содержание всего видео одним коротким предложением."
+            "Основное действие в видео: что происходит в целом, какие ключевые движения или взаимодействия видны."
         )
+
         header.append(
-            "Основное действие в видео: какие ключевые действия происходят в целом, что в основном делают люди "
-            "или главный участник."
+            "Аналитические параметры сцены (строго по пунктам, очень коротко):\n"
+            "- Тип сцены: 1–3 слова (например: коридор, улица, открытая площадка, помещение). Если определить нельзя — 'неизвестно'.\n"
+            "- Плотность людей: выбери одно — нет людей / низкая / средняя / высокая.\n"
+            "- Тип движения: одно слово — нет / слабое / стабильное / усиливающееся / хаотичное.\n"
+            "- Аномалии: 1–4 слова, только если они явно представлены в фрагментах (например: бег, толкотня, агрессия). "
+            "Если ничего необычного не описано — 'нет'.\n"
+            "- Класс безопасности: строго одно слово — норма / подозрительно / опасно."
         )
-        header.append(
-            "Участники: кто участвует в видео (один человек, небольшая группа, толпа), примерное количество людей "
-            "и роли, но только если роли однозначно видны по изображению."
-        )
-        header.append(
-            "Контекст: где происходит действие (улица, коридор, холл, аудитория, транспорт и т.п.), какие объекты "
-            "или элементы интерфейса заметны, есть ли понятное время суток; если контекст определить нельзя, так и напиши."
-        )
-        header.append(
-            "Аналитические параметры сцены: оцени тип сцены (коридор, холл, улица, помещение и т.п.), "
-            "плотность людей (низкая / средняя / высокая), динамику движения "
-            "(движение слабое / стабильное / усиливающееся / хаотичное) и наличие аномалий "
-            "(нет / есть, и очень кратко — каких именно, если они однозначно видны: бег, толкотня, резкие ускорения, "
-            "агрессивные действия, оставленные предметы, пересечение запрещённой зоны, длительное стояние без движения и др.). "
-            "Заверши оценкой общей ситуации: спокойная / нейтральная / напряжённая / потенциально опасная."
-        )
-        header.append(
-            "Класс безопасности сцены: оцени уровень безопасности одним словом — строго выбери ОДНО значение "
-            "из списка: норма / подозрительно / опасно. Никаких других формулировок не используй."
-        )
-        header.append(
-            f"\nВидео: {video_id}, примерная длительность — около {int(duration_sec)} секунд.\n"
-        )
-        header.append("Описания фрагментов:")
+
+        header.append(f"\nВидео: {video_id}, длительность ~{int(duration_sec)} секунд.\n")
+        header.append("Фрагменты:")
 
     elif lang == "kz":
         header.append(
-            "Сен университеттің бейнебақылау аналитигісің. Төменде бір бейненің бірнеше фрагментінің сипаттамалары берілген."
+            "Сен университеттің бейнебақылау аналитигісің. Төменде бір бейненің бірнеше фрагментінің сипаттамасы берілген."
         )
         header.append(
-            "Сол сипаттамаларға сүйене отырып, бүкіл бейненің жалпы мазмұнын сипатта. Жаңа объектілерді немесе адамдарды ойдан қоспа."
+            "Осы сипаттамаларға сүйене отырып, бейненің нақты және қысқа қорытындысын жаса. "
+            "Жаңа адамдарды, объектілерді немесе оқиғаларды ойдан қоспа."
         )
         header.append(
-            "Жауап қазақ тілінде болсын және келесі тармақтардан тұрсын "
-            "(әр тармақ 1–2 сөйлем, бұрыштық жақшаларсыз):"
+            "Жауап құрылымы (әр тармақ 1–2 сөйлем, бұрыштық жақшаларсыз):"
         )
+
+        header.append("Қысқаша сипаттама: бейненің жалпы мәнін бір сөйлеммен бер.")
+        header.append("Негізгі әрекет: бейнеде жалпы не болып жатыр.")
+
         header.append(
-            "Қысқаша сипаттама: бейненің жалпы мәнін бір қысқа сөйлеммен бер."
+            "Көріністің аналитикалық параметрлері (қысқа формат):\n"
+            "- Сахна түрі: 1–3 сөз (мысалы: дәліз, көше, ашық алаң). Белгісіз болса — 'анық емес'.\n"
+            "- Адамдар тығыздығы: жоқ / төмен / орташа / жоғары.\n"
+            "- Қозғалыс түрі: жоқ / әлсіз / тұрақты / күшейіп жатыр / хаотикалық.\n"
+            "- Аномалиялар: 1–4 сөз. Егер көрінбесе — 'жоқ'.\n"
+            "- Қауіп классы: норма / күмәнді / қауіпті."
         )
-        header.append(
-            "Бейнедегі негізгі әрекет: бейнеде жалпы қандай негізгі әрекеттер болып жатыр."
-        )
-        header.append(
-            "Қатысушылар: бейнеде кімдер бар (бір адам, шағын топ, көп адам), шамамен қанша адам және "
-            "егер айқын көрінсе, қандай рөлдерде."
-        )
-        header.append(
-            "Контекст: әрекет қай жерде болып жатыр (көше, дәліз, холл, аудитория, көлік және т.б.), "
-            "қандай объектілер немесе интерфейс элементтері көрінеді, тәулік уақыты анық па; "
-            "егер контекст анықталмаса, соны жаз."
-        )
-        header.append(
-            "Көріністің аналитикалық параметрлері: көрініс типін сипатта (мысалы, дәліз, холл, көше, ғимарат іші), "
-            "адамдар тығыздығын бағала (төмен / орташа / жоғары), қозғалыс динамикасын көрсет "
-            "(қозғалыс әлсіз / тұрақты / күшейіп жатыр / хаотикалық) және аномалиялардың бар-жоғын жаз "
-            "(жоқ / бар, егер айқын көрінсе, қысқа түрде мысалы: жүгіру, итеріс, күрт жеделдеу, агрессивті әрекеттер, "
-            "тастап кеткен заттар, шектелген аймаққа өту, ұзақ уақыт қозғалмай тұру және т.б.). "
-            "Соңында жалпы жағдайды бағала: тыныш / бейтарап / шиеленісті / әлеуетті қауіпті."
-        )
-        header.append(
-            "Көріністің қауіпсіздік класы: қауіп деңгейін бір сөзбен бағала. Төмендегі нұсқалардың бірін ғана таңда: "
-            "норма / күмәнді / қауіпті. Басқа сөздер қолданба."
-        )
-        header.append(
-            f"\nБейне: {video_id}, шамамен ұзақтығы — {int(duration_sec)} секунд.\n"
-        )
-        header.append("Фрагмент сипаттамалары:")
+
+        header.append(f"\nБейне: {video_id}, ұзақтығы ~{int(duration_sec)} секунд.\n")
+        header.append("Фрагменттер:")
 
     else:
         header.append(
-            "You are a university CCTV analyst. Below are descriptions of several segments of the same video."
+            "You are a university CCTV analyst. Below are several segment descriptions of the same video."
         )
         header.append(
-            "Based on them, produce a global description of the whole video. Use only information from the segments; "
-            "do not invent new objects, people or events."
+            "Write a concise global summary using ONLY factual information. Do not add unseen people, objects, or events."
         )
         header.append(
-            "Answer in English and strictly follow this structure "
-            "(1–2 sentences per item, no angle brackets):"
+            "Structure (1–2 sentences per item, no angle brackets):"
         )
-        header.append(
-            "Short summary: one short sentence with the overall content of the video."
-        )
-        header.append(
-            "Main action in the video: what key actions are happening overall, what people or the main subject mostly do."
-        )
-        header.append(
-            "Participants: who appears in the video (single person, small group, crowd), approximate number of people "
-            "and roles, but only if roles are clearly visible."
-        )
-        header.append(
-            "Context: where the scene takes place (street, corridor, hall, classroom, vehicle, etc.), "
-            "what objects or interface elements are visible, and whether the time of day is clear; "
-            "if the context cannot be determined, say so."
-        )
-        header.append(
-            "Scene analytics: briefly describe the scene type (e.g. corridor, hall, street, indoor), "
-            "people density (low / medium / high), motion dynamics "
-            "(weak / stable / increasing / chaotic), and anomaly presence "
-            "(none / present, and very briefly what kind: running, pushing, sudden acceleration, aggressive actions, "
-            "abandoned objects, crossing restricted area, long-standing without movement, etc.). "
-            "Finish with an overall situation assessment: calm / neutral / tense / potentially risky."
-        )
-        header.append(
-            "Scene risk class: assign a single-word safety label using exactly ONE of these values: "
-            "normal / suspicious / dangerous. Do not use any other wording."
-        )
-        header.append(
-            f"\nVideo: {video_id}, approximate duration — about {int(duration_sec)} seconds.\n"
-        )
-        header.append("Segment descriptions:")
 
-    body: List[str] = []
-    for ann in merged_anns:
-        body.append(
-            f"- [{format_ts(ann.start_sec)} - {format_ts(ann.end_sec)}] {ann.description}"
+        header.append("Short summary: one sentence describing the whole video.")
+        header.append("Main action: what is happening in general.")
+
+        header.append(
+            "Scene analytics (strict short format):\n"
+            "- Scene type: 1–3 words.\n"
+            "- People density: none / low / medium / high.\n"
+            "- Motion type: none / weak / stable / increasing / chaotic.\n"
+            "- Anomalies: 1–4 words, or 'none'.\n"
+            "- Risk class: normal / suspicious / dangerous."
         )
+
+        header.append(f"\nVideo: {video_id}, duration ~{int(duration_sec)} seconds.\n")
+        header.append("Segments:")
+
+    body = [
+        f"- [{format_ts(ann.start_sec)} - {format_ts(ann.end_sec)}] {ann.description}"
+        for ann in merged_anns
+    ]
 
     return "\n".join(header + [""] + body)
+
 
 
 
