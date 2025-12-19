@@ -4,7 +4,7 @@
 Simple shared data structures used across the project.
 
 These dataclasses define:
-- how preprocessed videos are represented (frames, clips, meta)
+- how preprocessed videos are represented (frames, meta)
 - how model outputs are stored (caption segments)
 - how annotations/search hits look for RAG/search
 - how runtime metrics are tracked for each run
@@ -28,7 +28,6 @@ class FrameInfo:
 @dataclass
 class Clip:
     video_id: str
-    clip_index: int
     start_sec: float
     end_sec: float
     frames: List[FrameInfo] = field(default_factory=list)
@@ -39,31 +38,25 @@ class Clip:
 class VideoMeta:
     video_id: str
 
-
     original_path: Path
     original_fps: float
     duration_sec: float
 
-
     processed_fps: float
     num_frames: int
-
 
     prepared_dir: Path
     frame_dir: Path
     small_frame_dir: Optional[Path] = None
-
 
     frames: List[FrameInfo] = field(default_factory=list)
 
     extra: Optional[Dict[str, Any]] = None
 
 
-
 @dataclass
 class CaptionSegment:
     video_id: str
-    clip_index: int
     start_sec: float
     end_sec: float
     text: str
@@ -74,11 +67,11 @@ class CaptionSegment:
 
 @dataclass
 class Annotation:
+
     video_id: str
     start_sec: float
     end_sec: float
     description: str
-    clip_index: Optional[int] = None
     extra: Optional[Dict[str, Any]] = None
 
 
@@ -91,7 +84,6 @@ class SearchHit:
     description: str
     source_id: Optional[str] = None
     extra: Optional[Dict[str, Any]] = None
-
 
 
 @dataclass

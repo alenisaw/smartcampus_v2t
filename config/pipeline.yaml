@@ -11,7 +11,7 @@ paths:
 
 video:
   target_fps: 3.0
-  model_input_size: [448, 448]
+  model_input_size: [320, 320]
   min_change_threshold: 0.03
   dark_threshold: 30.0
   save_small_frames: false
@@ -24,15 +24,15 @@ clips:
   window_sec: 4.0
   stride_sec: 2.0
   min_clip_frames: 2
-  max_clip_frames: 32
+  max_clip_frames: 16
 
 model:
   model_name_or_path: models/qwen3_vl_2b_instruct
   device: cuda
   dtype: fp16
-  language: ru
+  language: kz
   batch_size: 2
-  max_new_tokens: 256
+  max_new_tokens: 192
   temperature: 0.1
   top_p: 0.9
   repetition_penalty: 1.05
