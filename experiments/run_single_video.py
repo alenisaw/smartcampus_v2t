@@ -87,9 +87,9 @@ def build_clips_from_video_meta(
             clips.append(paths)
             clip_timestamps.append((float(t), last_ts))
 
-        t += stride_sec
         if stride_sec <= 0:
             break
+        t += stride_sec
 
     return clips, clip_timestamps
 
@@ -104,14 +104,10 @@ def format_time_mmss(t: float) -> str:
 
 
 def _prepare_run_dir(root: Path, video_id: str) -> Path:
-
     base_dir = root / video_id
     base_dir.mkdir(parents=True, exist_ok=True)
 
-    existing = [
-        p for p in base_dir.iterdir()
-        if p.is_dir() and p.name.startswith("run_")
-    ]
+    existing = [p for p in base_dir.iterdir() if p.is_dir() and p.name.startswith("run_")]
     if existing:
         nums: List[int] = []
         for p in existing:
@@ -147,9 +143,7 @@ def run_single_video(
     video_meta: VideoMeta = preprocess_video(video_path, cfg)
 
     duration_sec = float(video_meta.duration_sec)
-    preprocess_time_sec = float(
-        (video_meta.extra or {}).get("preprocess_time_sec", 0.0)
-    )
+    preprocess_time_sec = float((video_meta.extra or {}).get("preprocess_time_sec", 0.0))
 
     print(f"Duration:   {duration_sec:.2f} sec")
     print(f"Frames:     {video_meta.num_frames}")
@@ -164,10 +158,10 @@ def run_single_video(
         max_clip_frames=cfg.clips.max_clip_frames,
     )
 
-    print(f"Clips built: {len(clips)}")
+    print(f"Segments built: {len(clips)}")
 
     if not clips:
-        print("❌ No clips built. Check clip config or preprocessing.")
+        print("❌ No segments built. Check clip config or preprocessing.")
         metrics = RunMetrics(
             video_id=video_id,
             video_duration_sec=duration_sec,
@@ -200,7 +194,7 @@ def run_single_video(
         print("\n=== GLOBAL SUMMARY ===")
         print(global_summary)
 
-    print("\n=== SEMANTIC OUTPUT (first 5 clips) ===")
+    print("\n=== SEMANTIC OUTPUT (first 5 segments) ===")
     if not annotations:
         print("❌ No annotations returned.")
     else:
@@ -208,10 +202,7 @@ def run_single_video(
         for a in annotations[:5]:
             start_str = format_time_mmss(a.start_sec)
             end_str = format_time_mmss(a.end_sec)
-            print(
-                f"[clip {a.clip_index:03d}] "
-                f"[{start_str} - {end_str}]\n{a.description}\n"
-            )
+            print(f"[{start_str} - {end_str}] {a.description}\n")
 
     print("\n=== TIMING METRICS (sec) ===")
     print(f"preprocess:  {metrics.preprocess_time_sec:.3f}")
@@ -226,7 +217,6 @@ def run_single_video(
         ann_dicts = [
             {
                 "video_id": a.video_id,
-                "clip_index": a.clip_index,
                 "start_sec": a.start_sec,
                 "end_sec": a.end_sec,
                 "description": a.description,
