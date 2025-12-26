@@ -89,6 +89,7 @@ class SearchHit:
 @dataclass
 class RunMetrics:
     video_id: str
+    language: str = "unknown"
 
     video_duration_sec: float = 0.0
     num_frames: int = 0
@@ -100,4 +101,4 @@ class RunMetrics:
     postprocess_time_sec: float = 0.0
     total_time_sec: float = 0.0
 
-    extra: Optional[Dict[str, Any]] = None
+    extra: Dict[str, Any] = field(default_factory=dict)

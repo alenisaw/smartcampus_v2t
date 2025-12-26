@@ -32,11 +32,11 @@ model:
   dtype: fp16
   language: kz
   batch_size: 2
-  max_new_tokens: 192
-  temperature: 0.1
+  max_new_tokens: 128
+  temperature: 0.3
   top_p: 0.9
-  repetition_penalty: 1.05
-  do_sample: false
+  repetition_penalty: 1.1
+  do_sample: true
   timeout_sec: 60
 
 runtime:
