@@ -1,0 +1,505 @@
+/* app/assets/styles.css */
+
+:root{
+  --bg0:#070b16;
+  --bg1:#0a1021;
+  --card0: rgba(255,255,255,0.045);
+  --card1: rgba(255,255,255,0.028);
+  --stroke: rgba(255,255,255,0.10);
+  --stroke2: rgba(255,255,255,0.14);
+  --text:#eaf0ff;
+  --muted: rgba(234,240,255,0.70);
+
+  --open-bg: #f3f6ff;     /* open: white-ish */
+  --open-fg: #0b1220;
+
+  --run-bg: #6f7cff;      /* brighter light purple */
+  --run-bg2:#5666ff;
+
+  --del-bg: #ff4b55;
+  --del-bg2:#e63946;
+}
+
+html, body, [data-testid="stAppViewContainer"]{
+  background:
+    radial-gradient(1200px 700px at 18% 16%, rgba(120,140,255,0.18) 0%, rgba(120,140,255,0.0) 55%),
+    radial-gradient(900px 600px at 78% 22%, rgba(255,100,120,0.14) 0%, rgba(255,100,120,0.0) 55%),
+    radial-gradient(1100px 900px at 40% 90%, rgba(90,190,255,0.08) 0%, rgba(90,190,255,0.0) 55%),
+    linear-gradient(180deg, var(--bg0) 0%, var(--bg1) 100%) !important;
+  color: var(--text);
+}
+
+/* make content wider */
+.block-container{
+  max-width: 1680px;
+  padding-top: 1.15rem;
+  padding-bottom: 2.2rem;
+}
+
+/* hide default Streamlit chrome a bit */
+header[data-testid="stHeader"]{
+  background: transparent;
+}
+#MainMenu { visibility: hidden; }
+footer { visibility: hidden; }
+
+.anchor{ height: 1px; }
+
+.thin-rule{
+  height: 1px;
+  background: rgba(255,255,255,0.10);
+  margin: 18px 0;
+}
+
+.page-rule{
+  height: 1px;
+  background: rgba(255,255,255,0.10);
+  margin: 10px 0 18px 0;
+}
+
+.page-head{
+  display:flex;
+  align-items: baseline;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+
+.page-title-text{
+  font-size: 54px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+.subnav{
+  display:flex;
+  align-items:center;
+  gap: 10px;
+  font-size: 16px;
+  color: var(--muted);
+}
+
+.subnav-link{
+  color: var(--muted);
+  text-decoration: none;
+  padding-bottom: 3px;
+  border-bottom: 1px solid rgba(255,255,255,0.12);
+}
+.subnav-link:hover{
+  color: var(--text);
+  border-bottom-color: rgba(255,255,255,0.35);
+}
+.subnav-dot{
+  margin: 0 6px;
+  color: rgba(255,255,255,0.20);
+}
+
+/* UI language wrapper */
+.ui-lang-wrap{
+  display:flex;
+  justify-content:flex-end;
+  align-items:center;
+  width:100%;
+}
+
+/* Hero */
+.hero{
+  margin-top: 6px;
+  margin-bottom: 18px;
+  border-radius: 26px;
+  padding: 26px 20px 22px 20px;
+  background: linear-gradient(180deg, rgba(255,255,255,0.06) 0%, rgba(255,255,255,0.03) 100%);
+  border: 1px solid rgba(255,255,255,0.10);
+  box-shadow: 0 18px 60px rgba(0,0,0,0.38);
+  text-align:center;
+}
+
+.hero-logo{
+  display:flex;
+  justify-content:center;
+  margin-bottom: 8px;
+}
+.hero-logo img{
+  width: 44px;
+  height: auto;
+  opacity: 0.95;
+}
+
+.hero-title{
+  font-size: 64px;
+  font-weight: 900;
+  letter-spacing: -0.03em;
+  margin: 6px 0 6px 0;
+}
+
+.hero-sub{
+  color: rgba(234,240,255,0.72);
+  font-size: 16px;
+  margin-bottom: 10px;
+}
+
+.hero-flow{
+  color: rgba(234,240,255,0.58);
+  font-size: 14px;
+  margin-bottom: 16px;
+}
+
+.nav-wrap{
+  display:flex;
+  justify-content:center;
+}
+
+.nav-row{
+  display:flex;
+  gap: 14px;
+}
+
+.nav-link{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  padding: 10px 18px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.14);
+  background: rgba(255,255,255,0.03);
+  color: rgba(234,240,255,0.86);
+  text-decoration:none;
+  font-weight: 650;
+}
+.nav-link:hover{
+  border-color: rgba(255,255,255,0.25);
+  background: rgba(255,255,255,0.055);
+  color: var(--text);
+}
+.nav-link.active{
+  border-color: rgba(255,255,255,0.30);
+  background: rgba(255,255,255,0.08);
+  color: var(--text);
+}
+
+/* Small titles */
+.mini-title{
+  font-size: 18px;
+  font-weight: 750;
+  margin-bottom: 8px;
+  color: rgba(234,240,255,0.92);
+}
+
+.selected-caption{
+  margin-top: -6px;
+  margin-bottom: 10px;
+  color: rgba(234,240,255,0.75);
+}
+
+/* Cards */
+.video-card{
+  background: linear-gradient(180deg, var(--card0) 0%, var(--card1) 100%);
+  border: 1px solid rgba(255,255,255,0.10);
+  border-radius: 18px;
+  padding: 10px 10px 12px 10px;
+}
+
+.video-card img{
+  border-radius: 14px !important;
+  border: 1px solid rgba(255,255,255,0.10);
+}
+
+.thumb-empty{
+  height: 108px;
+  border-radius: 14px;
+  border: 1px dashed rgba(255,255,255,0.12);
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  color: rgba(234,240,255,0.55);
+}
+
+.video-card-title{
+  margin-top: 10px;
+  font-weight: 800;
+  font-size: 16px;
+}
+
+.video-card-sub{
+  margin-top: 2px;
+  color: rgba(234,240,255,0.60);
+  font-size: 12px;
+}
+
+/* Carousel meta */
+.carousel-meta{
+  text-align:center;
+  color: rgba(234,240,255,0.55);
+  font-size: 14px;
+}
+
+/* Soft notes */
+.soft-note, .soft-warn, .soft-ok{
+  border-radius: 16px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255,255,255,0.10);
+  background: rgba(255,255,255,0.04);
+  color: rgba(234,240,255,0.80);
+}
+.soft-warn{
+  border-color: rgba(255,180,60,0.35);
+  background: rgba(255,180,60,0.08);
+}
+.soft-ok{
+  border-color: rgba(100,255,170,0.22);
+  background: rgba(100,255,170,0.06);
+}
+
+/* Metrics row under run selection */
+.metrics-row{
+  display:flex;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  margin: 6px 0 12px 0;
+  color: rgba(234,240,255,0.78);
+}
+.metric{
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.10);
+  background: rgba(255,255,255,0.03);
+  font-size: 13px;
+}
+
+/* BUTTON THEMES (works for st.button inside wrappers) */
+.btn-open .stButton > button,
+.btn-run  .stButton > button,
+.btn-del  .stButton > button{
+  border-radius: 14px !important;
+  border: 1px solid rgba(255,255,255,0.10) !important;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+  padding: 10px 12px !important;
+  font-weight: 800 !important;
+  letter-spacing: 0.01em;
+}
+
+/* smaller buttons (upload / carousel nav etc.) */
+.btn-small .stButton > button{
+  padding: 8px 10px !important;
+  border-radius: 12px !important;
+  font-size: 14px !important;
+}
+
+.icon-only .stButton > button{
+  padding: 10px 0 !important;
+  font-size: 18px !important;
+  line-height: 1 !important;
+}
+.icon-only.btn-small .stButton > button{
+  padding: 8px 0 !important;
+  font-size: 16px !important;
+}
+
+/* Open: white background, dark icon/text */
+.btn-open .stButton > button{
+  background: var(--open-bg) !important;
+  color: var(--open-fg) !important;
+  border-color: rgba(255,255,255,0.30) !important;
+}
+.btn-open .stButton > button:hover{
+  filter: brightness(1.03);
+}
+
+/* Ghost style for nav-like buttons */
+.btn-ghost .stButton > button{
+  background: rgba(255,255,255,0.03) !important;
+  color: rgba(234,240,255,0.78) !important;
+  border-color: rgba(255,255,255,0.12) !important;
+  box-shadow: none;
+}
+.btn-ghost .stButton > button:hover{
+  background: rgba(255,255,255,0.06) !important;
+  border-color: rgba(255,255,255,0.20) !important;
+  color: var(--text) !important;
+}
+
+/* Run: purple gradient, white icon/text */
+.btn-run .stButton > button{
+  background: linear-gradient(180deg, var(--run-bg) 0%, var(--run-bg2) 100%) !important;
+  color: #ffffff !important;
+  border-color: rgba(160,170,255,0.55) !important;
+}
+.btn-run .stButton > button:hover{
+  filter: brightness(1.04);
+}
+
+/* Delete: red gradient, white icon/text */
+.btn-del .stButton > button{
+  background: linear-gradient(180deg, var(--del-bg) 0%, var(--del-bg2) 100%) !important;
+  color: #ffffff !important;
+  border-color: rgba(255,120,135,0.60) !important;
+}
+.btn-del .stButton > button:hover{
+  filter: brightness(1.04);
+}
+
+/* Main run button slightly taller */
+.btn-main .stButton > button{
+  padding: 12px 14px !important;
+  font-size: 16px !important;
+  border-radius: 16px !important;
+}
+
+/* Improve inputs */
+[data-testid="stTextInput"] input,
+[data-testid="stSelectbox"] div[role="combobox"],
+[data-testid="stNumberInput"] input{
+  border-radius: 14px !important;
+  border-color: rgba(255,255,255,0.12) !important;
+  background: rgba(255,255,255,0.03) !important;
+  color: rgba(234,240,255,0.90) !important;
+}
+
+[data-testid="stFileUploaderDropzone"]{
+  border-radius: 18px !important;
+  border-color: rgba(255,255,255,0.12) !important;
+  background: rgba(255,255,255,0.03) !important;
+}
+
+/* container borders (Streamlit border=True) */
+[data-testid="stVerticalBlockBorderWrapper"]{
+  border-radius: 22px !important;
+  border-color: rgba(255,255,255,0.10) !important;
+  background: rgba(255,255,255,0.02) !important;
+}
+
+/* ====== UI refinements (sections / pills / links) ====== */
+
+/* keep links as plain text inside capsules */
+.hero a, .hero a:visited,
+.section-nav a, .section-nav a:visited,
+a.nav-link, a.nav-link:visited{
+  text-decoration: none !important;
+  color: inherit !important;
+}
+
+/* Page section navigation near page title */
+.section-nav{
+  display:flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 10px;
+  margin-bottom: 12px;
+}
+.sec-link{
+  display:inline-flex;
+  align-items:center;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.14);
+  background: rgba(255,255,255,0.03);
+  color: rgba(234,240,255,0.92);
+  text-decoration: none !important;
+  font-weight: 650;
+  font-size: 14px;
+}
+.sec-link:hover{
+  border-color: rgba(255,255,255,0.26);
+  background: rgba(255,255,255,0.06);
+  color: var(--text);
+}
+
+/* UI language row (label left of selectbox) */
+.ui-lang-row{
+  display:flex;
+  align-items:center;
+  justify-content:flex-end;
+  gap: 12px;
+  width:100%;
+}
+.ui-lang-label{
+  color: rgba(234,240,255,0.70);
+  font-size: 14px;
+  white-space: nowrap;
+}
+
+/* Field labels above selectboxes */
+.field-label{
+  color: rgba(234,240,255,0.70);
+  font-size: 14px;
+  font-weight: 650;
+  margin: 0 0 6px 2px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+/* Stronger section containers (slightly brighter than page background) */
+[data-testid="stVerticalBlockBorderWrapper"]{
+  border-radius: 22px !important;
+  border-color: rgba(255,255,255,0.10) !important;
+  background: linear-gradient(180deg, rgba(255,255,255,0.055) 0%, rgba(255,255,255,0.028) 100%) !important;
+  box-shadow: 0 16px 50px rgba(0,0,0,0.34);
+}
+
+/* Section titles INSIDE containers */
+.section-title{
+  font-size: 22px;
+  font-weight: 850;
+  margin-bottom: 12px;
+  color: rgba(234,240,255,0.94);
+}
+.inner-title{
+  font-size: 20px;
+  font-weight: 850;
+  margin-bottom: 8px;
+  color: rgba(234,240,255,0.93);
+}
+
+/* Pills (for run metrics etc.) */
+.pill-row{
+  display:flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 8px 0 12px 0;
+}
+.pill{
+  display:inline-flex;
+  align-items:center;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.12);
+  background: rgba(255,255,255,0.03);
+  color: rgba(234,240,255,0.86);
+  font-size: 13px;
+}
+
+.video-mini{
+  width: 100%;
+  height: 120px;              /* <- делай 90-140 как надо */
+  border-radius: 12px;
+  border: 1px solid rgba(255,255,255,0.10);
+  background: rgba(0,0,0,0.25);
+  object-fit: cover;
+  display:block;
+}
+
+/* Slightly larger hero logo */
+.hero-logo img{
+  width: 56px;
+}
+
+/* Smaller carousel cards */
+.video-card-compact{
+  padding: 8px 8px 10px 8px;
+  border-radius: 16px;
+}
+.video-card-compact img{
+  border-radius: 12px !important;
+}
+.thumb-empty{
+  height: 72px;
+  border-radius: 12px;
+}
+
+/* Thumbnail inside video cards (stable size, no Streamlit image quirks) */
+.thumb-img{
+  width: 100%;
+  height: auto;
+  display: block;
+  border-radius: 12px;
+  border: 1px solid rgba(255,255,255,0.10);
+}
