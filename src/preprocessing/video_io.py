@@ -8,11 +8,13 @@ Features:
 - adaptive motion threshold based on real scene dynamics
 - frame sampling and dark-frame filtering with optional CLAHE brighten
 - detection and skipping of near-identical (lazy) frames
-- DNN-based face anonymization
+- DNN-based face anonymization (optimized: detect faces not every frame + reuse boxes)
 - letterbox resize for stable aspect ratio
 - run-versioned output directories and metadata saving
+- cache: reuse prepared runs if video+config fingerprints match (skip re-processing)
 """
 
+import hashlib
 import json
 import time
 from dataclasses import asdict
@@ -26,6 +28,15 @@ from src.core.types import VideoMeta, FrameInfo
 from src.pipeline.pipeline_config import PipelineConfig
 
 SMALL_SIZE: Tuple[int, int] = (64, 64)
+
+
+JPEG_QUALITY_FRAMES = 82
+JPEG_QUALITY_SMALL = 75
+
+FACE_DETECT_EVERY_SAVED = 6
+FACE_DETECT_FORCE_ON_SCENECUT = True
+FACE_BLUR_STRENGTH = 31
+FACE_CONF_THRESHOLD = 0.5
 
 
 def preprocess_video(video_path: str | Path, config: PipelineConfig) -> VideoMeta:
@@ -47,6 +58,28 @@ def prepare_video(
     video_path = video_path.resolve()
     if not video_path.exists():
         raise FileNotFoundError(f"Video not found: {video_path}")
+
+
+    video_fp = _file_fingerprint(video_path)
+    cfg_fp = _config_fingerprint(config)
+
+    cache_hit = _try_load_cached_video_meta(
+        prepared_base=paths_cfg.prepared_dir,
+        video_id=video_id,
+        video_fp=video_fp,
+        cfg_fp=cfg_fp,
+    )
+    if cache_hit is not None:
+
+        try:
+            if cache_hit.extra is None:
+                cache_hit.extra = {}
+            cache_hit.extra.setdefault("cache", {})
+            cache_hit.extra["cache"]["hit"] = True
+        except Exception:
+            pass
+        return cache_hit
+
 
     prepared_root, frames_dir, small_dir = _ensure_prepared_dirs(
         video_id=video_id,
@@ -77,6 +110,7 @@ def prepare_video(
 
     target_fps = float(video_cfg.target_fps)
     step_frames = max(1, int(round(fps / target_fps))) if target_fps > 0 else 1
+
 
     if video_cfg.face_blur:
         face_detector = _load_face_detector_dnn(
@@ -111,8 +145,14 @@ def prepare_video(
 
     warmup_diffs: List[float] = []
     warmup_done = False
-
     adaptive_threshold = base_threshold * 0.5
+
+
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+
+
+    last_face_boxes: List[Tuple[int, int, int, int]] = []
+    last_face_detect_saved_idx = -10_000
 
     while True:
         ok, frame = cap.read()
@@ -121,7 +161,7 @@ def prepare_video(
 
         raw_read_frames += 1
 
-        # подвыборка по FPS
+
         if frame_idx % step_frames != 0:
             frame_idx += 1
             continue
@@ -137,14 +177,13 @@ def prepare_video(
             num_dark_skipped += 1
             mean_brightness = float(np.mean(small_gray))
 
+
             if mean_brightness < dark_threshold * 0.4:
                 frame_idx += 1
                 continue
 
-
             lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
             l, a, b = cv2.split(lab)
-            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
             l = clahe.apply(l)
             lab = cv2.merge((l, a, b))
             frame = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
@@ -152,9 +191,7 @@ def prepare_video(
 
         if not warmup_done:
             if prev_small_kept is not None:
-                warmup_diffs.append(
-                    _compute_frame_change_cpu(prev_small_kept, small_gray)
-                )
+                warmup_diffs.append(_compute_frame_change_cpu(prev_small_kept, small_gray))
             prev_small_kept = small_gray
 
             if len(warmup_diffs) >= 8:
@@ -168,40 +205,47 @@ def prepare_video(
             frame_idx += 1
             continue
 
-
         lazy_ok = True
+        is_scene_cut = False
         if prev_small_kept is not None:
             diff = _compute_frame_change_cpu(prev_small_kept, small_gray)
             if diff < adaptive_threshold:
                 lazy_ok = False
             if diff > adaptive_threshold * 8.0:
                 num_scene_cuts += 1
+                is_scene_cut = True
 
         if not lazy_ok:
             num_lazy_skipped += 1
             frame_idx += 1
             continue
 
-
         if face_detector is not None:
-            frame = _anonymize_faces_dnn(
-                frame,
-                face_detector,
-                blur_strength=31,
-                conf_threshold=0.5,
-            )
+            need_detect = (num_saved_frames - last_face_detect_saved_idx) >= FACE_DETECT_EVERY_SAVED
+            if FACE_DETECT_FORCE_ON_SCENECUT and is_scene_cut:
+                need_detect = True
+
+            if need_detect:
+                try:
+                    last_face_boxes = _detect_faces_dnn(face_detector, frame, conf_threshold=FACE_CONF_THRESHOLD)
+                    last_face_detect_saved_idx = num_saved_frames
+                except Exception:
+                    last_face_boxes = []
+
+            if last_face_boxes:
+                frame = _blur_boxes(frame, last_face_boxes, blur_strength=FACE_BLUR_STRENGTH)
 
 
         resized = _letterbox_resize(frame, target_size=model_input_size)
 
         frame_name = f"frame_{frame_idx:06d}.jpg"
         frame_path = frames_dir / frame_name
-        _save_frame(resized, frame_path)
+        _save_frame(resized, frame_path, quality=JPEG_QUALITY_FRAMES)
 
         small_path: Optional[Path] = None
         if small_dir is not None:
             small_path = small_dir / frame_name
-            _save_small_frame(small_gray, small_path)
+            _save_small_frame(small_gray, small_path, quality=JPEG_QUALITY_SMALL)
 
         frames.append(
             FrameInfo(
@@ -259,12 +303,114 @@ def prepare_video(
             "adaptive_threshold": float(adaptive_threshold),
             "preprocess_time_sec": float(preprocess_time_sec),
             "face_detector_type": face_detector_type,
+            "cache": {
+                "hit": False,
+                "video_fingerprint": video_fp,
+                "config_fingerprint": cfg_fp,
+            },
         },
     )
 
     _write_meta_json(video_meta)
     return video_meta
 
+
+def _file_fingerprint(p: Path) -> str:
+    st = p.stat()
+    return f"{st.st_size}:{st.st_mtime_ns}"
+
+
+def _config_fingerprint(config: PipelineConfig) -> str:
+
+    try:
+        v = config.video
+        paths = config.paths
+
+        payload = {
+            "target_fps": getattr(v, "target_fps", None),
+            "min_change_threshold": getattr(v, "min_change_threshold", None),
+            "dark_threshold": getattr(v, "dark_threshold", None),
+            "max_frames": getattr(v, "max_frames", None),
+            "model_input_size": tuple(getattr(v, "model_input_size", ())),
+            "save_small_frames": bool(getattr(v, "save_small_frames", False)),
+            "face_blur": bool(getattr(v, "face_blur", False)),
+            # if face blur is enabled, model paths matter
+            "dnn_face_proto": str(getattr(paths, "dnn_face_proto", "")),
+            "dnn_face_model": str(getattr(paths, "dnn_face_model", "")),
+            # prepared output location affects cache scan; include for safety
+            "prepared_dir": str(getattr(paths, "prepared_dir", "")),
+        }
+    except Exception:
+        payload = {"fallback": True}
+
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    return hashlib.sha1(raw).hexdigest()[:16]
+
+
+def _try_load_cached_video_meta(
+    prepared_base: Path,
+    video_id: str,
+    video_fp: str,
+    cfg_fp: str,
+) -> Optional[VideoMeta]:
+
+    base_root = Path(prepared_base) / video_id
+    if not base_root.exists():
+        return None
+
+    run_dirs = sorted([p for p in base_root.iterdir() if p.is_dir() and p.name.startswith("run_")], reverse=True)
+    for rd in run_dirs:
+        meta_path = rd / "meta.json"
+        if not meta_path.exists():
+            continue
+        try:
+            meta_obj = json.loads(meta_path.read_text(encoding="utf-8"))
+            extra = meta_obj.get("extra") or {}
+            cache = extra.get("cache") or {}
+            if cache.get("video_fingerprint") == video_fp and cache.get("config_fingerprint") == cfg_fp:
+                vm = _video_meta_from_json_obj(meta_obj)
+                return vm
+        except Exception:
+            continue
+    return None
+
+
+def _video_meta_from_json_obj(obj: Dict[str, Any]) -> VideoMeta:
+    def P(x: Any) -> Optional[Path]:
+        if x is None:
+            return None
+        try:
+            return Path(x)
+        except Exception:
+            return None
+
+    frames_list: List[FrameInfo] = []
+    for i, fr in enumerate(obj.get("frames") or []):
+        if not isinstance(fr, dict):
+            continue
+        frames_list.append(
+            FrameInfo(
+                video_id=str(fr.get("video_id") or obj.get("video_id") or ""),
+                frame_index=int(fr.get("frame_index", i)),
+                timestamp_sec=float(fr.get("timestamp_sec", 0.0)),
+                path=P(fr.get("path")) or Path(""),
+                small_path=P(fr.get("small_path")),
+            )
+        )
+
+    return VideoMeta(
+        video_id=str(obj.get("video_id") or ""),
+        original_path=P(obj.get("original_path")) or Path(""),
+        original_fps=float(obj.get("original_fps", 0.0)),
+        duration_sec=float(obj.get("duration_sec", 0.0)),
+        processed_fps=float(obj.get("processed_fps", 0.0)),
+        num_frames=int(obj.get("num_frames", len(frames_list))),
+        prepared_dir=P(obj.get("prepared_dir")) or Path(""),
+        frame_dir=P(obj.get("frame_dir")) or Path(""),
+        small_frame_dir=P(obj.get("small_frame_dir")),
+        frames=frames_list,
+        extra=obj.get("extra") or {},
+    )
 
 def _ensure_prepared_dirs(
     video_id: str,
@@ -274,10 +420,7 @@ def _ensure_prepared_dirs(
     base_root = prepared_base / video_id
     base_root.mkdir(parents=True, exist_ok=True)
 
-    existing = [
-        p for p in base_root.iterdir()
-        if p.is_dir() and p.name.startswith("run_")
-    ]
+    existing = [p for p in base_root.iterdir() if p.is_dir() and p.name.startswith("run_")]
     if existing:
         nums: List[int] = []
         for p in existing:
@@ -289,7 +432,6 @@ def _ensure_prepared_dirs(
         next_id = 1
 
     prepared_root = base_root / f"run_{next_id:03d}"
-
     frames_dir = prepared_root / "frames"
     small_dir = prepared_root / "small" if save_small else None
 
@@ -328,7 +470,7 @@ def _get_video_info(video_path: str) -> Dict[str, float]:
     fps = cap.get(cv2.CAP_PROP_FPS)
     total_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
 
-    # если FPS кривой, даём разумный фоллбек для оценки длительности
+
     if fps <= 0 or fps > 240:
         fps_for_duration = 25.0 if total_frames > 0 else 0.0
     else:
@@ -350,13 +492,13 @@ def _downscale_for_analysis(frame: np.ndarray) -> np.ndarray:
 
 
 def _compute_frame_change_cpu(prev_small: np.ndarray, curr_small: np.ndarray) -> float:
-    prev_f = prev_small.astype(np.float32)
-    curr_f = curr_small.astype(np.float32)
-    return float(np.mean(np.abs(prev_f - curr_f)) / 255.0)
+    diff = cv2.absdiff(prev_small, curr_small)  # uint8
+    return float(diff.mean()) / 255.0
 
 
 def _is_dark_frame(small_gray_frame: np.ndarray, brightness_threshold: float) -> bool:
     return float(np.mean(small_gray_frame)) < brightness_threshold
+
 
 
 def _load_face_detector_dnn(proto_path: Path, model_path: Path):
@@ -369,7 +511,7 @@ def _load_face_detector_dnn(proto_path: Path, model_path: Path):
     return cv2.dnn.readNetFromCaffe(str(proto_path), str(model_path))
 
 
-def _detect_faces_dnn(net, frame: np.ndarray, conf_threshold: float = 0.5):
+def _detect_faces_dnn(net, frame: np.ndarray, conf_threshold: float = 0.5) -> List[Tuple[int, int, int, int]]:
     h, w = frame.shape[:2]
     blob = cv2.dnn.blobFromImage(
         frame,
@@ -379,7 +521,7 @@ def _detect_faces_dnn(net, frame: np.ndarray, conf_threshold: float = 0.5):
     )
     net.setInput(blob)
     detections = net.forward()
-    boxes = []
+    boxes: List[Tuple[int, int, int, int]] = []
 
     for i in range(detections.shape[2]):
         confidence = float(detections[0, 0, i, 2])
@@ -397,14 +539,8 @@ def _detect_faces_dnn(net, frame: np.ndarray, conf_threshold: float = 0.5):
     return boxes
 
 
-def _anonymize_faces_dnn(
-    frame: np.ndarray,
-    net,
-    blur_strength: int = 31,
-    conf_threshold: float = 0.5,
-) -> np.ndarray:
+def _blur_boxes(frame: np.ndarray, boxes: List[Tuple[int, int, int, int]], blur_strength: int = 31) -> np.ndarray:
     anon = frame.copy()
-    boxes = _detect_faces_dnn(net, anon, conf_threshold)
     if blur_strength % 2 == 0:
         blur_strength += 1
     if blur_strength < 3:
@@ -418,7 +554,6 @@ def _anonymize_faces_dnn(
                 (blur_strength, blur_strength),
                 0,
             )
-
     return anon
 
 
@@ -436,11 +571,13 @@ def _letterbox_resize(frame: np.ndarray, target_size: Tuple[int, int]) -> np.nda
     return result
 
 
-def _save_frame(frame: np.ndarray, out_path: Path) -> None:
+def _save_frame(frame: np.ndarray, out_path: Path, quality: int = JPEG_QUALITY_FRAMES) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(out_path), frame)
+    params = [int(cv2.IMWRITE_JPEG_QUALITY), int(quality)]
+    cv2.imwrite(str(out_path), frame, params)
 
 
-def _save_small_frame(small_frame: np.ndarray, out_path: Path) -> None:
+def _save_small_frame(small_frame: np.ndarray, out_path: Path, quality: int = JPEG_QUALITY_SMALL) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(out_path), small_frame)
+    params = [int(cv2.IMWRITE_JPEG_QUALITY), int(quality)]
+    cv2.imwrite(str(out_path), small_frame, params)

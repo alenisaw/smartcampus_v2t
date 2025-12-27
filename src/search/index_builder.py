@@ -1,5 +1,10 @@
 # search/index_builder.py
 
+"""
+Fast hybrid index builder for SmartCampus V2T.
+Supports incremental index updates, BM25 + E5 embeddings, and efficient storage.
+"""
+
 import hashlib
 import json
 import math
@@ -45,7 +50,6 @@ def _guess_run_id_from_path(p: Path) -> str:
 
 
 def _guess_video_id_from_path(p: Path) -> str:
-    # .../annotations/<video_id>/run_003/annotations.json
     try:
         return p.parents[1].name
     except Exception:
@@ -53,13 +57,11 @@ def _guess_video_id_from_path(p: Path) -> str:
 
 
 def _file_fingerprint(p: Path) -> str:
-
     st = p.stat()
     return f"{st.st_size}:{st.st_mtime_ns}"
 
 
 def _stable_doc_id(video_id: str, run_id: str, i: int, start: float, end: float, text: str) -> str:
-
     base = f"{video_id}|{run_id}|{i}|{start:.3f}|{end:.3f}|{text}"
     h = hashlib.sha1(base.encode("utf-8")).hexdigest()[:16]
     return f"{video_id}/{run_id}/seg_{i:04d}_{h}"
@@ -126,12 +128,6 @@ class BM25Index:
 
 
 class E5Embedder:
-    """
-    E5 expects role prefixes for best retrieval quality:
-      - query: ...
-      - passage: ...
-    """
-
     def __init__(self, model_name: str = MODEL_NAME_DEFAULT, device: Optional[str] = None):
         try:
             from sentence_transformers import SentenceTransformer  # type: ignore
@@ -156,7 +152,7 @@ class E5Embedder:
             [self.prep_passage(t) for t in texts],
             batch_size=batch_size,
             normalize_embeddings=True,
-            show_progress_bar=True,
+            show_progress_bar=False,
         )
 
     def encode_query(self, text: str):
@@ -168,7 +164,7 @@ class HybridIndex:
     docs: List[Doc]
     doc_ids: List[str]
     bm25: BM25Index
-    embeddings  : Any  # numpy ndarray
+    embeddings: Any
     meta: Dict[str, Any]
 
 
@@ -179,7 +175,7 @@ def _load_manifest(index_dir: Path) -> Dict[str, Any]:
             "version": 1,
             "model_name": MODEL_NAME_DEFAULT,
             "bm25": {"k1": 1.6, "b": 0.75},
-            "sources": {},  # path -> {fingerprint, video_id, run_id, num_docs}
+            "sources": {},
         }
     return _read_json(p)
 
@@ -188,7 +184,17 @@ def _save_manifest(index_dir: Path, manifest: Dict[str, Any]) -> None:
     _write_json(index_dir / "manifest.json", manifest)
 
 
+def _corpus_pkl_path(index_dir: Path) -> Path:
+    return index_dir / "corpus.pkl"
+
+
 def _load_corpus(index_dir: Path) -> Dict[str, Doc]:
+    pkl = _corpus_pkl_path(index_dir)
+    if pkl.exists():
+        obj = pickle.loads(pkl.read_bytes())
+        if isinstance(obj, dict):
+            return obj
+        return {}
 
     corpus_path = index_dir / "corpus.jsonl"
     if not corpus_path.exists():
@@ -210,31 +216,42 @@ def _load_corpus(index_dir: Path) -> Dict[str, Doc]:
             source_path=obj.get("source_path"),
         )
         out[d.doc_id] = d
+
+    try:
+        pkl.write_bytes(pickle.dumps(out))
+    except Exception:
+        pass
+
     return out
 
 
 def _save_corpus(index_dir: Path, docs_by_id: Dict[str, Doc]) -> None:
-    corpus_path = index_dir / "corpus.jsonl"
-    corpus_path.parent.mkdir(parents=True, exist_ok=True)
-    lines: List[str] = []
-    for doc_id in sorted(docs_by_id.keys()):
-        d = docs_by_id[doc_id]
-        lines.append(
-            json.dumps(
-                {
-                    "doc_id": d.doc_id,
-                    "video_id": d.video_id,
-                    "run_id": d.run_id,
-                    "start_sec": d.start_sec,
-                    "end_sec": d.end_sec,
-                    "text": d.text,
-                    "extra": d.extra,
-                    "source_path": d.source_path,
-                },
-                ensure_ascii=False,
-            )
-        )
-    corpus_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+    pkl = _corpus_pkl_path(index_dir)
+    pkl.parent.mkdir(parents=True, exist_ok=True)
+    pkl.write_bytes(pickle.dumps(docs_by_id))
+
+
+def _load_prev_embeddings(index_dir: Path) -> Tuple[List[str], Optional[Any]]:
+    doc_ids_path = index_dir / "doc_ids.json"
+    emb_path = index_dir / "embeddings.npy"
+    if not doc_ids_path.exists() or not emb_path.exists():
+        return [], None
+
+    try:
+        import numpy as np
+    except Exception:
+        return [], None
+
+    try:
+        old_doc_ids = _read_json(doc_ids_path)
+        old_emb = np.load(emb_path)
+        if not isinstance(old_doc_ids, list):
+            return [], None
+        if int(old_emb.shape[0]) != len(old_doc_ids):
+            return [], None
+        return [str(x) for x in old_doc_ids], old_emb
+    except Exception:
+        return [], None
 
 
 def build_or_update_index(
@@ -246,20 +263,26 @@ def build_or_update_index(
     bm25_b: float = 0.75,
     batch_size: int = 64,
 ) -> Path:
-
     index_dir = Path(index_dir)
     index_dir.mkdir(parents=True, exist_ok=True)
 
     manifest = _load_manifest(index_dir)
 
+    old_bm25 = (manifest.get("bm25") or {})
+    bm25_changed = (float(old_bm25.get("k1", 1.6)) != float(bm25_k1)) or (float(old_bm25.get("b", 0.75)) != float(bm25_b))
 
-    if manifest.get("model_name") != model_name:
+    model_changed = manifest.get("model_name") != model_name
+    if model_changed:
         manifest["model_name"] = model_name
         manifest["sources"] = {}
+        docs_by_id: Dict[str, Doc] = {}
+        old_doc_ids: List[str] = []
+        old_emb = None
+    else:
+        docs_by_id = _load_corpus(index_dir)
+        old_doc_ids, old_emb = _load_prev_embeddings(index_dir)
 
     manifest["bm25"] = {"k1": float(bm25_k1), "b": float(bm25_b)}
-
-    docs_by_id = _load_corpus(index_dir)
 
     files = _iter_annotation_files(Path(ann_root))
     if not files:
@@ -271,18 +294,16 @@ def build_or_update_index(
         f = f.resolve()
         f_key = str(f)
         fp = _file_fingerprint(f)
-        prev = manifest["sources"].get(f_key)
+        prev = (manifest.get("sources") or {}).get(f_key)
 
         if prev and prev.get("fingerprint") == fp:
-            continue  # unchanged
-
+            continue
 
         run_id = _guess_run_id_from_path(f)
         video_id = _guess_video_id_from_path(f)
         data = _read_json(f)
         if not isinstance(data, list):
             continue
-
 
         if prev and prev.get("doc_ids"):
             for old_id in prev["doc_ids"]:
@@ -312,6 +333,7 @@ def build_or_update_index(
                 source_path=f_key,
             )
 
+        manifest.setdefault("sources", {})
         manifest["sources"][f_key] = {
             "fingerprint": fp,
             "video_id": video_id,
@@ -321,41 +343,63 @@ def build_or_update_index(
         }
         changed_any = True
 
-    if not changed_any:
+    if not changed_any and not bm25_changed and not model_changed:
         _save_manifest(index_dir, manifest)
         return index_dir / "manifest.json"
 
-
     _save_corpus(index_dir, docs_by_id)
 
-
     docs = [docs_by_id[k] for k in sorted(docs_by_id.keys())]
+    doc_ids = [d.doc_id for d in docs]
     texts = [d.text for d in docs]
-    tokenized = [_tokenize(t) for t in texts]
 
-    bm25 = BM25Index(tokenized, k1=bm25_k1, b=bm25_b)
-
-    embedder = E5Embedder(model_name=model_name, device=device)
-    embeddings = embedder.encode_passages(texts, batch_size=batch_size)
-
-
-    (index_dir / "bm25.pkl").write_bytes(pickle.dumps(bm25))
-    _write_json(index_dir / "doc_ids.json", [d.doc_id for d in docs])
-
+    if changed_any or bm25_changed or model_changed:
+        tokenized = [_tokenize(t) for t in texts]
+        bm25 = BM25Index(tokenized, k1=bm25_k1, b=bm25_b)
+        (index_dir / "bm25.pkl").write_bytes(pickle.dumps(bm25))
 
     try:
         import numpy as np
     except Exception as e:
         raise RuntimeError("Install numpy to store embeddings: pip install -U numpy") from e
-    np.save(index_dir / "embeddings.npy", np.asarray(embeddings, dtype=np.float32))
 
+    need_full_reembed = model_changed or (old_emb is None) or (len(old_doc_ids) == 0)
+    if need_full_reembed:
+        embedder = E5Embedder(model_name=model_name, device=device)
+        emb = embedder.encode_passages(texts, batch_size=batch_size)
+        emb_arr = np.asarray(emb, dtype=np.float32)
+    else:
+        old_pos = {doc_id: i for i, doc_id in enumerate(old_doc_ids)}
+        missing = [doc_id for doc_id in doc_ids if doc_id not in old_pos]
+        if missing:
+            embedder = E5Embedder(model_name=model_name, device=device)
+            new_emb = embedder.encode_passages([docs_by_id[d].text for d in missing], batch_size=batch_size)
+            new_arr = np.asarray(new_emb, dtype=np.float32)
+            new_map = {d: v for d, v in zip(missing, new_arr)}
+        else:
+            new_map = {}
+
+        rows: List[Any] = []
+        for d in doc_ids:
+            if d in old_pos:
+                rows.append(old_emb[old_pos[d]])
+            else:
+                rows.append(new_map[d])
+
+        if rows:
+            emb_arr = np.stack(rows, axis=0).astype(np.float32)
+        else:
+            emb_arr = np.zeros((0, int(old_emb.shape[1])), dtype=np.float32)
+
+    _write_json(index_dir / "doc_ids.json", doc_ids)
+    np.save(index_dir / "embeddings.npy", emb_arr)
 
     meta = {
         "model_name": model_name,
         "num_docs": len(docs),
         "bm25": {"k1": float(bm25_k1), "b": float(bm25_b)},
-        "embed_dim": int(np.asarray(embeddings).shape[1]) if len(docs) else 0,
-        "note": "Docs are tied to specific runs (run_id). Incremental updates are per annotations.json fingerprint.",
+        "embed_dim": int(emb_arr.shape[1]) if int(emb_arr.shape[0]) else 0,
+        "note": "Docs are tied to specific runs (run_id). Incremental updates are per annotations.json fingerprint. Embeddings are updated incrementally by doc_id.",
     }
     _write_json(index_dir / "meta.json", meta)
     _save_manifest(index_dir, manifest)
