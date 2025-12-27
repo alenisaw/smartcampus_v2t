@@ -57,8 +57,5 @@ data/**/run_*/
 *.sqlite
 *.db
 
-models/**/.cache/
-models/**/*.safetensors
-models/**/*.bin
-models/**/*.pt
-models/**/*.pth
+models/
+data/thumbs
