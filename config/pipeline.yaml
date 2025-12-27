@@ -11,7 +11,7 @@ paths:
 
 video:
   target_fps: 3.0
-  model_input_size: [320, 320]
+  model_input_size: [256, 256]
   min_change_threshold: 0.03
   dark_threshold: 30.0
   save_small_frames: false
@@ -33,7 +33,7 @@ model:
   language: kz
   batch_size: 2
   max_new_tokens: 128
-  temperature: 0.3
+  temperature: 0.1
   top_p: 0.9
   repetition_penalty: 1.1
   do_sample: true
