@@ -57,5 +57,6 @@ data/**/run_*/
 *.sqlite
 *.db
 
-models/
+models/**
+!models/.gitkeep
 data/thumbs

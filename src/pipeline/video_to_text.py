@@ -207,7 +207,7 @@ def _pick_lines_starting(lines: List[str], prefix: str) -> Optional[str]:
 
 def _extract_after_prefix(line: str, prefix: str) -> str:
     if line.lower().startswith(prefix.lower()):
-        return line[len(prefix):].strip()
+        return line[len(prefix) :].strip()
     return line.strip()
 
 
@@ -299,7 +299,7 @@ def sanitize_global_summary(text: str, lang: str) -> str:
             continue
         for k, _d in keys:
             if l.lower().startswith(k.lower()):
-                found[k] = _collapse_spaces(l[len(k):].strip()) or _d
+                found[k] = _collapse_spaces(l[len(k) :].strip()) or _d
 
     def pick_density(v: str) -> str:
         vlow = (v or "").lower()
@@ -592,12 +592,5 @@ class VideoToTextPipeline:
 
     def run_for_ui(self, *args, **kwargs):
         annotations, metrics = self.run(*args, **kwargs)
-        rows = [
-            {
-                "start_sec": a.start_sec,
-                "end_sec": a.end_sec,
-                "description": a.description,
-            }
-            for a in annotations
-        ]
+        rows = [{"start_sec": a.start_sec, "end_sec": a.end_sec, "description": a.description} for a in annotations]
         return rows, metrics

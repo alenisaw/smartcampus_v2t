@@ -1,4 +1,5 @@
 # app/streamlit_app.py
+
 """
 SmartCampus V2T — Streamlit UI application.
 
@@ -8,7 +9,7 @@ Tabs:
 
 Notes:
 - No sidebar (all controls are in-page)
-- Streamlit UI is styled by app/assets/styles.css
+- Streamlit UI is styled by CSS from cfg.ui.styles_path
 - Timeline intervals are clickable: click a segment to seek the video player to that time
 """
 
@@ -21,6 +22,7 @@ import json
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -33,38 +35,41 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-DATA_DIR = PROJECT_ROOT / "data"
-RAW_DIR = DATA_DIR / "raw"
-ANN_DIR = DATA_DIR / "annotations"
-MET_DIR = DATA_DIR / "metrics"
-INDEX_DIR = DATA_DIR / "indexes"
-THUMB_DIR = DATA_DIR / "thumbs"
-
-APP_DIR = PROJECT_ROOT / "app"
-ASSETS_DIR = APP_DIR / "assets"
-LOGO_PATH = ASSETS_DIR / "logo.png"
-STYLES_PATH = ASSETS_DIR / "styles.css"
-UI_TEXT_PATH = ASSETS_DIR / "ui_text.json"
 CFG_PATH = PROJECT_ROOT / "config" / "pipeline.yaml"
 
-RAW_DIR.mkdir(parents=True, exist_ok=True)
-ANN_DIR.mkdir(parents=True, exist_ok=True)
-MET_DIR.mkdir(parents=True, exist_ok=True)
-INDEX_DIR.mkdir(parents=True, exist_ok=True)
-THUMB_DIR.mkdir(parents=True, exist_ok=True)
-
 from src.search import build_or_update_index, QueryEngine
-from src.utils.config import load_pipeline_config
+from src.utils.config_loader import load_pipeline_config
 from src.preprocessing.video_io import preprocess_video
 from src.pipeline.video_to_text import VideoToTextPipeline
 from src.core.types import VideoMeta, FrameInfo, Annotation, RunMetrics
 
-LANGS = ["ru", "kz", "en"]
 TAB_IDS = ["home", "search"]
 
 
 def E(s: Any) -> str:
     return html.escape("" if s is None else str(s), quote=True)
+
+
+def _mtime(p: Path) -> float:
+    try:
+        return float(p.stat().st_mtime)
+    except Exception:
+        return 0.0
+
+
+@st.cache_resource(show_spinner=False)
+def get_cfg_cached(cfg_path_str: str, cfg_mtime: float):
+    _ = cfg_mtime
+    return load_pipeline_config(Path(cfg_path_str))
+
+
+def get_cfg():
+    return get_cfg_cached(str(CFG_PATH), _mtime(CFG_PATH))
+
+
+def _cache_bucket(ttl_sec: int) -> int:
+    ttl = max(1, int(ttl_sec or 1))
+    return int(time.time()) // ttl
 
 
 def _get_qp(name: str, default: str) -> str:
@@ -76,27 +81,40 @@ def _get_qp(name: str, default: str) -> str:
         return qp.get(name, [default])[0]
 
 
+def _ensure_i18n_state() -> None:
+    if "_i18n_missing_set" not in st.session_state:
+        st.session_state._i18n_missing_set = set()
+    if "_i18n_missing_total" not in st.session_state:
+        st.session_state._i18n_missing_total = 0
+    if "_i18n_missing_by_lang" not in st.session_state:
+        st.session_state._i18n_missing_by_lang = {}
+
+
 def get_T(ui_text: Dict[str, Dict[str, Any]], lang: str) -> Dict[str, Any]:
     lang = (lang or "ru").strip().lower()
-    return ui_text.get(lang) or ui_text["ru"]
+    return ui_text.get(lang) or ui_text.get("ru") or {}
 
 
 def Tget(T: Dict[str, Any], key: str, fallback: str) -> str:
     v = T.get(key)
-    return fallback if v is None else str(v)
-
-
-def _mtime(p: Path) -> float:
-    try:
-        return float(p.stat().st_mtime)
-    except Exception:
-        return 0.0
+    if v is None:
+        _ensure_i18n_state()
+        lang = st.session_state.get("ui_lang", "ru")
+        miss = f"{lang}:{key}"
+        if miss not in st.session_state._i18n_missing_set:
+            st.session_state._i18n_missing_set.add(miss)
+            st.session_state._i18n_missing_total += 1
+            st.session_state._i18n_missing_by_lang[lang] = st.session_state._i18n_missing_by_lang.get(lang, 0) + 1
+        return fallback
+    return str(v)
 
 
 @st.cache_data(show_spinner=False)
-def load_ui_text(path_str: str, mtime: float) -> Dict[str, Dict[str, Any]]:
+def load_ui_text(path_str: str, mtime: float, langs_key: str) -> Dict[str, Dict[str, Any]]:
+    _ = mtime
     data = json.loads(Path(path_str).read_text(encoding="utf-8"))
-    for lang in LANGS:
+    langs = [s.strip().lower() for s in (langs_key or "").split(",") if s.strip()]
+    for lang in langs:
         if lang not in data:
             raise ValueError(f"ui_text.json missing language: {lang}")
         tabs = data[lang].get("tabs")
@@ -105,10 +123,10 @@ def load_ui_text(path_str: str, mtime: float) -> Dict[str, Dict[str, Any]]:
     return data
 
 
-def load_and_apply_css() -> None:
+def load_and_apply_css(styles_path: Path) -> None:
     css = ""
-    if STYLES_PATH.exists():
-        css = STYLES_PATH.read_text(encoding="utf-8")
+    if styles_path.exists():
+        css = styles_path.read_text(encoding="utf-8")
     if css.strip():
         st.markdown(f"<style>{css}</style>", unsafe_allow_html=True)
 
@@ -158,13 +176,13 @@ def _img_to_data_uri(p: Path) -> Optional[str]:
         return None
 
 
-def render_header(T: Dict[str, Any], labels: List[str], ids: List[str], current_tab: str) -> None:
+def render_header(T: Dict[str, Any], labels: List[str], ids: List[str], current_tab: str, logo_path: Path) -> None:
     links = []
     for lab, tid in zip(labels, ids):
         cls = "nav-link active" if tid == current_tab else "nav-link"
         links.append(f"<a class='{cls}' href='?tab={E(tid)}' target='_self'>{E(lab)}</a>")
 
-    logo = _img_to_data_uri(LOGO_PATH)
+    logo = _img_to_data_uri(logo_path)
     logo_html = ""
     if logo:
         logo_html = f"<div class='hero-logo'><img src='{logo}' alt='logo' /></div>"
@@ -191,11 +209,15 @@ def render_page_head(
     title: str,
     ui_text: Dict[str, Dict[str, Any]],
     section_links: Optional[List[Tuple[str, str]]] = None,
+    langs: Optional[List[str]] = None,
+    default_lang: str = "ru",
 ) -> Dict[str, Any]:
+    langs = langs or ["ru", "kz", "en"]
+
     if "ui_lang" not in st.session_state:
-        st.session_state.ui_lang = "ru"
-    if st.session_state.ui_lang not in LANGS:
-        st.session_state.ui_lang = "ru"
+        st.session_state.ui_lang = default_lang
+    if st.session_state.ui_lang not in langs:
+        st.session_state.ui_lang = default_lang
 
     T0 = get_T(ui_text, st.session_state.ui_lang)
 
@@ -220,8 +242,8 @@ def render_page_head(
         st.markdown(f"<div class='ui-lang-label'>{E(lab)}</div>", unsafe_allow_html=True)
         st.selectbox(
             lab,
-            options=LANGS,
-            index=LANGS.index(st.session_state.ui_lang),
+            options=langs,
+            index=langs.index(st.session_state.ui_lang),
             key="ui_lang",
             label_visibility="collapsed",
         )
@@ -230,217 +252,17 @@ def render_page_head(
     return get_T(ui_text, st.session_state.ui_lang)
 
 
-@st.cache_data(show_spinner=False, ttl=2)
-def list_raw_videos() -> Dict[str, str]:
+@st.cache_data(show_spinner=False)
+def list_raw_videos(raw_dir_str: str, bucket: int) -> Dict[str, str]:
+    _ = bucket
     out: Dict[str, str] = {}
-    if not RAW_DIR.exists():
+    raw_dir = Path(raw_dir_str)
+    if not raw_dir.exists():
         return out
-    for p in sorted(RAW_DIR.iterdir()):
+    for p in sorted(raw_dir.iterdir()):
         if p.is_file() and p.suffix.lower() in {".mp4", ".mov", ".mkv", ".avi"}:
             out[p.stem] = str(p)
     return out
-
-
-def list_runs_for_video(video_id: str) -> List[str]:
-    base = ANN_DIR / video_id
-    if not base.exists():
-        return []
-    runs: List[str] = []
-    for p in sorted(base.iterdir()):
-        if p.is_dir() and p.name.startswith("run_") and (p / "annotations.json").exists():
-            runs.append(p.name)
-    return runs
-
-
-@st.cache_data(show_spinner=False, ttl=2)
-def list_all_runs() -> Dict[str, List[str]]:
-    out: Dict[str, List[str]] = {}
-    if not ANN_DIR.exists():
-        return out
-    for vid_dir in sorted(ANN_DIR.iterdir()):
-        if not vid_dir.is_dir():
-            continue
-        runs = list_runs_for_video(vid_dir.name)
-        if runs:
-            out[vid_dir.name] = runs
-    return out
-
-
-def allocate_run_id(video_id: str) -> str:
-    base = ANN_DIR / video_id
-    base.mkdir(parents=True, exist_ok=True)
-    existing = [p for p in base.iterdir() if p.is_dir() and p.name.startswith("run_")]
-    nums: List[int] = []
-    for p in existing:
-        suf = p.name.replace("run_", "")
-        if suf.isdigit():
-            nums.append(int(suf))
-    next_id = (max(nums) + 1) if nums else 1
-    return f"run_{next_id:03d}"
-
-
-def annotation_to_dict(a: Any, fallback_index: int, video_id: Optional[str] = None) -> Dict[str, Any]:
-    if isinstance(a, dict):
-        d = dict(a)
-    elif is_dataclass(a):
-        d = asdict(a)
-    elif hasattr(a, "__dict__"):
-        d = dict(a.__dict__)
-    else:
-        d = {}
-
-    vid = d.get("video_id") or getattr(a, "video_id", None) or video_id
-
-    start = d.get("start_sec")
-    if start is None:
-        start = getattr(a, "start_sec", None)
-
-    end = d.get("end_sec")
-    if end is None:
-        end = getattr(a, "end_sec", None)
-
-    desc = d.get("description")
-    if desc is None:
-        desc = getattr(a, "description", "")
-
-    extra = d.get("extra")
-    if extra is None:
-        extra = getattr(a, "extra", None)
-    if extra is None:
-        extra = {}
-
-    clip_index = (
-        d.get("clip_index")
-        or d.get("clip_id")
-        or d.get("index")
-        or getattr(a, "clip_index", None)
-        or getattr(a, "clip_id", None)
-        or fallback_index
-    )
-
-    try:
-        clip_index_out = int(clip_index)
-    except Exception:
-        clip_index_out = clip_index
-
-    return {
-        "video_id": vid,
-        "clip_index": clip_index_out,
-        "start_sec": float(start or 0.0),
-        "end_sec": float(end or 0.0),
-        "description": str(desc),
-        "extra": extra,
-    }
-
-
-def save_run_outputs(
-    video_id: str,
-    run_id: str,
-    annotations: List[Annotation],
-    metrics: RunMetrics,
-    language: str,
-) -> Tuple[Path, Path]:
-    language = (language or "").strip().lower() or "unknown"
-
-    ann_run_dir = ANN_DIR / video_id / run_id
-    met_run_dir = MET_DIR / video_id / run_id
-    ann_run_dir.mkdir(parents=True, exist_ok=True)
-    met_run_dir.mkdir(parents=True, exist_ok=True)
-
-    ann_dicts = [annotation_to_dict(a, i, video_id=video_id) for i, a in enumerate(annotations)]
-
-    metrics_dict = dataclass_to_dict(metrics)
-    if not isinstance(metrics_dict, dict):
-        metrics_dict = {}
-
-    extra = metrics_dict.get("extra")
-    if not isinstance(extra, dict):
-        extra = {}
-    extra["language"] = extra.get("language") or language
-    metrics_dict["extra"] = extra
-
-    (ann_run_dir / "annotations.json").write_text(
-        json.dumps(ann_dicts, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    (met_run_dir / "metrics.json").write_text(
-        json.dumps(metrics_dict, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-
-    run_meta = {"video_id": video_id, "language": language}
-    (ann_run_dir / "run_meta.json").write_text(
-        json.dumps(run_meta, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-
-    return ann_run_dir, met_run_dir
-
-
-@st.cache_data(show_spinner=False)
-def _read_run_outputs_cached(
-    ann_path_str: str,
-    met_path_str: str,
-    meta_path_str: str,
-    ann_mtime: float,
-    met_mtime: float,
-    meta_mtime: float,
-    video_id: str,
-    run_id: str,
-) -> Dict[str, Any]:
-    ann_path = Path(ann_path_str)
-    met_path = Path(met_path_str)
-    meta_path = Path(meta_path_str)
-
-    out: Dict[str, Any] = {
-        "video_id": video_id,
-        "run_id": run_id,
-        "annotations": [],
-        "metrics": None,
-        "global_summary": None,
-        "language": None,
-    }
-
-    if meta_path.exists():
-        try:
-            out["language"] = json.loads(meta_path.read_text(encoding="utf-8")).get("language")
-        except Exception:
-            out["language"] = None
-
-    if ann_path.exists():
-        try:
-            out["annotations"] = json.loads(ann_path.read_text(encoding="utf-8"))
-        except Exception:
-            out["annotations"] = []
-
-    if met_path.exists():
-        try:
-            metrics = json.loads(met_path.read_text(encoding="utf-8"))
-            out["metrics"] = metrics
-            out["global_summary"] = (metrics.get("extra") or {}).get("global_summary")
-            if out["language"] is None:
-                out["language"] = (metrics.get("extra") or {}).get("language")
-        except Exception:
-            out["metrics"] = None
-
-    return out
-
-
-def read_run_outputs(video_id: str, run_id: str) -> Dict[str, Any]:
-    ann_path = ANN_DIR / video_id / run_id / "annotations.json"
-    met_path = MET_DIR / video_id / run_id / "metrics.json"
-    meta_path = ANN_DIR / video_id / run_id / "run_meta.json"
-
-    return _read_run_outputs_cached(
-        ann_path_str=str(ann_path),
-        met_path_str=str(met_path),
-        meta_path_str=str(meta_path),
-        ann_mtime=_mtime(ann_path),
-        met_mtime=_mtime(met_path),
-        meta_mtime=_mtime(meta_path),
-        video_id=video_id,
-        run_id=run_id,
-    )
 
 
 def ffmpeg_available() -> bool:
@@ -491,6 +313,7 @@ def maybe_playback_warning(path: Path, T: dict) -> None:
 
 @st.cache_data(show_spinner=False)
 def make_thumbnail_bytes(video_path_str: str, mtime: float, max_w: int = 520) -> Optional[bytes]:
+    _ = mtime
     p = Path(video_path_str)
     if not p.exists():
         return None
@@ -513,7 +336,8 @@ def make_thumbnail_bytes(video_path_str: str, mtime: float, max_w: int = 520) ->
 
 
 def _thumb_file_for_video(video_path: Path) -> Path:
-    return THUMB_DIR / f"{video_path.stem}.jpg"
+    cfg = get_cfg()
+    return cfg.paths.thumbs_dir / f"{video_path.stem}.jpg"
 
 
 def get_thumbnail(video_path: Path, max_w: int = 520) -> Optional[bytes]:
@@ -532,6 +356,345 @@ def get_thumbnail(video_path: Path, max_w: int = 520) -> Optional[bytes]:
         except Exception:
             pass
     return b
+
+
+def _runs_dir(cfg) -> Path:
+    p = getattr(cfg.paths, "runs_dir", None)
+    if p is not None:
+        return Path(p)
+    ann = getattr(cfg.paths, "annotations_dir", None)
+    if ann is not None:
+        return Path(ann)
+    return Path(cfg.paths.data_dir) / "runs"
+
+def to_jsonable(x):
+    from pathlib import Path
+    from dataclasses import is_dataclass, asdict
+
+    if isinstance(x, Path):
+        return str(x)
+    if is_dataclass(x):
+        return to_jsonable(asdict(x))
+    if isinstance(x, dict):
+        return {k: to_jsonable(v) for k, v in x.items()}
+    if isinstance(x, (list, tuple)):
+        return [to_jsonable(v) for v in x]
+    return x
+
+def _sha1_hex(payload: Any) -> str:
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    import hashlib
+
+    return hashlib.sha1(raw).hexdigest()
+
+
+def _best_effort_model_fingerprint(model_name_or_path: str) -> str:
+    p = Path(model_name_or_path)
+    if not p.exists():
+        return f"str:{model_name_or_path}"
+    try:
+        if p.is_file():
+            stt = p.stat()
+            return f"file:{p.name}:{stt.st_size}:{stt.st_mtime_ns}"
+        if p.is_dir():
+            cand = None
+            for name in ["config.json", "generation_config.json", "model.safetensors", "pytorch_model.bin"]:
+                if (p / name).exists():
+                    cand = p / name
+                    break
+            if cand is None:
+                stt = p.stat()
+                return f"dir:{p.name}:{stt.st_mtime_ns}"
+            stt = cand.stat()
+            return f"dirfile:{p.name}/{cand.name}:{stt.st_size}:{stt.st_mtime_ns}"
+    except Exception:
+        return f"str:{model_name_or_path}"
+    return f"str:{model_name_or_path}"
+
+
+def compute_inference_fingerprint(cfg) -> str:
+    m = cfg.model
+    c = cfg.clips
+    prompt_payload = {
+        "language": getattr(m, "language", None),
+        "model_name_or_path": getattr(m, "model_name_or_path", None) or getattr(m, "model_name", None),
+        "dtype": getattr(m, "dtype", None),
+        "device": getattr(m, "device", None),
+        "batch_size": getattr(m, "batch_size", None),
+        "max_new_tokens": getattr(m, "max_new_tokens", None),
+        "temperature": getattr(m, "temperature", None),
+        "top_p": getattr(m, "top_p", None),
+        "top_k": getattr(m, "top_k", None),
+        "repetition_penalty": getattr(m, "repetition_penalty", None),
+        "do_sample": getattr(m, "do_sample", None),
+        "window_sec": getattr(c, "window_sec", None),
+        "stride_sec": getattr(c, "stride_sec", None),
+        "min_clip_frames": getattr(c, "min_clip_frames", None),
+        "max_clip_frames": getattr(c, "max_clip_frames", None),
+    }
+    model_path = str(prompt_payload["model_name_or_path"] or "")
+    prompt_payload["model_fingerprint"] = _best_effort_model_fingerprint(model_path)
+    return _sha1_hex(prompt_payload)[:24]
+
+
+def find_cached_run(runs_root: Path, video_id: str, inference_fp: str) -> Optional[str]:
+    base = runs_root / video_id
+    if not base.exists():
+        return None
+    candidates = sorted([p for p in base.iterdir() if p.is_dir() and p.name.startswith("run_")], reverse=True)
+    for rd in candidates:
+        mf = rd / "run_manifest.json"
+        if not mf.exists():
+            continue
+        try:
+            obj = json.loads(mf.read_text(encoding="utf-8"))
+            if str(obj.get("inference_fingerprint", "")) == str(inference_fp):
+                return rd.name
+        except Exception:
+            continue
+    return None
+
+
+def list_runs_for_video(runs_root: Path, video_id: str) -> List[str]:
+    base = runs_root / video_id
+    if not base.exists():
+        return []
+    runs: List[str] = []
+    for p in sorted(base.iterdir()):
+        if p.is_dir() and p.name.startswith("run_") and (p / "run_manifest.json").exists():
+            runs.append(p.name)
+    return runs
+
+
+@st.cache_data(show_spinner=False)
+def list_all_runs(runs_root_str: str, bucket: int) -> Dict[str, List[str]]:
+    _ = bucket
+    out: Dict[str, List[str]] = {}
+    runs_root = Path(runs_root_str)
+    if not runs_root.exists():
+        return out
+    for vid_dir in sorted(runs_root.iterdir()):
+        if not vid_dir.is_dir():
+            continue
+        runs = list_runs_for_video(runs_root, vid_dir.name)
+        if runs:
+            out[vid_dir.name] = runs
+    return out
+
+
+def allocate_run_id(runs_root: Path, video_id: str) -> str:
+    base = runs_root / video_id
+    base.mkdir(parents=True, exist_ok=True)
+    existing = [p for p in base.iterdir() if p.is_dir() and p.name.startswith("run_")]
+    nums: List[int] = []
+    for p in existing:
+        suf = p.name.replace("run_", "")
+        if suf.isdigit():
+            nums.append(int(suf))
+    next_id = (max(nums) + 1) if nums else 1
+    return f"run_{next_id:03d}"
+
+
+def annotation_to_dict(a: Any, fallback_index: int, video_id: Optional[str] = None) -> Dict[str, Any]:
+    if isinstance(a, dict):
+        d = dict(a)
+    elif is_dataclass(a):
+        d = asdict(a)
+    elif hasattr(a, "__dict__"):
+        d = dict(a.__dict__)
+    else:
+        d = {}
+
+    vid = d.get("video_id") or getattr(a, "video_id", None) or video_id
+    start = d.get("start_sec")
+    if start is None:
+        start = getattr(a, "start_sec", None)
+    end = d.get("end_sec")
+    if end is None:
+        end = getattr(a, "end_sec", None)
+    desc = d.get("description")
+    if desc is None:
+        desc = getattr(a, "description", "")
+    extra = d.get("extra")
+    if extra is None:
+        extra = getattr(a, "extra", None)
+    if extra is None:
+        extra = {}
+
+    clip_index = (
+        d.get("clip_index")
+        or d.get("clip_id")
+        or d.get("index")
+        or getattr(a, "clip_index", None)
+        or getattr(a, "clip_id", None)
+        or fallback_index
+    )
+    try:
+        clip_index_out = int(clip_index)
+    except Exception:
+        clip_index_out = clip_index
+
+    return {
+        "video_id": vid,
+        "clip_index": clip_index_out,
+        "start_sec": float(start or 0.0),
+        "end_sec": float(end or 0.0),
+        "description": str(desc),
+        "extra": extra,
+    }
+
+
+def _safe_clear_dir(p: Path) -> None:
+    if not p.exists():
+        return
+    for child in p.iterdir():
+        try:
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                child.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def save_run_outputs(
+    runs_root: Path,
+    cfg,
+    video_id: str,
+    run_id: str,
+    annotations: List[Annotation],
+    metrics: RunMetrics,
+    language: str,
+    device: str,
+    inference_fp: str,
+    prepared_meta: Optional[VideoMeta],
+    force_overwrite: bool = False,
+) -> Path:
+    language = (language or "").strip().lower() or "unknown"
+    device = (device or "").strip().lower() or "unknown"
+
+    run_dir = runs_root / video_id / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    if force_overwrite:
+        _safe_clear_dir(run_dir)
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+    ann_dicts = [annotation_to_dict(a, i, video_id=video_id) for i, a in enumerate(annotations)]
+
+    metrics_dict = dataclass_to_dict(metrics)
+    if not isinstance(metrics_dict, dict):
+        metrics_dict = {}
+
+    extra = metrics_dict.get("extra")
+    if not isinstance(extra, dict):
+        extra = {}
+    extra["language"] = extra.get("language") or language
+    extra["device"] = extra.get("device") or device
+    extra["inference_fingerprint"] = extra.get("inference_fingerprint") or inference_fp
+    metrics_dict["extra"] = extra
+
+    cfg_dict = to_jsonable(cfg)
+
+    video_fp = None
+    video_cfg_fp = None
+    prepared_dir = None
+    if prepared_meta is not None:
+        try:
+            cache = (prepared_meta.extra or {}).get("cache") or {}
+            video_fp = cache.get("video_fingerprint")
+            video_cfg_fp = cache.get("video_cfg_fingerprint")
+            prepared_dir = str(prepared_meta.prepared_dir) if prepared_meta.prepared_dir else None
+        except Exception:
+            pass
+
+    manifest = {
+        "video_id": video_id,
+        "run_id": run_id,
+        "created_at_unix": int(time.time()),
+        "language": language,
+        "device": device,
+        "inference_fingerprint": inference_fp,
+        "prepared": {
+            "prepared_dir": prepared_dir,
+            "video_fingerprint": video_fp,
+            "video_cfg_fingerprint": video_cfg_fp,
+        },
+        "status": "ok",
+    }
+
+    (run_dir / "run_manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    (run_dir / "config.json").write_text(json.dumps(cfg_dict, indent=2, ensure_ascii=False), encoding="utf-8")
+    (run_dir / "annotations.json").write_text(json.dumps(ann_dicts, indent=2, ensure_ascii=False), encoding="utf-8")
+    (run_dir / "metrics.json").write_text(json.dumps(metrics_dict, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    return run_dir
+
+
+@st.cache_data(show_spinner=False)
+def _read_run_outputs_cached(
+    run_dir_str: str,
+    manifest_mtime: float,
+    ann_mtime: float,
+    met_mtime: float,
+) -> Dict[str, Any]:
+    _ = (manifest_mtime, ann_mtime, met_mtime)
+
+    run_dir = Path(run_dir_str)
+
+    out: Dict[str, Any] = {
+        "video_id": run_dir.parent.name if run_dir.parent else None,
+        "run_id": run_dir.name,
+        "annotations": [],
+        "metrics": None,
+        "global_summary": None,
+        "language": None,
+        "device": None,
+        "manifest": None,
+    }
+
+    mf = run_dir / "run_manifest.json"
+    if mf.exists():
+        try:
+            out["manifest"] = json.loads(mf.read_text(encoding="utf-8"))
+            out["language"] = (out["manifest"].get("language") or None)
+            out["device"] = (out["manifest"].get("device") or None)
+        except Exception:
+            out["manifest"] = None
+
+    ap = run_dir / "annotations.json"
+    if ap.exists():
+        try:
+            out["annotations"] = json.loads(ap.read_text(encoding="utf-8"))
+        except Exception:
+            out["annotations"] = []
+
+    mp = run_dir / "metrics.json"
+    if mp.exists():
+        try:
+            metrics = json.loads(mp.read_text(encoding="utf-8"))
+            out["metrics"] = metrics
+            out["global_summary"] = (metrics.get("extra") or {}).get("global_summary")
+            if out["language"] is None:
+                out["language"] = (metrics.get("extra") or {}).get("language")
+            if out["device"] is None:
+                out["device"] = (metrics.get("extra") or {}).get("device")
+        except Exception:
+            out["metrics"] = None
+
+    return out
+
+
+def read_run_outputs(runs_root: Path, video_id: str, run_id: str) -> Dict[str, Any]:
+    run_dir = runs_root / video_id / run_id
+    mf = run_dir / "run_manifest.json"
+    ap = run_dir / "annotations.json"
+    mp = run_dir / "metrics.json"
+    return _read_run_outputs_cached(
+        run_dir_str=str(run_dir),
+        manifest_mtime=_mtime(mf),
+        ann_mtime=_mtime(ap),
+        met_mtime=_mtime(mp),
+    )
 
 
 def build_clips_from_video_meta(
@@ -588,6 +751,7 @@ def build_clips_from_video_meta(
 
 @st.cache_resource(show_spinner=False)
 def _get_pipeline_cached(device: str, language: str, cfg_path_str: str, cfg_mtime: float):
+    _ = cfg_mtime
     cfg0 = load_pipeline_config(Path(cfg_path_str))
     cfg = copy.deepcopy(cfg0)
     cfg.model.device = device
@@ -595,13 +759,56 @@ def _get_pipeline_cached(device: str, language: str, cfg_path_str: str, cfg_mtim
     return cfg, VideoToTextPipeline(cfg)
 
 
-def run_pipeline_on_video(video_path: Path, device: str, language: str) -> Tuple[List[Annotation], RunMetrics]:
+def run_pipeline_on_video(
+    video_path: Path,
+    device: str,
+    language: str,
+    force_overwrite: bool = False,
+    overwrite_run_id: Optional[str] = None,
+) -> Tuple[str, List[Annotation], RunMetrics, bool]:
     cfg, pipeline = _get_pipeline_cached(
         device=device,
         language=language,
         cfg_path_str=str(CFG_PATH),
         cfg_mtime=_mtime(CFG_PATH),
     )
+
+    runs_root = _runs_dir(cfg)
+    runs_root.mkdir(parents=True, exist_ok=True)
+
+    inference_fp = compute_inference_fingerprint(cfg)
+
+    cached_run_id = None
+    if not force_overwrite:
+        cached_run_id = find_cached_run(runs_root, video_id=video_path.stem, inference_fp=inference_fp)
+
+    if cached_run_id is not None:
+        out = read_run_outputs(runs_root, video_path.stem, cached_run_id)
+        anns = out.get("annotations") or []
+        merged = [
+            Annotation(
+                video_id=str(a.get("video_id", video_path.stem)),
+                start_sec=float(a.get("start_sec", 0.0)),
+                end_sec=float(a.get("end_sec", 0.0)),
+                description=str(a.get("description", "")),
+                extra=a.get("extra"),
+            )
+            for a in anns
+        ]
+        met = out.get("metrics") or {}
+        metrics_obj = RunMetrics(
+            video_id=str(met.get("video_id", video_path.stem)),
+            video_duration_sec=float(met.get("video_duration_sec", 0.0)),
+            num_frames=int(met.get("num_frames", 0)),
+            num_clips=int(met.get("num_clips", 0)),
+            avg_clip_duration_sec=float(met.get("avg_clip_duration_sec", 0.0)),
+            preprocess_time_sec=float(met.get("preprocess_time_sec", 0.0)),
+            model_time_sec=float(met.get("model_time_sec", 0.0)),
+            postprocess_time_sec=float(met.get("postprocess_time_sec", 0.0)),
+            total_time_sec=float(met.get("total_time_sec", 0.0)),
+            extra=met.get("extra"),
+        )
+        return cached_run_id, merged, metrics_obj, True
 
     video_meta: VideoMeta = preprocess_video(video_path, cfg)
     duration_sec = float(video_meta.duration_sec)
@@ -623,61 +830,84 @@ def run_pipeline_on_video(video_path: Path, device: str, language: str) -> Tuple
         preprocess_time_sec=preprocess_time_sec,
     )
 
-    lang_norm = (language or "").strip().lower() or "unknown"
-    try:
-        extra = getattr(metrics, "extra", None) or {}
-        if not isinstance(extra, dict):
-            extra = {}
-        extra["language"] = extra.get("language") or lang_norm
-        setattr(metrics, "extra", extra)
-    except Exception:
-        pass
+    if overwrite_run_id and force_overwrite:
+        run_id = overwrite_run_id
+    else:
+        run_id = allocate_run_id(runs_root, video_meta.video_id)
 
-    return annotations, metrics
+    save_run_outputs(
+        runs_root=runs_root,
+        cfg=cfg,
+        video_id=video_meta.video_id,
+        run_id=run_id,
+        annotations=annotations,
+        metrics=metrics,
+        language=language,
+        device=device,
+        inference_fp=inference_fp,
+        prepared_meta=video_meta,
+        force_overwrite=bool(force_overwrite and overwrite_run_id),
+    )
+
+    return run_id, annotations, metrics, False
 
 
-def _index_version() -> float:
-    p1 = INDEX_DIR / "manifest.json"
-    p2 = INDEX_DIR / "meta.json"
+def _index_version(index_dir: Path) -> float:
+    p1 = index_dir / "manifest.json"
+    p2 = index_dir / "meta.json"
     return max(_mtime(p1), _mtime(p2), 0.0)
 
 
 def ensure_index(T: dict) -> bool:
-    before = _index_version()
+    cfg = get_cfg()
+    before = _index_version(cfg.paths.indexes_dir)
     try:
-        build_or_update_index(ann_root=ANN_DIR, index_dir=INDEX_DIR, model_name="intfloat/multilingual-e5-base")
-        after = _index_version()
+        build_or_update_index(
+            ann_root=_runs_dir(cfg),
+            index_dir=cfg.paths.indexes_dir,
+            model_name=cfg.search.embed_model_name,
+        )
+        after = _index_version(cfg.paths.indexes_dir)
         st.session_state.index_version = after
         if after != before and "qe" in st.session_state:
             del st.session_state["qe"]
         return True
-    except RuntimeError as e:
-        if "sentence-transformers" in str(e):
-            soft_note(Tget(T, "e5_missing", "Missing sentence-transformers"), kind="warn")
-        else:
-            soft_note(f"{Tget(T, 'index_build_failed', 'Index build failed')}: {e}", kind="warn")
-        return False
     except Exception as e:
         soft_note(f"{Tget(T, 'index_build_failed', 'Index build failed')}: {e}", kind="warn")
         return False
 
 
 def get_engine() -> Optional[QueryEngine]:
+    cfg = get_cfg()
     try:
-        cur_ver = _index_version()
+        cur_ver = _index_version(cfg.paths.indexes_dir)
         if "index_version" not in st.session_state:
             st.session_state.index_version = cur_ver
         if st.session_state.index_version != cur_ver and "qe" in st.session_state:
             del st.session_state["qe"]
             st.session_state.index_version = cur_ver
         if "qe" not in st.session_state:
-            st.session_state.qe = QueryEngine(index_dir=INDEX_DIR)
+            st.session_state.qe = QueryEngine(
+                index_dir=cfg.paths.indexes_dir,
+                w_bm25=cfg.search.w_bm25,
+                w_dense=cfg.search.w_dense,
+                candidate_k_sparse=cfg.search.candidate_k_sparse,
+                candidate_k_dense=cfg.search.candidate_k_dense,
+                fusion=cfg.search.fusion,
+                rrf_k=cfg.search.rrf_k,
+                dedupe_mode=cfg.search.dedupe_mode,
+                dedupe_tol_sec=cfg.search.dedupe_tol_sec,
+                dedupe_overlap_thr=cfg.search.dedupe_overlap_thr,
+                embed_model_name=cfg.search.embed_model_name,
+            )
         return st.session_state.qe
     except Exception:
         return None
 
 
-def _quick_upload_block(T: dict, key_prefix: str) -> None:
+def _quick_upload_block(T: dict, key_prefix: str, langs: List[str]) -> None:
+    cfg = get_cfg()
+
     st.markdown(f"<div class='mini-title'>{E(Tget(T, 'quick_upload', 'Quick upload'))}</div>", unsafe_allow_html=True)
 
     if "uploader_nonce" not in st.session_state:
@@ -694,7 +924,7 @@ def _quick_upload_block(T: dict, key_prefix: str) -> None:
         st.caption(Tget(T, "quick_upload_hint", "Drag & drop or browse a file. Then click “Save”."))
         return
 
-    target_path = RAW_DIR / uploaded.name
+    target_path = cfg.paths.raw_dir / uploaded.name
     st.caption(f"{Tget(T, 'target', 'Target')}: {target_path}")
 
     c1, c2 = st.columns([3, 2], gap="large", vertical_alignment="top")
@@ -702,8 +932,8 @@ def _quick_upload_block(T: dict, key_prefix: str) -> None:
         st.markdown(f"<div class='field-label'>{E(Tget(T, 'model_lang', 'Model output language'))}</div>", unsafe_allow_html=True)
         st.selectbox(
             Tget(T, "model_lang", "Model output language"),
-            LANGS,
-            index=LANGS.index(st.session_state.pipeline_lang),
+            langs,
+            index=langs.index(st.session_state.pipeline_lang),
             key="pipeline_lang",
             label_visibility="collapsed",
         )
@@ -732,10 +962,11 @@ def _quick_upload_block(T: dict, key_prefix: str) -> None:
 
 
 def _safe_delete_video(video_id: str, raw_videos: Dict[str, Path]) -> None:
+    cfg = get_cfg()
     p = raw_videos.get(video_id)
     if p is None:
         for ext in [".mp4", ".mov", ".mkv", ".avi"]:
-            cand = RAW_DIR / f"{video_id}{ext}"
+            cand = cfg.paths.raw_dir / f"{video_id}{ext}"
             if cand.exists():
                 p = cand
                 break
@@ -747,18 +978,14 @@ def _safe_delete_video(video_id: str, raw_videos: Dict[str, Path]) -> None:
         pass
 
     try:
-        tp = THUMB_DIR / f"{video_id}.jpg"
+        tp = cfg.paths.thumbs_dir / f"{video_id}.jpg"
         if tp.exists():
             tp.unlink()
     except Exception:
         pass
 
     try:
-        shutil.rmtree(ANN_DIR / video_id, ignore_errors=True)
-    except Exception:
-        pass
-    try:
-        shutil.rmtree(MET_DIR / video_id, ignore_errors=True)
+        shutil.rmtree(_runs_dir(cfg) / video_id, ignore_errors=True)
     except Exception:
         pass
 
@@ -839,8 +1066,7 @@ def _anchor(anchor_id: str) -> None:
 
 
 def _safe_dom_id(s: str) -> str:
-    # only keep characters that are safe for DOM ids
-    return "".join(ch for ch in (s or "") if ch.isalnum() or ch in {"_", "-"})
+    return "".join(ch for ch in (s or "") if ch.isalnum() or ch in {"_", "-"})  # keep '-' too
 
 
 def _request_scroll_to(anchor_id: str) -> None:
@@ -856,7 +1082,6 @@ def _scroll_if_requested() -> None:
     if not anchor_id:
         return
 
-    # Smooth scroll to the element (retry a few times until it exists in DOM)
     components.html(
         f"""
         <script>
@@ -886,7 +1111,6 @@ def _scroll_if_requested() -> None:
 def _seek_preview_to(video_id: str, start_sec: float) -> None:
     st.session_state.selected_video_id = video_id
     st.session_state.preview_seek_sec = int(max(0.0, float(start_sec)))
-    # ключевое: после rerun переносим к превью
     _request_scroll_to("sec_preview")
 
 
@@ -899,9 +1123,9 @@ def _render_video_player(video_path: Path, start_sec: int) -> None:
             st.caption(f"{int(start_sec)} sec")
 
 
-def home_section(raw_videos: Dict[str, Path], runs_map: Dict[str, List[str]], ui_text: Dict[str, Dict[str, Any]]) -> None:
+def home_section(raw_videos: Dict[str, Path], runs_map: Dict[str, List[str]], ui_text: Dict[str, Dict[str, Any]], langs: List[str]) -> None:
     if "pipeline_lang" not in st.session_state:
-        st.session_state.pipeline_lang = "ru"
+        st.session_state.pipeline_lang = langs[0] if langs else "ru"
     if "device" not in st.session_state:
         st.session_state.device = "cuda"
     if "carousel_page" not in st.session_state:
@@ -912,7 +1136,12 @@ def home_section(raw_videos: Dict[str, Path], runs_map: Dict[str, List[str]], ui
         st.session_state.run_request_video_id = None
     if "preview_seek_sec" not in st.session_state:
         st.session_state.preview_seek_sec = 0
+    if "force_overwrite_run" not in st.session_state:
+        st.session_state.force_overwrite_run = False
+    if "overwrite_run_id" not in st.session_state:
+        st.session_state.overwrite_run_id = None
 
+    cfg = get_cfg()
     Ttmp = get_T(ui_text, st.session_state.ui_lang)
     section_links = [
         (Tget(Ttmp, "videos_panel_title", "Videos"), "#sec_videos"),
@@ -920,9 +1149,14 @@ def home_section(raw_videos: Dict[str, Path], runs_map: Dict[str, List[str]], ui
         (Tget(Ttmp, "processing_in_home", "Processing"), "#sec_processing"),
         (Tget(Ttmp, "choose_run", "Select run"), "#sec_runs"),
     ]
-    T = render_page_head(Tget(Ttmp, "home_title", "Home"), ui_text, section_links=section_links)
+    T = render_page_head(
+        Tget(Ttmp, "home_title", "Home"),
+        ui_text,
+        section_links=section_links,
+        langs=langs,
+        default_lang=cfg.ui.default_lang,
+    )
 
-    # если прошлым кликом попросили прокрутку — выполняем
     _scroll_if_requested()
 
     all_ids = sorted(raw_videos.keys())
@@ -942,7 +1176,7 @@ def home_section(raw_videos: Dict[str, Path], runs_map: Dict[str, List[str]], ui
             key="home_search",
         ).strip().lower()
 
-        _quick_upload_block(T, key_prefix="home")
+        _quick_upload_block(T, key_prefix="home", langs=langs)
         thin_rule()
 
         if has_videos:
@@ -1042,7 +1276,6 @@ def home_section(raw_videos: Dict[str, Path], runs_map: Dict[str, List[str]], ui
 
         start_seek = int(st.session_state.get("preview_seek_sec", 0) or 0)
 
-
         maybe_playback_warning(path, T)
         _render_video_player(path, start_seek)
 
@@ -1080,8 +1313,8 @@ def home_section(raw_videos: Dict[str, Path], runs_map: Dict[str, List[str]], ui
             st.markdown(f"<div class='field-label'>{E(Tget(T, 'model_lang', 'Model output language'))}</div>", unsafe_allow_html=True)
             st.selectbox(
                 Tget(T, "model_lang", "Model output language"),
-                LANGS,
-                index=LANGS.index(st.session_state.pipeline_lang),
+                langs,
+                index=langs.index(st.session_state.pipeline_lang),
                 key="pipeline_lang",
                 label_visibility="collapsed",
             )
@@ -1094,6 +1327,35 @@ def home_section(raw_videos: Dict[str, Path], runs_map: Dict[str, List[str]], ui
                 key="device",
                 label_visibility="collapsed",
             )
+
+        selected_vid = st.session_state.selected_video_id
+        existing_runs = runs_map.get(selected_vid, [])
+
+        c3, c4 = st.columns([2.2, 2.8], gap="medium", vertical_alignment="top")
+        with c3:
+            st.checkbox(
+                Tget(T, "force_overwrite", "Force overwrite an existing run"),
+                value=bool(st.session_state.force_overwrite_run),
+                key="force_overwrite_run",
+            )
+        with c4:
+            if st.session_state.force_overwrite_run:
+                if not existing_runs:
+                    st.session_state.overwrite_run_id = None
+                    st.caption(Tget(T, "no_runs_to_overwrite", "No runs to overwrite for this video."))
+                else:
+                    default_overwrite = existing_runs[-1]
+                    cur = st.session_state.overwrite_run_id or default_overwrite
+                    if cur not in existing_runs:
+                        cur = default_overwrite
+                    st.selectbox(
+                        Tget(T, "overwrite_run_id", "Overwrite run"),
+                        existing_runs,
+                        index=existing_runs.index(cur),
+                        key="overwrite_run_id",
+                    )
+            else:
+                st.session_state.overwrite_run_id = None
 
         st.markdown("<div class='btn-run btn-main icon-only icon-bright'>", unsafe_allow_html=True)
         run_clicked = st.button(
@@ -1108,7 +1370,6 @@ def home_section(raw_videos: Dict[str, Path], runs_map: Dict[str, List[str]], ui
         if should_run:
             st.session_state.run_request_video_id = None
 
-            run_id = allocate_run_id(st.session_state.selected_video_id)
             msg = st.empty()
             progress = st.progress(0, text=Tget(T, "run_stage_init", "Loading..."))
 
@@ -1122,21 +1383,13 @@ def home_section(raw_videos: Dict[str, Path], runs_map: Dict[str, List[str]], ui
                 msg.info(Tget(T, "run_stage_infer", "Inference..."))
                 progress.progress(52, text=Tget(T, "run_stage_infer", "Inference..."))
 
-                annotations, metrics = run_pipeline_on_video(
+                force_overwrite = bool(st.session_state.force_overwrite_run and st.session_state.overwrite_run_id)
+                run_id, annotations, metrics, cache_hit = run_pipeline_on_video(
                     video_path=raw_videos[st.session_state.selected_video_id],
                     device=st.session_state.device,
                     language=st.session_state.pipeline_lang,
-                )
-
-                msg.info(Tget(T, "run_stage_save", "Saving..."))
-                progress.progress(78, text=Tget(T, "run_stage_save", "Saving..."))
-
-                save_run_outputs(
-                    video_id=st.session_state.selected_video_id,
-                    run_id=run_id,
-                    annotations=annotations,
-                    metrics=metrics,
-                    language=st.session_state.pipeline_lang,
+                    force_overwrite=force_overwrite,
+                    overwrite_run_id=st.session_state.overwrite_run_id if force_overwrite else None,
                 )
 
                 msg.info(Tget(T, "run_stage_index", "Updating the search index..."))
@@ -1144,11 +1397,21 @@ def home_section(raw_videos: Dict[str, Path], runs_map: Dict[str, List[str]], ui
                 ok = ensure_index(T)
 
                 progress.progress(100, text=Tget(T, "run_done", "Done ✅"))
-                msg.success(Tget(T, "run_done", "Done ✅") if ok else Tget(T, "run_done_no_index", "Done, but index not updated"))
+                if force_overwrite:
+                    msg.success((Tget(T, "run_overwritten", "Overwritten ✅")) + f" · {run_id}" + (" · index" if ok else ""))
+                else:
+                    if cache_hit:
+                        msg.success(Tget(T, "run_done", "Done ✅") + f" · cache hit · {run_id}")
+                    else:
+                        msg.success(Tget(T, "run_done", "Done ✅") if ok else Tget(T, "run_done_no_index", "Done, but index not updated"))
 
                 st.session_state[f"selected_run_{st.session_state.selected_video_id}"] = run_id
                 try:
-                    st.toast(f"{Tget(T,'run_done','Done ✅')} · {run_id}")
+                    st.toast(
+                        (Tget(T, "run_done", "Done ✅") + f" · {run_id}")
+                        + (" · cache" if cache_hit else "")
+                        + (" · overwritten" if force_overwrite else "")
+                    )
                 except Exception:
                     pass
 
@@ -1185,8 +1448,10 @@ def home_section(raw_videos: Dict[str, Path], runs_map: Dict[str, List[str]], ui
         )
         st.session_state[key_run_state] = sel_run
 
-        out = read_run_outputs(selected, sel_run)
+        cfg = get_cfg()
+        out = read_run_outputs(_runs_dir(cfg), selected, sel_run)
         run_lang = (out.get("language") or "unknown").strip() or "unknown"
+        run_dev = (out.get("device") or "unknown").strip() or "unknown"
 
         m = out.get("metrics") or {}
         preprocess_sec = float(m.get("preprocess_time_sec", 0.0) or 0.0)
@@ -1196,6 +1461,7 @@ def home_section(raw_videos: Dict[str, Path], runs_map: Dict[str, List[str]], ui
         _pill_row(
             [
                 f"{Tget(T,'run_lang','Run language')}: {run_lang.upper()}",
+                f"{Tget(T,'device','Device')}: {run_dev.upper()}",
                 f"{Tget(T,'metrics_preprocess','Preprocess')}: {hms(preprocess_sec)}",
                 f"{Tget(T,'metrics_model','Inference')}: {hms(model_sec)}",
                 f"{Tget(T,'metrics_total','Total')}: {hms(total_sec)}",
@@ -1223,7 +1489,6 @@ def home_section(raw_videos: Dict[str, Path], runs_map: Dict[str, List[str]], ui
                     with b1:
                         st.markdown("<div class='btn-open btn-ghost btn-small'>", unsafe_allow_html=True)
                         if st.button(f"{mmss(start)}–{mmss(end)}", key=f"seg_seek_{selected}_{sel_run}_{i}", width="stretch"):
-                            # ставим время + запрашиваем скролл к превью
                             _seek_preview_to(selected, start)
                             st.rerun()
                         st.markdown("</div>", unsafe_allow_html=True)
@@ -1231,14 +1496,21 @@ def home_section(raw_videos: Dict[str, Path], runs_map: Dict[str, List[str]], ui
                         st.write(desc)
 
 
-def search_section(raw_videos: Dict[str, Path], runs_map: Dict[str, List[str]], ui_text: Dict[str, Dict[str, Any]]) -> None:
+def search_section(raw_videos: Dict[str, Path], runs_map: Dict[str, List[str]], ui_text: Dict[str, Dict[str, Any]], langs: List[str]) -> None:
+    cfg = get_cfg()
     Ttmp = get_T(ui_text, st.session_state.ui_lang)
     section_links = [
         (Tget(Ttmp, "search", "Search"), "#sec_search"),
         (Tget(Ttmp, "results", "Results"), "#sec_results"),
         (Tget(Ttmp, "player", "Player"), "#sec_player"),
     ]
-    T = render_page_head(Tget(Ttmp, "search_desc_title", "Search by event"), ui_text, section_links=section_links)
+    T = render_page_head(
+        Tget(Ttmp, "search_desc_title", "Search by event"),
+        ui_text,
+        section_links=section_links,
+        langs=langs,
+        default_lang=cfg.ui.default_lang,
+    )
 
     qe = get_engine()
     if qe is None:
@@ -1288,7 +1560,10 @@ def search_section(raw_videos: Dict[str, Path], runs_map: Dict[str, List[str]], 
         if upd:
             with st.spinner(Tget(T, "building_index", "Updating the search index...")):
                 ok = ensure_index(T)
-            soft_note(Tget(T, "ok", "Completed") if ok else Tget(T, "index_build_failed", "Failed to update the search index"), kind=("ok" if ok else "warn"))
+            soft_note(
+                Tget(T, "ok", "Completed") if ok else Tget(T, "index_build_failed", "Failed to update the search index"),
+                kind=("ok" if ok else "warn"),
+            )
 
     if not query or not query.strip():
         soft_note(Tget(T, "type_query", "Please enter a search query."), kind="info")
@@ -1342,7 +1617,7 @@ def search_section(raw_videos: Dict[str, Path], runs_map: Dict[str, List[str]], 
             st.markdown(f"<div class='section-title'>{E(Tget(T, 'player', 'Player'))}</div>", unsafe_allow_html=True)
             hit = st.session_state.get("selected_hit")
             if not hit:
-                soft_note(Tget(T, "pick_result", "Select a result and click “Open”."), kind="info")
+                soft_note(Tget(T, "pick_result", "Select a result and click “Open”."))
             else:
                 vid = str(hit["video_id"])
                 run_id = str(hit.get("run_id", ""))
@@ -1355,7 +1630,7 @@ def search_section(raw_videos: Dict[str, Path], runs_map: Dict[str, List[str]], 
 
                 video_path = raw_videos.get(vid)
                 if not video_path or not video_path.exists():
-                    soft_note(f"{Tget(T, 'raw_missing', 'Source video not found')}: '{vid}' → {RAW_DIR}", kind="warn")
+                    soft_note(f"{Tget(T, 'raw_missing', 'Source video not found')}: '{vid}' → {cfg.paths.raw_dir}", kind="warn")
                 else:
                     maybe_playback_warning(video_path, T)
                     _render_video_player(video_path, int(start))
@@ -1366,12 +1641,27 @@ def footer(T: dict) -> None:
     st.caption(Tget(T, "footer", ""))
 
 
+def _render_i18n_metrics() -> None:
+    _ensure_i18n_state()
+    total = int(st.session_state._i18n_missing_total or 0)
+    if total <= 0:
+        return
+    with st.expander("i18n metrics", expanded=False):
+        st.write({"missing_total": total, "missing_by_lang": dict(st.session_state._i18n_missing_by_lang)})
+        st.code("\n".join(sorted(st.session_state._i18n_missing_set)))
+
+
 def main() -> None:
+    cfg = get_cfg()
+
     st.set_page_config(page_title="SmartCampus V2T", layout="wide")
-    load_and_apply_css()
+    load_and_apply_css(cfg.ui.styles_path)
+
+    langs = cfg.ui.langs or ["ru", "kz", "en"]
+    langs_key = ",".join(langs)
 
     try:
-        ui_text = load_ui_text(str(UI_TEXT_PATH), _mtime(UI_TEXT_PATH))
+        ui_text = load_ui_text(str(cfg.ui.ui_text_path), _mtime(cfg.ui.ui_text_path), langs_key)
     except Exception as e:
         st.error(str(e))
         st.stop()
@@ -1379,7 +1669,7 @@ def main() -> None:
     if "selected_hit" not in st.session_state:
         st.session_state.selected_hit = None
     if "ui_lang" not in st.session_state:
-        st.session_state.ui_lang = "ru"
+        st.session_state.ui_lang = cfg.ui.default_lang
     if "preview_seek_sec" not in st.session_state:
         st.session_state.preview_seek_sec = 0
 
@@ -1390,17 +1680,21 @@ def main() -> None:
     if current_tab not in TAB_IDS:
         current_tab = TAB_IDS[0]
 
-    render_header(T, labels, TAB_IDS, current_tab)
+    render_header(T, labels, TAB_IDS, current_tab, logo_path=cfg.ui.logo_path)
 
-    raw_videos_str = list_raw_videos()
+    bucket = _cache_bucket(cfg.ui.cache_ttl_sec)
+    raw_videos_str = list_raw_videos(str(cfg.paths.raw_dir), bucket)
     raw_videos: Dict[str, Path] = {k: Path(v) for k, v in raw_videos_str.items()}
-    runs_map = list_all_runs()
+
+    runs_root = _runs_dir(cfg)
+    runs_map = list_all_runs(str(runs_root), bucket)
 
     if current_tab == "home":
-        home_section(raw_videos, runs_map, ui_text)
+        home_section(raw_videos, runs_map, ui_text, langs=langs)
     elif current_tab == "search":
-        search_section(raw_videos, runs_map, ui_text)
+        search_section(raw_videos, runs_map, ui_text, langs=langs)
 
+    _render_i18n_metrics()
     footer(get_T(ui_text, st.session_state.ui_lang))
 
 

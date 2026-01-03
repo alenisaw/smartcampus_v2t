@@ -1,13 +1,43 @@
 paths:
   root_dir: ..
+  data_dir: data
+
   raw_dir: data/raw
   prepared_dir: data/prepared
-  results_dir: results/runs
+  runs_dir: data/runs
+
+  indexes_dir: data/indexes
+  thumbs_dir: data/thumbs
+
   models_dir: models
-  qwen_vl_dir: models/qwen3-vl-2b-instruct
 
   dnn_face_proto: models/face_detector/deploy.prototxt
   dnn_face_model: models/face_detector/res10_300x300_ssd_iter_140000.caffemodel
+
+
+ui:
+  langs: ["ru", "kz", "en"]
+  default_lang: "ru"
+  cache_ttl_sec: 2
+
+  assets_dir: app/assets
+  ui_text_path: app/assets/ui_text.json
+  styles_path: app/assets/styles.css
+  logo_path: app/assets/logo.png
+
+
+search:
+  embed_model_name: intfloat/multilingual-e5-base
+  w_bm25: 0.45
+  w_dense: 0.55
+  candidate_k_sparse: 200
+  candidate_k_dense: 200
+  fusion: rrf
+  rrf_k: 60
+  dedupe_mode: overlap
+  dedupe_tol_sec: 1.0
+  dedupe_overlap_thr: 0.7
+
 
 video:
   target_fps: 3.0
@@ -17,8 +47,18 @@ video:
   save_small_frames: false
 
   face_blur: true
-  face_detector_type: dnn
   max_frames: 5000
+
+
+video_io:
+  jpeg_quality_frames: 82
+  jpeg_quality_small: 75
+
+  face_detect_every_saved: 6
+  face_detect_force_on_scenecut: true
+  face_blur_strength: 31
+  face_conf_threshold: 0.5
+
 
 clips:
   window_sec: 4.0
@@ -26,21 +66,33 @@ clips:
   min_clip_frames: 2
   max_clip_frames: 16
 
+
 model:
-  model_name_or_path: models/qwen3_vl_2b_instruct
+  model_name_or_path: models/qwen3-vl-2b-instruct
   device: cuda
   dtype: fp16
   language: kz
+
   batch_size: 2
   max_new_tokens: 128
   temperature: 0.1
   top_p: 0.9
+  top_k: 40
   repetition_penalty: 1.1
   do_sample: true
   timeout_sec: 60
+
 
 runtime:
   seed: 42
   num_workers: 4
   log_level: INFO
+
+
   overwrite_existing: false
+
+  strict_paths: true
+
+  torch_threads: 0
+  matmul_precision: high
+  autocast_infer: true
