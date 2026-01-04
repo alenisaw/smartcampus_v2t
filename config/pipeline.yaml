@@ -73,9 +73,9 @@ model:
   dtype: fp16
   language: kz
 
-  batch_size: 2
+  batch_size: 3
   max_new_tokens: 128
-  temperature: 0.1
+  temperature: 0.4
   top_p: 0.9
   top_k: 40
   repetition_penalty: 1.1

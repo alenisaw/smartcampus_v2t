@@ -1427,12 +1427,14 @@ def home_section(raw_videos: Dict[str, Path], runs_map: Dict[str, List[str]], ui
         st.markdown(f"<div class='section-title'>{E(Tget(T, 'choose_run', 'Select run'))}</div>", unsafe_allow_html=True)
 
         if not has_videos:
+            st.markdown("<div style='margin-top: 10px'></div>", unsafe_allow_html=True)
             soft_note(Tget(T, "no_videos", "No videos available. Please upload a file above."), kind="info")
             return
 
         selected = st.session_state.selected_video_id
         runs = runs_map.get(selected, [])
         if not runs:
+            st.markdown("<div style='margin-top: 10px'></div>", unsafe_allow_html=True)
             soft_note(Tget(T, "no_runs_home", "No runs available yet. Please start processing above."), kind="info")
             return
 
