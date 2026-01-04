@@ -1,8 +1,8 @@
 # src/pipeline/video_to_text.py
-
 """
 Video-to-text pipeline for SmartCampus V2T.
 Handles batched clip generation, multilingual prompts and temporal smoothing.
+Uses bucketing by clip length to avoid padding.
 """
 
 from __future__ import annotations
@@ -20,28 +20,31 @@ from src.pipeline.pipeline_config import PipelineConfig
 def build_prompt(lang: str) -> str:
     if lang == "ru":
         return (
-            "Ты — CCTV аналитик. В 1–2 коротких информативных предложениях опиши, что видно на фрагменте: "
-            "что делают люди/транспорт и есть ли движение (направление только если очевидно). "
-            "Если явно видно необычное/опасное действие — обязательно кратко упомяни это (можно вторым предложением). "
-            "Если ничего необычного не видно — не упоминай аномалии вообще. "
-            "Строго по видимым фактам: без догадок, причин, эмоций, ролей, возраста, пола; без списков и переносов строк."
+            "Ты — CCTV аналитик. Дай 1–2 коротких информативных предложения о фрагменте. "
+            "Начинай фразу по-разному (без шаблонов вроде «На снимке/На изображении/На кадре»). "
+            "Опиши только видимые факты: что делают люди/транспорт и есть ли движение (направление — только если очевидно). "
+            "Если явно видно необычное/опасное действие — кратко упомяни (можно вторым предложением). "
+            "Если ничего необычного не видно — аномалии не упоминай. "
+            "Без догадок, причин, эмоций, ролей, возраста, пола; без списков и переносов строк."
         )
 
     if lang == "kz":
         return (
-            "Сен CCTV аналитигісің. 1–2 қысқа, мазмұнды сөйлеммен фрагментте не көрінетінін сипатта: "
-            "адамдар/көлік не істеп жатыр және қозғалыс бар ма (бағытын тек анық болса айт). "
-            "Егер анық ерекше/қауіпті әрекет көрінсе — міндетті түрде қысқа атап өт (қаласаң екінші сөйлеммен). "
+            "Сен CCTV аналитигісің. Фрагмент туралы 1–2 қысқа, мазмұнды сөйлем жаз. "
+            "Сөйлемді әртүрлі бастап отыр ( «Суретте/Кадрда» сияқты шаблондарды қолданба). "
+            "Тек көрінетін фактілер: адамдар/көлік не істейді және қозғалыс бар ма (бағытын тек анық болса айт). "
+            "Егер анық ерекше/қауіпті әрекет көрінсе — қысқа атап өт (қаласаң екінші сөйлеммен). "
             "Егер ерекше нәрсе болмаса — аномалия туралы мүлде жазба. "
-            "Тек көрінетін фактілер: ойдан қоспа; себеп/эмоция/рөл/жас/жыныс жоқ; тізім мен жол ауыстырусыз."
+            "Ойдан қоспа; себеп/эмоция/рөл/жас/жыныс жоқ; тізім мен жол ауыстырусыз."
         )
 
     return (
-        "You are a CCTV analyst. In 1–2 short informative sentences, describe what is visible in the segment: "
-        "what people/vehicles are doing and whether there is motion (direction only if obvious). "
-        "If clearly visible unusual/unsafe behavior exists, you MUST mention it briefly (you may use the second sentence). "
+        "You are a CCTV analyst. Write 1–2 short informative sentences about the segment. "
+        "Vary the opening naturally (avoid templates like 'In the image/on the frame'). "
+        "Only visible facts: what people/vehicles are doing and whether there is motion (direction only if obvious). "
+        "If clearly visible unusual/unsafe behavior exists, briefly mention it (you may use the second sentence). "
         "If nothing unusual is visible, do not mention anomalies at all. "
-        "Only visible facts: no guesses, motives, emotions, roles, age, gender; no lists or line breaks."
+        "No guesses, motives, emotions, roles, age, gender; no lists or line breaks."
     )
 
 
@@ -54,10 +57,9 @@ def build_global_summary_prompt(
     header: List[str] = []
 
     if lang == "ru":
-        header.append("Ты — аналитик системы видеонаблюдения университета. Ниже приведены описания фрагментов одного видео.")
-        header.append("Составь итоговую сводку видео, используя ТОЛЬКО факты из фрагментов. Ничего не выдумывай.")
-        header.append("Ответ строго в следующей структуре (без угловых скобок):")
-        header.append("Краткое описание: 1–2 предложения, очень кратко, без повторов и без лишних деталей.")
+        header.append("Ты — аналитик системы видеонаблюдения университета. Ниже — описания фрагментов одного видео.")
+        header.append("Сделай итоговую сводку, используя ТОЛЬКО факты из фрагментов. Ничего не выдумывай.")
+        header.append("Краткое описание должно быть информативным: 1–2 предложения, которые суммируют общую картину (кто/что где происходит, общий характер движения/активности, ключевые изменения).")
         header.append("Далее выведи СРАЗУ 5 строк, каждая строка начинается с '- ' и строго как ниже:")
         header.append("- Тип сцены: 1–3 слова или 'неизвестно'")
         header.append("- Плотность людей: нет людей / низкая / средняя / высокая")
@@ -71,8 +73,7 @@ def build_global_summary_prompt(
     elif lang == "kz":
         header.append("Сен университеттің CCTV аналитигісің. Төменде бір бейненің фрагмент сипаттамалары берілген.")
         header.append("Тек осы фрагменттердегі фактілерге сүйеніп қорытынды жаса. Жаңа нәрсе ойдан қоспа.")
-        header.append("Жауап құрылымы:")
-        header.append("Қысқаша сипаттама: 1–2 сөйлем, өте қысқа, қайталамасыз.")
+        header.append("Қысқаша сипаттама мазмұнды болсын: 1–2 сөйлеммен жалпы көріністі жинақта (не болып жатыр, қозғалыс/белсенділік сипаты, маңызды өзгерістер).")
         header.append("Содан кейін ДӘЛ 5 жол бер: әр жол '- ' деп басталсын және төмендегідей болсын:")
         header.append("- Сахна түрі: 1–3 сөз немесе 'анық емес'")
         header.append("- Адамдар тығыздығы: жоқ / төмен / орташа / жоғары")
@@ -86,8 +87,7 @@ def build_global_summary_prompt(
     else:
         header.append("You are a university CCTV analyst. Below are segment descriptions of the same video.")
         header.append("Write a global summary using ONLY facts from the segments. Do not invent anything.")
-        header.append("Strict structure:")
-        header.append("Short summary: 1–2 sentences, very concise, no repetition.")
+        header.append("Short summary must be informative: 1–2 sentences that capture the overall scene (what is happening, overall motion/activity, key changes).")
         header.append("Then output EXACTLY 5 lines, each starting with '- ', exactly as follows:")
         header.append("- Scene type: 1–3 words or 'unknown'")
         header.append("- People density: none / low / medium / high")
@@ -470,6 +470,14 @@ def smooth_annotations(
     return merged
 
 
+def _bucket_indices_by_len(nested: List[List[str]]) -> Dict[int, List[int]]:
+    buckets: Dict[int, List[int]] = {}
+    for i, seq in enumerate(nested):
+        L = len(seq)
+        buckets.setdefault(L, []).append(i)
+    return buckets
+
+
 class VideoToTextPipeline:
     def __init__(self, cfg: PipelineConfig):
         self.cfg = cfg
@@ -511,40 +519,33 @@ class VideoToTextPipeline:
 
         t_gen_start = time.perf_counter()
 
-        for batch_start in range(0, num_clips, batch_size):
-            batch_end = min(batch_start + batch_size, num_clips)
-            batch_clips = clips[batch_start:batch_end]
-            batch_ts = clip_timestamps[batch_start:batch_end]
+        buckets = _bucket_indices_by_len(clips)
+        for L in sorted(buckets.keys()):
+            idxs = buckets[L]
+            for batch_start in range(0, len(idxs), batch_size):
+                batch_idxs = idxs[batch_start : batch_start + batch_size]
 
-            batch_paths: List[List[Path]] = [[Path(p) for p in clip_paths] for clip_paths in batch_clips]
+                batch_paths: List[List[Path]] = [[Path(p) for p in clips[i]] for i in batch_idxs]
+                batch_ts = [clip_timestamps[i] for i in batch_idxs]
 
-            max_len = max(len(seq) for seq in batch_paths)
-            padded_batch: List[List[Path]] = []
-            for seq in batch_paths:
-                if len(seq) == max_len:
-                    padded_batch.append(seq)
-                else:
-                    pad_img = seq[-1]
-                    padded_batch.append(seq + [pad_img] * (max_len - len(seq)))
-
-            texts = self.backend.describe_clips_batch(
-                batch_frame_paths=padded_batch,
-                prompt=clip_prompt,
-            )
-
-            lang = self.cfg.model.language
-            texts = [sanitize_clip_text(t, lang=lang) for t in texts]
-
-            for (start, end), text in zip(batch_ts, texts):
-                annotations.append(
-                    Annotation(
-                        video_id=video_id,
-                        start_sec=float(start),
-                        end_sec=float(end),
-                        description=text,
-                        extra=None,
-                    )
+                texts = self.backend.describe_clips_batch(
+                    batch_frame_paths=batch_paths,
+                    prompt=clip_prompt,
                 )
+
+                lang = self.cfg.model.language
+                texts = [sanitize_clip_text(t, lang=lang) for t in texts]
+
+                for (start, end), text in zip(batch_ts, texts):
+                    annotations.append(
+                        Annotation(
+                            video_id=video_id,
+                            start_sec=float(start),
+                            end_sec=float(end),
+                            description=text,
+                            extra=None,
+                        )
+                    )
 
         model_time = time.perf_counter() - t_gen_start
 

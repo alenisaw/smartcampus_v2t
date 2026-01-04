@@ -1,11 +1,12 @@
 # src/core/qwen_vl_backend.py
-
 """
 Backend wrapper around Qwen3-VL vision-language model.
 
 Loads model and processor, builds chat-style inputs for clips or text prompts,
 and supports single-clip and batched generation.
 """
+
+from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -59,7 +60,8 @@ class QwenVLBackend:
 
         model_kwargs: dict = {}
         if hf_dtype is not None:
-            model_kwargs["dtype"] = hf_dtype
+            model_kwargs["torch_dtype"] = hf_dtype
+
         if device == "cuda":
             model_kwargs["device_map"] = "auto"
 
@@ -108,31 +110,30 @@ class QwenVLBackend:
 
         content: List[dict] = []
         for p in frame_paths:
-            content.append(
-                {
-                    "type": "image",
-                    "image": str(p),
-                }
-            )
+            content.append({"type": "image", "image": str(p)})
 
         content.append({"type": "text", "text": prompt})
 
-        return [
-            {
-                "role": "user",
-                "content": content,
-            }
-        ]
+        return [{"role": "user", "content": content}]
 
     def _build_messages_for_text(self, prompt: str) -> List[dict]:
-        return [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                ],
-            }
-        ]
+        return [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
+
+    def _trim_generated(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: Optional[torch.Tensor],
+        generated_ids: torch.Tensor,
+    ) -> List[torch.Tensor]:
+        outs: List[torch.Tensor] = []
+        bsz = int(generated_ids.shape[0])
+        for i in range(bsz):
+            if attention_mask is not None:
+                in_len = int(attention_mask[i].sum().item())
+            else:
+                in_len = int(input_ids[i].shape[0])
+            outs.append(generated_ids[i, in_len:])
+        return outs
 
     def _run_chat(
         self,
@@ -152,7 +153,12 @@ class QwenVLBackend:
             return_tensors="pt",
             return_dict=True,
             padding=True,
-        ).to(model.device, non_blocking=True)
+        )
+
+        if hasattr(model, "hf_device_map"):
+            pass
+        else:
+            inputs = inputs.to(model.device, non_blocking=True)
 
         generate_kwargs = dict(
             max_new_tokens=gen_cfg.max_new_tokens,
@@ -165,19 +171,18 @@ class QwenVLBackend:
         )
 
         with torch.inference_mode():
-            if model.device.type == "cuda" and self.autocast_infer:
+            if getattr(model, "device", None) is not None and model.device.type == "cuda" and self.autocast_infer:
                 with torch.autocast(device_type="cuda"):
                     generated_ids = model.generate(**inputs, **generate_kwargs)
             else:
                 generated_ids = model.generate(**inputs, **generate_kwargs)
 
-        generated_ids_trimmed = [
-            out_ids[len(in_ids):]
-            for in_ids, out_ids in zip(inputs["input_ids"], generated_ids)
-        ]
+        input_ids = inputs["input_ids"]
+        attention_mask = inputs.get("attention_mask")
 
+        trimmed = self._trim_generated(input_ids=input_ids, attention_mask=attention_mask, generated_ids=generated_ids)
         output_texts = processor.batch_decode(
-            generated_ids_trimmed,
+            trimmed,
             skip_special_tokens=True,
             clean_up_tokenization_spaces=False,
         )
@@ -201,10 +206,7 @@ class QwenVLBackend:
     ) -> List[str]:
         conversations = []
         for frame_paths in batch_frame_paths:
-            conversations.append(
-                self._build_messages_for_clip(frame_paths, prompt)
-            )
-
+            conversations.append(self._build_messages_for_clip(frame_paths, prompt))
         return self._run_chat(conversations, gen_cfg)
 
     def generate_text(
