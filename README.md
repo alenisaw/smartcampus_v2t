@@ -21,7 +21,13 @@ Core ideas:
 
 ## System Architecture
 
-![System Architecture](docs/figure2_main.png)
+<p align="center">
+  <img src="docs/figure2_main.png" width="300">
+</p>
+
+<p align="center">
+  <em>System architecture of the SmartCampus V2T pipeline</em>
+</p>
 
 The pipeline is organized into modular components:
 
