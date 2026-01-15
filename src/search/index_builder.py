@@ -1,4 +1,4 @@
-# search/index_builder.py
+# src/search/index_builder.py
 """
 Fast hybrid index builder for SmartCampus V2T.
 
@@ -44,7 +44,6 @@ MODEL_NAME_DEFAULT = "intfloat/multilingual-e5-base"
 _WORD_RE = re.compile(r"\w+", flags=re.UNICODE)
 
 logger = logging.getLogger(__name__)
-
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -333,7 +332,6 @@ def _compute_dense_valid_mask(emb_arr: Any) -> Any:
     if x.dtype != np.float32:
         x = x.astype(np.float32, copy=False)
 
-    # fast row norm^2
     norm2 = np.einsum("ij,ij->i", x, x)
     return norm2 > 1e-10
 
@@ -348,7 +346,10 @@ def build_or_update_index(
     batch_size: int = 64,
     config_fingerprint: Optional[str] = None,
     embed_store_dtype: str = "float32",
+    ann_root: Optional[Path] = None,
 ) -> Path:
+    if ann_root is not None:
+        runs_root = Path(ann_root)
 
     t_total0 = time.perf_counter()
 
@@ -655,7 +656,6 @@ def build_or_update_index(
 
 
 def load_index(index_dir: Path = DEFAULT_INDEX_DIR) -> HybridIndex:
-
     index_dir = Path(index_dir)
 
     manifest = _load_manifest(index_dir)

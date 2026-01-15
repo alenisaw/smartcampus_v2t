@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 import torch
 from transformers import AutoModelForImageTextToText, AutoProcessor
@@ -62,6 +62,7 @@ class QwenVLBackend:
         if hf_dtype is not None:
             model_kwargs["torch_dtype"] = hf_dtype
 
+        # If user requested CUDA, allow HF to place/shard model.
         if device == "cuda":
             model_kwargs["device_map"] = "auto"
 
@@ -72,6 +73,7 @@ class QwenVLBackend:
         self.processor = AutoProcessor.from_pretrained(model_name_or_path)
         self.model.eval()
 
+        # If not sharded by HF, we can move explicitly.
         if device in {"cuda", "cpu"} and not hasattr(self.model, "hf_device_map"):
             self.model.to(device)
 
@@ -113,7 +115,6 @@ class QwenVLBackend:
             content.append({"type": "image", "image": str(p)})
 
         content.append({"type": "text", "text": prompt})
-
         return [{"role": "user", "content": content}]
 
     def _build_messages_for_text(self, prompt: str) -> List[dict]:
@@ -135,6 +136,49 @@ class QwenVLBackend:
             outs.append(generated_ids[i, in_len:])
         return outs
 
+    def _infer_input_device(self, model: torch.nn.Module) -> torch.device:
+        """
+        Decide which device to put inputs on.
+
+        - Non-sharded model: next(model.parameters()).device
+        - Sharded (HF device_map="auto"): pick the first CUDA device from hf_device_map
+        - Fallback: cpu
+        """
+        try:
+            return next(model.parameters()).device
+        except Exception:
+            pass
+
+        if hasattr(model, "hf_device_map"):
+            try:
+                for _name, dev in model.hf_device_map.items():
+                    if isinstance(dev, str) and dev.startswith("cuda"):
+                        return torch.device(dev)
+            except Exception:
+                pass
+
+        return torch.device("cpu")
+
+    def _move_inputs_to_device(self, inputs: Any, device: torch.device) -> Any:
+        """
+        Robust move for HF BatchEncoding / dict-like structures.
+        """
+        if inputs is None:
+            return None
+        if isinstance(inputs, torch.Tensor):
+            return inputs.to(device, non_blocking=True)
+        if isinstance(inputs, dict):
+            return {k: self._move_inputs_to_device(v, device) for k, v in inputs.items()}
+        # HF BatchEncoding часто умеет .to()
+        if hasattr(inputs, "to"):
+            try:
+                return inputs.to(device, non_blocking=True)
+            except TypeError:
+                return inputs.to(device)
+            except Exception:
+                pass
+        return inputs
+
     def _run_chat(
         self,
         messages,
@@ -155,10 +199,9 @@ class QwenVLBackend:
             padding=True,
         )
 
-        if hasattr(model, "hf_device_map"):
-            pass
-        else:
-            inputs = inputs.to(model.device, non_blocking=True)
+        # ✅ FIX: always move input tensors to the right device
+        target_device = self._infer_input_device(model)
+        inputs = self._move_inputs_to_device(inputs, target_device)
 
         generate_kwargs = dict(
             max_new_tokens=gen_cfg.max_new_tokens,
@@ -171,7 +214,7 @@ class QwenVLBackend:
         )
 
         with torch.inference_mode():
-            if getattr(model, "device", None) is not None and model.device.type == "cuda" and self.autocast_infer:
+            if target_device.type == "cuda" and self.autocast_infer:
                 with torch.autocast(device_type="cuda"):
                     generated_ids = model.generate(**inputs, **generate_kwargs)
             else:

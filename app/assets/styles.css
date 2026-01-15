@@ -234,6 +234,7 @@ footer { visibility: hidden; }
 
 /* Soft notes */
 .soft-note, .soft-warn, .soft-ok{
+  margin-top: 8px;
   border-radius: 16px;
   padding: 10px 12px;
   border: 1px solid rgba(255,255,255,0.10);
@@ -503,3 +504,8 @@ a.nav-link, a.nav-link:visited{
   border-radius: 12px;
   border: 1px solid rgba(255,255,255,0.10);
 }
+
+
+/* Spacers (used from ui.py, keeps layout tweaks out of code) */
+.section-spacer{height:14px;}
+.section-spacer-sm{height:8px;}

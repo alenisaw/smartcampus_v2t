@@ -9,7 +9,7 @@ Features:
 - detection and skipping of near-identical (lazy) frames
 - DNN-based face anonymization (optimized: detect faces not every frame + reuse boxes)
 - letterbox resize for stable aspect ratio
-- prepared cache: reuse prepared frames if video+video-config fingerprints match
+- prepared cache: reuse prepared frames if video+video-configs fingerprints match
 """
 
 from __future__ import annotations
@@ -31,12 +31,8 @@ SMALL_SIZE: Tuple[int, int] = (64, 64)
 
 
 def _cfg_video_io_get(config: PipelineConfig, key: str, default: Any) -> Any:
-    """
-    Read video_io.* from PipelineConfig if present, otherwise fallback to default.
-    This keeps backward compatibility if YAML is missing the section.
-    """
     try:
-        vიო = getattr(config, "video_io", None)
+        vio = getattr(config, "video_io", None)
         if vio is None:
             vio = getattr(config, "videoio", None)
         if vio is None:

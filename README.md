@@ -3,7 +3,7 @@
 **SmartCampus V2T** is a practical, end-to-end **video-to-text analytics system** for long-form CCTV and surveillance footage.
 The project focuses on transforming raw video streams into **structured, searchable textual representations** using modern multimodal models and efficient indexing, with a strong emphasis on usability through a Streamlit-based UI.
 
-![Semantic Pipeline Overview](docs/figure1_main.png)
+![Semantic Pipeline Overview](docs/figures/figure1_main.png)
 
 ---
 
@@ -22,7 +22,7 @@ Core ideas:
 ## System Architecture
 
 <p align="center">
-  <img src="docs/figure2_main.png" width="300">
+  <img src="docs/figures/figure2_main.png" width="300">
 </p>
 
 <p align="center">
@@ -54,21 +54,72 @@ The pipeline is organized into modular components:
 ## Repository Structure
 
 ```text
-app/                    # Streamlit application (main control plane)
-config/pipeline.yaml    # Unified configuration
-src/
-  core/                 # Qwen3-VL backend wrapper
-  preprocessing/        # Video preparation and caching
-  pipeline/             # Clip V2T, merging, global summary
-  search/               # Index builder and query engine
-data/
-  raw/ 
-  prepared/ 
-  runs/ 
-  indexes/
-docs/                  #Files related with README.md and user guides
-  figure1_main.png
-  figure2_main.png
+```text
+smartcampus_v2t/
+  .streamlit/
+    config.toml               # Streamlit configuration
+
+  app/                        # Streamlit application (main control plane)
+    assets/
+      logo.png                # UI logo
+      styles.css              # Custom UI styles
+      ui_text.json            # UI text + i18n (ru/kz/en)
+    app.py                    # Streamlit UI entrypoint (Home/Search, processing, index updates)
+
+  configs/
+    pipeline.yaml             # Unified configuration (paths, model, clips, search, UI)
+
+  src/                        # Core library (pipeline + search + utils)
+    __init__.py
+
+    core/                     # Types + Qwen-VL backend wrapper
+      __init__.py
+      types.py                # Dataclasses: VideoMeta, FrameInfo, Annotation, RunMetrics, etc.
+      qwen_vl_backend.py      # Qwen3-VL backend wrapper (generation, batching, templates)
+
+    preprocessing/            # Video preparation and caching
+      __init__.py
+      video_io.py             # Preprocessing: frame extraction, caching, metadata
+
+    pipeline/                 # Clip V2T, merging, global summary
+      __init__.py
+      pipeline_config.py      # Pipeline config schema
+      video_to_text.py        # VideoToTextPipeline: clip inference + postprocess + metrics
+
+    search/                   # Index builder and query engine
+      __init__.py
+      index_builder.py        # Build/update index from run outputs
+      query_engine.py         # Hybrid search (BM25 + dense), fusion, dedupe
+
+    utils/
+      __init__.py
+      config_loader.py        # Load pipeline.yaml → typed config
+
+  data/                       # Runtime data (typically generated locally)
+    raw/                      # Unprepared/original videos
+    prepared/                 # Prepared frames + preprocessing cache
+    runs/                     # Run outputs per video (manifests, annotations, metrics)
+    indexes/                  # Search index artifacts (manifest/meta + vectors)
+    thumbs/                   # Cached thumbnails for UI carousel
+
+  docs/                       # README figures and user guides
+    figures/
+       figure1_main.png
+       figure2_main.png
+
+  .gitignore
+  Dockerfile
+  README.md
+```
+
+### Run folder layout (`data/runs/<video_id>/run_###/`)
+
+```text
+data/runs/<video_id>/run_###/
+  run_manifest.json           # Run metadata (language/device, inference_fingerprint, timestamps, status)
+  config.json                 # Snapshot of the effective config used for this run
+  annotations.json            # Timeline segments: {start_sec, end_sec, description, extra}
+  metrics.json                # Timings/counters + extra fields (may include global_summary)
 ```
 
 ---
@@ -108,7 +159,7 @@ This includes:
 The entire workflow is driven from the Streamlit interface.
 
 ```bash
-streamlit run app/streamlit_app.py
+streamlit run app/main.py
 ```
 
 UI will be opened automatically after running command or you may manually open it by next link:

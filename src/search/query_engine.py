@@ -2,7 +2,7 @@
 """
 Hybrid Query Engine for SmartCampus V2T.
 
-Loads defaults from config/pipeline.yaml:
+Loads defaults from configs/pipeline.yaml:
 - paths.indexes_dir
 - search.embed_model_name
 - search weights/candidates/fusion/dedupe
@@ -42,7 +42,7 @@ from .index_builder import (
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CFG_PATH = PROJECT_ROOT / "config" / "pipeline.yaml"
+DEFAULT_CFG_PATH = PROJECT_ROOT / "configs" / "pipeline.yaml"
 
 
 @dataclass
@@ -206,8 +206,24 @@ def _load_cfg(config_path: Optional[Path]) -> Any:
     return load_pipeline_config(p)
 
 
-class QueryEngine:
+def _in_sorted(sorted_unique: np.ndarray, values: np.ndarray) -> np.ndarray:
+    """
+    Safe membership check for sorted_unique (sorted, unique int64) against values (int64).
+    Returns boolean mask aligned with values.
+    """
+    if sorted_unique.size == 0 or values.size == 0:
+        return np.zeros((values.size,), dtype=np.bool_)
+    pos = np.searchsorted(sorted_unique, values)
+    in_range = pos < sorted_unique.size
+    out = np.zeros((values.size,), dtype=np.bool_)
+    if np.any(in_range):
+        vv = values[in_range]
+        pp = pos[in_range]
+        out[in_range] = (sorted_unique[pp] == vv)
+    return out
 
+
+class QueryEngine:
     def __init__(
         self,
         index: Optional[HybridIndex] = None,
@@ -356,11 +372,9 @@ class QueryEngine:
         top_sparse = _topn_indices(bm25_all, valid_indices, self.candidate_k_sparse)
         t_sparse_ms = (time.perf_counter() - t_sparse0) * 1000.0
 
-
         t_qemb0 = time.perf_counter()
         q_vec = np.asarray(self.embedder.encode_query(q), dtype=np.float32)
         t_qemb_ms = (time.perf_counter() - t_qemb0) * 1000.0
-
 
         t_dense0 = time.perf_counter()
         emb = self.index.embeddings
@@ -370,9 +384,7 @@ class QueryEngine:
             dense_valid_indices: List[int] = []
         else:
             v = np.asarray(valid_indices, dtype=np.int64)
-            dv_sorted = dense_valid_idx  # already sorted from flatnonzero
-            pos = np.searchsorted(dv_sorted, v)
-            in_dv = (pos < dv_sorted.size) & (dv_sorted[pos] == v)
+            in_dv = _in_sorted(dense_valid_idx, v)
             dense_valid_indices = v[in_dv].tolist()
 
         top_dense = _topk_dense_over_indices(
@@ -403,28 +415,21 @@ class QueryEngine:
 
         candidate_indices = list(cand_set)
 
-
         t_dense_cand0 = time.perf_counter()
         sparse_raw: Dict[int, float] = {int(i): float(bm25_all[int(i)]) for i in candidate_indices}
 
         dense_raw: Dict[int, float] = {}
         if top_dense:
-
             cand = np.asarray(candidate_indices, dtype=np.int64)
-            dv_sorted = dense_valid_idx
-            pos = np.searchsorted(dv_sorted, cand)
-            is_dv = (pos < dv_sorted.size) & (dv_sorted[pos] == cand)
+            is_dv = _in_sorted(dense_valid_idx, cand)
             dense_cand = cand[is_dv].tolist()
             dense_raw = _dense_scores_for_indices(emb=emb, q_vec=q_vec, indices=dense_cand)
 
         t_dense_cand_ms = (time.perf_counter() - t_dense_cand0) * 1000.0
 
-
         t_fuse0 = time.perf_counter()
         if self.fusion == "minmax":
             sparse_n = _minmax_norm_on_indices(bm25_all, candidate_indices)
-
-
             dense_n = _minmax_norm_from_dict(dense_raw, candidate_indices)
 
             fused = {
@@ -450,7 +455,6 @@ class QueryEngine:
         ranked = sorted(candidate_indices, key=lambda i: fused.get(int(i), float("-inf")), reverse=True)
         t_fuse_ms = (time.perf_counter() - t_fuse0) * 1000.0
 
-
         t_pack0 = time.perf_counter()
         results: List[SearchResult] = []
         take = max(int(top_k) * 5, int(top_k))
@@ -471,7 +475,6 @@ class QueryEngine:
                 )
             )
         t_pack_ms = (time.perf_counter() - t_pack0) * 1000.0
-
 
         t_dedupe0 = time.perf_counter()
         pre_dedupe_n = len(results)
@@ -499,7 +502,9 @@ class QueryEngine:
                 "n_docs": int(n_docs),
                 "n_valid": int(len(valid_indices)),
                 "n_dense_valid": int(len(dense_valid_indices)),
-                "embed_dim": int(getattr(self.index.embeddings, "shape", [0, 0])[1]) if hasattr(self.index.embeddings, "shape") else None,
+                "embed_dim": int(getattr(self.index.embeddings, "shape", [0, 0])[1])
+                if hasattr(self.index.embeddings, "shape")
+                else None,
                 "embeddings_dtype": str(getattr(emb, "dtype", "")),
             },
             "candidates": {

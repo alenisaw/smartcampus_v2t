@@ -1,6 +1,6 @@
 # src/utils/config_loader.py
 """
-Helpers for loading pipeline configuration from config/pipeline.yaml
+Helpers for loading pipeline configuration from configs/pipeline.yaml
 and resolving all paths relative to project root.
 
 New storage layout:
