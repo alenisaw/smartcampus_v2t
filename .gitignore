@@ -35,6 +35,9 @@ data/metrics/
 data/indexes/
 data/**/frames/
 data/**/run_*/
+data/jobs
+data/queue
+data/locks
 
 *.mp4
 *.avi

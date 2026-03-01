@@ -6,7 +6,7 @@ Purpose:
 - Load configs/pipeline.yaml and return PipelineConfig + raw dict.
 - Resolve backend filesystem paths (jobs/queue/locks/index_state/queue_state).
 - Provide safe JSON read/write helpers, timestamps, host id.
-- Provide helpers to list videos and runs using the monolith-compatible layout.
+- Provide helpers to list videos and outputs using the per-video layout.
 """
 from __future__ import annotations
 
@@ -57,9 +57,7 @@ class BackendPaths:
     project_root: Path
     config_path: Path
 
-    raw_dir: Path
-    prepared_dir: Path
-    runs_dir: Path
+    videos_dir: Path
     indexes_dir: Path
 
     jobs_dir: Path
@@ -79,24 +77,32 @@ def load_cfg_and_raw(project_root: Optional[Path] = None, cfg_path: Optional[Pat
     return cfg, raw
 
 
+def _resolve_path(root: Path, value: Optional[str], default_rel: str) -> Path:
+    if value is None or str(value).strip() == "":
+        return (root / default_rel).resolve()
+    p = Path(str(value))
+    return p if p.is_absolute() else (root / p).resolve()
+
+
 def get_backend_paths(cfg, raw: Dict[str, Any], project_root: Optional[Path] = None) -> BackendPaths:
     root = project_root or Path(__file__).resolve().parents[1]
     cfg_path = root / "configs" / "pipeline.yaml"
 
-    raw_dir = Path(cfg.paths.raw_dir)
-    prepared_dir = Path(cfg.paths.prepared_dir)
-    runs_dir = Path(cfg.paths.runs_dir)
+    videos_dir = Path(cfg.paths.videos_dir)
     indexes_dir = Path(cfg.paths.indexes_dir)
 
-    jobs_root = root / "data"
-    jobs_dir = jobs_root / "jobs"
-    queue_dir = jobs_root / "queue"
-    locks_dir = jobs_root / "locks"
+    jobs_raw = raw.get("jobs") or {}
+    queue_raw = raw.get("queue") or {}
+    locks_raw = raw.get("locks") or {}
+
+    jobs_dir = _resolve_path(root, jobs_raw.get("dir"), "data/jobs")
+    queue_dir = _resolve_path(root, queue_raw.get("dir"), "data/queue")
+    locks_dir = _resolve_path(root, locks_raw.get("dir"), "data/locks")
 
     index_state_path = indexes_dir / "index_state.json"
-    queue_state_path = jobs_root / "queue_state.json"
+    queue_state_path = (root / "data" / "queue_state.json").resolve()
 
-    for p in [raw_dir, prepared_dir, runs_dir, indexes_dir, jobs_dir, queue_dir, locks_dir]:
+    for p in [videos_dir, indexes_dir, jobs_dir, queue_dir, locks_dir]:
         p.mkdir(parents=True, exist_ok=True)
 
     if not queue_state_path.exists():
@@ -105,9 +111,7 @@ def get_backend_paths(cfg, raw: Dict[str, Any], project_root: Optional[Path] = N
     return BackendPaths(
         project_root=root,
         config_path=cfg_path,
-        raw_dir=raw_dir,
-        prepared_dir=prepared_dir,
-        runs_dir=runs_dir,
+        videos_dir=videos_dir,
         indexes_dir=indexes_dir,
         jobs_dir=jobs_dir,
         queue_dir=queue_dir,
@@ -121,84 +125,45 @@ def new_job_id(prefix: str = "job") -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
 
 
-def list_raw_videos(raw_dir: Path) -> List[Dict[str, Any]]:
-    out: List[Dict[str, Any]] = []
-    if not raw_dir.exists():
-        return out
-    for p in sorted(raw_dir.iterdir()):
-        if p.is_file() and p.suffix.lower() in {".mp4", ".mov", ".mkv", ".avi"}:
-            try:
-                st = p.stat()
-                out.append(
-                    {
-                        "video_id": p.stem,
-                        "filename": p.name,
-                        "path": str(p),
-                        "size_bytes": int(st.st_size),
-                        "mtime": float(st.st_mtime),
-                    }
-                )
-            except Exception:
-                out.append({"video_id": p.stem, "filename": p.name, "path": str(p)})
-    return out
+def list_videos(videos_dir: Path) -> List[Dict[str, Any]]:
+    from src.utils.video_store import list_videos as _list_videos
+
+    return _list_videos(Path(videos_dir))
 
 
-def list_runs_for_video(runs_dir: Path, video_id: str) -> List[str]:
-    base = runs_dir / video_id
-    if not base.exists():
-        return []
-    runs: List[str] = []
-    for p in sorted(base.iterdir()):
-        if p.is_dir() and p.name.startswith("run_") and (p / "run_manifest.json").exists():
-            runs.append(p.name)
-    return runs
+def read_video_outputs(videos_dir: Path, video_id: str, lang: str) -> Dict[str, Any]:
+    from src.utils.video_store import (
+        outputs_manifest_path,
+        metrics_path,
+        read_metrics,
+        read_segments,
+        read_summary,
+        segments_path,
+        summary_path,
+    )
 
-
-def list_all_runs(runs_dir: Path) -> Dict[str, List[str]]:
-    out: Dict[str, List[str]] = {}
-    if not runs_dir.exists():
-        return out
-    for vid_dir in sorted(runs_dir.iterdir()):
-        if not vid_dir.is_dir():
-            continue
-        runs = list_runs_for_video(runs_dir, vid_dir.name)
-        if runs:
-            out[vid_dir.name] = runs
-    return out
-
-
-def read_run_outputs(runs_dir: Path, video_id: str, run_id: str) -> Dict[str, Any]:
-    run_dir = runs_dir / video_id / run_id
     out: Dict[str, Any] = {
         "video_id": video_id,
-        "run_id": run_id,
+        "language": lang,
         "manifest": None,
         "annotations": [],
         "metrics": None,
         "global_summary": None,
-        "language": None,
-        "device": None,
     }
 
-    mf = run_dir / "run_manifest.json"
-    ap = run_dir / "annotations.json"
-    mp = run_dir / "metrics.json"
-    if mf.exists():
-        out["manifest"] = read_json(mf, default=None)
-        if isinstance(out["manifest"], dict):
-            out["language"] = out["manifest"].get("language")
-            out["device"] = out["manifest"].get("device")
+    mp = outputs_manifest_path(Path(videos_dir), video_id)
+    out["manifest"] = read_json(mp, default=None)
 
-    if ap.exists():
-        out["annotations"] = read_json(ap, default=[]) or []
+    seg = segments_path(Path(videos_dir), video_id, lang)
+    out["annotations"] = read_segments(seg)
 
-    if mp.exists():
-        met = read_json(mp, default=None)
+    sp = summary_path(Path(videos_dir), video_id, lang)
+    summ = read_summary(sp)
+    if isinstance(summ, dict):
+        out["global_summary"] = summ.get("summary")
+
+    met = read_metrics(metrics_path(Path(videos_dir), video_id))
+    if isinstance(met, dict):
         out["metrics"] = met
-        if isinstance(met, dict):
-            extra = met.get("extra") or {}
-            out["global_summary"] = extra.get("global_summary")
-            out["language"] = out["language"] or extra.get("language")
-            out["device"] = out["device"] or extra.get("device")
 
     return out

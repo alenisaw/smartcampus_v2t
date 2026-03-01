@@ -174,7 +174,7 @@ def _dedupe_repeated_words(text: str, max_repeat: int = 2) -> str:
         if key == run_word:
             run_len += 1
             if run_len >= max_repeat:
-                break
+                continue
         else:
             run_word = key
             run_len = 0
@@ -244,6 +244,86 @@ def _normalize_timed_anomalies(raw: str, lang: str) -> str:
     return "; ".join(cleaned) if cleaned else ("нет" if lang == "ru" else ("жоқ" if lang == "kz" else "none"))
 
 
+def _strip_metric_fragments(short_text: str, lang: str) -> str:
+    t = _collapse_spaces(short_text or "")
+    if not t:
+        return t
+
+    if lang == "ru":
+        cuts = [
+            " - тип сцены:",
+            "- тип сцены:",
+            "тип сцены:",
+            " - плотность людей:",
+            "- плотность людей:",
+            "плотность людей:",
+            " - тип движения:",
+            "- тип движения:",
+            "тип движения:",
+            " - аномалии:",
+            "- аномалии:",
+            "аномалии:",
+            " - класс безопасности:",
+            "- класс безопасности:",
+            "класс безопасности:",
+        ]
+    elif lang == "kz":
+        cuts = [
+            " - сахна түрі:",
+            "- сахна түрі:",
+            "сахна түрі:",
+            " - адамдар тығыздығы:",
+            "- адамдар тығыздығы:",
+            "адамдар тығыздығы:",
+            " - қозғалыс түрі:",
+            "- қозғалыс түрі:",
+            "қозғалыс түрі:",
+            " - аномалиялар:",
+            "- аномалиялар:",
+            "аномалиялар:",
+            " - қауіп классы:",
+            "- қауіп классы:",
+            "қауіп классы:",
+        ]
+    else:
+        cuts = [
+            " - scene type:",
+            "- scene type:",
+            "scene type:",
+            " - people density:",
+            "- people density:",
+            "people density:",
+            " - motion type:",
+            "- motion type:",
+            "motion type:",
+            " - anomalies:",
+            "- anomalies:",
+            "anomalies:",
+            " - risk class:",
+            "- risk class:",
+            "risk class:",
+        ]
+
+    low = t.lower()
+    cut_pos: Optional[int] = None
+    for c in cuts:
+        p = low.find(c)
+        if p != -1:
+            cut_pos = p if cut_pos is None else min(cut_pos, p)
+
+    if cut_pos is not None:
+        t = t[:cut_pos].strip()
+
+    if lang == "kz":
+        t = re.sub(r"(жалпы\s+түсінікті\s+қорытынды[:\-]?\s*)", "", t, flags=re.IGNORECASE).strip()
+        t = re.sub(r"(қорытынды(ның)?\s+негізінде[^.]*\.)", "", t, flags=re.IGNORECASE).strip()
+
+    t = re.sub(r"\s*-\s*$", "", t).strip()
+    t = _strip_generic_openers(t)
+    t = _force_max_sentences(t, max_sentences=2)
+    return t
+
+
 def sanitize_global_summary(text: str, lang: str) -> str:
     raw = text or ""
     lines = [l.strip() for l in raw.splitlines() if l.strip()]
@@ -285,9 +365,10 @@ def sanitize_global_summary(text: str, lang: str) -> str:
     short_line = _pick_lines_starting(lines, short_label)
     short_text = _extract_after_prefix(short_line, short_label) if short_line else ""
     short_text = _extract_first_sentences(raw, 2) if not short_text else _collapse_spaces(short_text)
+    short_text = _strip_metric_fragments(short_text, lang=lang)
+    short_text = _collapse_spaces(short_text)
     short_text = _strip_generic_openers(short_text)
-    if short_text and short_text[-1] not in ".!?":
-        short_text += "."
+    short_text = _force_max_sentences(short_text, max_sentences=2)
 
     legacy_timed_line = _pick_lines_starting(lines, legacy_timed_label)
     legacy_timed_raw = _extract_after_prefix(legacy_timed_line, legacy_timed_label) if legacy_timed_line else ""
@@ -584,18 +665,23 @@ class VideoToTextPipeline:
         num_clips = len(clips)
         num_frames = sum(len(c) for c in clips)
         avg_clip_duration = float(sum((e - s) for s, e in clip_timestamps) / len(clip_timestamps))
+        clip_lengths = [len(c) for c in clips]
 
         annotations: List[Annotation] = []
         clip_prompt = build_prompt(self.cfg.model.language)
         batch_size = max(1, int(getattr(self.cfg.model, "batch_size", 1)))
+        max_batch_frames = int(getattr(self.cfg.model, "max_batch_frames", 0) or 0)
 
         t_gen_start = time.perf_counter()
         buckets = _bucket_indices_by_len(clips)
 
         for L in sorted(buckets.keys()):
             idxs = buckets[L]
-            for batch_start in range(0, len(idxs), batch_size):
-                batch_idxs = idxs[batch_start: batch_start + batch_size]
+            effective_batch = batch_size
+            if max_batch_frames > 0:
+                effective_batch = max(1, min(batch_size, max_batch_frames // max(1, int(L))))
+            for batch_start in range(0, len(idxs), effective_batch):
+                batch_idxs = idxs[batch_start: batch_start + effective_batch]
                 batch_paths: List[List[Path]] = [[Path(p) for p in clips[i]] for i in batch_idxs]
                 batch_ts = [clip_timestamps[i] for i in batch_idxs]
 
@@ -641,6 +727,22 @@ class VideoToTextPipeline:
             global_summary = None
 
         extra: Dict[str, Any] = {}
+        extra["clip_stats"] = {
+            "num_clips": int(num_clips),
+            "num_frames": int(num_frames),
+            "frames_min": int(min(clip_lengths)) if clip_lengths else 0,
+            "frames_max": int(max(clip_lengths)) if clip_lengths else 0,
+            "frames_avg": float(sum(clip_lengths) / len(clip_lengths)) if clip_lengths else 0.0,
+        }
+        extra["pipeline"] = {
+            "batch_size": int(batch_size),
+            "max_batch_frames": int(getattr(self.cfg.model, "max_batch_frames", 0) or 0),
+            "attn_implementation": str(getattr(self.cfg.model, "attn_implementation", "auto")),
+            "torch_compile": bool(getattr(self.cfg.runtime, "torch_compile", False)),
+            "torch_compile_mode": str(getattr(self.cfg.runtime, "torch_compile_mode", "")),
+            "autocast_infer": bool(getattr(self.cfg.runtime, "autocast_infer", True)),
+            "dtype": str(getattr(self.cfg.model, "dtype", "")),
+        }
         if global_summary:
             extra["global_summary"] = global_summary
 

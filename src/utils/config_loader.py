@@ -4,9 +4,8 @@ Helpers for loading pipeline configuration from configs/pipeline.yaml
 and resolving all paths relative to project root.
 
 New storage layout:
-- data/raw
-- data/prepared
-- data/runs   (single source of truth for run outputs)
+- data/videos (per-video storage: raw/cache/outputs)
+- data/cache  (global caches)
 - data/indexes
 - data/thumbs
 """
@@ -21,11 +20,13 @@ import yaml
 from src.pipeline.pipeline_config import (
     PathsConfig,
     UiConfig,
+    BackendConfig,
     SearchConfig,
     VideoConfig,
     ClipsConfig,
     ModelConfig,
     RuntimeConfig,
+    TranslationConfig,
     PipelineConfig,
 )
 
@@ -59,6 +60,62 @@ def _resolve_model_name_or_path(root_dir: Path, raw_value: Optional[str], fallba
     return str(_resolve_maybe_relative(root_dir, s))
 
 
+def _validate_raw_config(raw: Dict[str, Any], config_path: Path) -> None:
+    errors: list[str] = []
+
+    def req_section(name: str) -> Dict[str, Any]:
+        sec = raw.get(name)
+        if not isinstance(sec, dict):
+            errors.append(f"Missing or invalid section: {name}")
+            return {}
+        return sec
+
+    paths_raw = req_section("paths")
+    for key in ("root_dir", "data_dir"):
+        if key not in paths_raw:
+            errors.append(f"paths.{key} is required")
+
+    ui_raw = req_section("ui")
+    if "langs" in ui_raw and not isinstance(ui_raw.get("langs"), list):
+        errors.append("ui.langs must be a list")
+
+    search_raw = req_section("search")
+    for key in ("embed_model_name", "w_bm25", "w_dense"):
+        if key not in search_raw:
+            errors.append(f"search.{key} is required")
+
+    video_raw = req_section("video")
+    for key in ("target_fps", "model_input_size", "min_change_threshold", "dark_threshold"):
+        if key not in video_raw:
+            errors.append(f"video.{key} is required")
+    mis = video_raw.get("model_input_size")
+    if isinstance(mis, (list, tuple)) and len(mis) != 2:
+        errors.append("video.model_input_size must have 2 elements")
+
+    clips_raw = req_section("clips")
+    for key in ("window_sec", "stride_sec", "min_clip_frames", "max_clip_frames"):
+        if key not in clips_raw:
+            errors.append(f"clips.{key} is required")
+
+    model_raw = req_section("model")
+    for key in ("model_name_or_path", "device", "dtype", "language", "batch_size", "max_new_tokens"):
+        if key not in model_raw:
+            errors.append(f"model.{key} is required")
+
+    runtime_raw = req_section("runtime")
+    for key in ("seed", "num_workers", "log_level"):
+        if key not in runtime_raw:
+            errors.append(f"runtime.{key} is required")
+
+    translation_raw = raw.get("translation")
+    if translation_raw is not None and not isinstance(translation_raw, dict):
+        errors.append("translation must be a dict if provided")
+
+    if errors:
+        msg = "\n".join(f"- {e}" for e in errors)
+        raise ValueError(f"Invalid config: {config_path}\n{msg}")
+
+
 def _apply_runtime_perf_flags(runtime: RuntimeConfig) -> None:
     try:
         import torch
@@ -81,6 +138,12 @@ def _apply_runtime_perf_flags(runtime: RuntimeConfig) -> None:
                 pass
 
             prec = str(getattr(runtime, "matmul_precision", "") or "").strip().lower()
+            try:
+                if prec in {"highest", "high", "medium"}:
+                    torch.set_float32_matmul_precision(prec)
+            except Exception:
+                pass
+
             if prec in {"highest", "high", "medium"}:
                 if prec == "highest":
                     matmul = "ieee"
@@ -95,6 +158,20 @@ def _apply_runtime_perf_flags(runtime: RuntimeConfig) -> None:
 
             torch.backends.cuda.matmul.fp32_precision = matmul
             torch.backends.cudnn.conv.fp32_precision = conv
+
+            try:
+                use_tf32 = bool(getattr(runtime, "cuda_tf32", True))
+                torch.backends.cuda.matmul.allow_tf32 = use_tf32
+                torch.backends.cudnn.allow_tf32 = use_tf32
+            except Exception:
+                pass
+
+            try:
+                torch.backends.cuda.enable_flash_sdp(True)
+                torch.backends.cuda.enable_mem_efficient_sdp(True)
+                torch.backends.cuda.enable_math_sdp(True)
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -102,9 +179,8 @@ def _apply_runtime_perf_flags(runtime: RuntimeConfig) -> None:
 def ensure_dirs(paths: PathsConfig, strict: bool = False) -> None:
     for d in (
         paths.data_dir,
-        paths.raw_dir,
-        paths.prepared_dir,
-        paths.runs_dir,
+        paths.videos_dir,
+        paths.cache_dir,
         paths.indexes_dir,
         paths.thumbs_dir,
         paths.models_dir,
@@ -148,6 +224,11 @@ def load_pipeline_config(config_path: Path) -> PipelineConfig:
     with config_path.open("r", encoding="utf-8") as f:
         raw: Dict[str, Any] = yaml.safe_load(f)
 
+    if not isinstance(raw, dict):
+        raise ValueError(f"Invalid config: {config_path} (expected YAML dict)")
+
+    _validate_raw_config(raw, config_path)
+
     paths_raw = raw["paths"]
     root_dir = (config_path.parent / paths_raw.get("root_dir", ".")).resolve()
 
@@ -162,19 +243,16 @@ def load_pipeline_config(config_path: Path) -> PipelineConfig:
             return rel(default_rel)
         return rel(str(v))
 
-    raw_dir = rel_default("raw_dir", "data/raw")
-    prepared_dir = rel_default("prepared_dir", "data/prepared")
-    runs_dir = rel_default("runs_dir", "data/runs")
-
+    videos_dir = rel_default("videos_dir", "data/videos")
+    cache_dir = rel_default("cache_dir", "data/cache")
     indexes_dir = rel_default("indexes_dir", "data/indexes")
     thumbs_dir = rel_default("thumbs_dir", "data/thumbs")
 
     paths = PathsConfig(
         root_dir=root_dir,
         data_dir=data_dir,
-        raw_dir=raw_dir,
-        prepared_dir=prepared_dir,
-        runs_dir=runs_dir,
+        videos_dir=videos_dir,
+        cache_dir=cache_dir,
         indexes_dir=indexes_dir,
         thumbs_dir=thumbs_dir,
         models_dir=rel_default("models_dir", "models"),
@@ -202,9 +280,23 @@ def load_pipeline_config(config_path: Path) -> PipelineConfig:
         logo_path=rel(str(ui_raw.get("logo_path", "app/assets/logo.png"))),
     )
 
+    backend_raw = raw.get("backend") or {}
+    backend = BackendConfig(
+        scheme=str(backend_raw.get("scheme", "http")).strip().lower() or "http",
+        host=str(backend_raw.get("host", "127.0.0.1")).strip() or "127.0.0.1",
+        port=int(backend_raw.get("port", 8000)),
+    )
+
     search_raw = raw.get("search") or {}
     search = SearchConfig(
         embed_model_name=str(search_raw.get("embed_model_name", "intfloat/multilingual-e5-base")),
+        query_prefix=str(search_raw.get("query_prefix", "query: ")),
+        passage_prefix=str(search_raw.get("passage_prefix", "passage: ")),
+        normalize_text=_to_bool(search_raw.get("normalize_text", True)),
+        lemmatize=_to_bool(search_raw.get("lemmatize", False)),
+        fallback_langs=[str(x).strip().lower() for x in (search_raw.get("fallback_langs") or ["en"]) if str(x).strip()],
+        translate_queries=_to_bool(search_raw.get("translate_queries", False)),
+        embed_cache=_to_bool(search_raw.get("embed_cache", True)),
         w_bm25=float(search_raw.get("w_bm25", 0.45)),
         w_dense=float(search_raw.get("w_dense", 0.55)),
         candidate_k_sparse=int(search_raw.get("candidate_k_sparse", 200)),
@@ -217,6 +309,13 @@ def load_pipeline_config(config_path: Path) -> PipelineConfig:
     )
 
     video_raw = raw["video"]
+    video_io_raw = raw.get("video_io") or {}
+
+    def _video_io_get(key: str, default: Any) -> Any:
+        if key in video_io_raw:
+            return video_io_raw.get(key, default)
+        return video_raw.get(key, default)
+
     video = VideoConfig(
         target_fps=float(video_raw["target_fps"]),
         model_input_size=tuple(video_raw["model_input_size"]),
@@ -228,12 +327,12 @@ def load_pipeline_config(config_path: Path) -> PipelineConfig:
         max_frames=video_raw.get("max_frames"),
 
         # moved from video_io.py constants
-        jpeg_quality_frames=int(video_raw.get("jpeg_quality_frames", 82)),
-        jpeg_quality_small=int(video_raw.get("jpeg_quality_small", 75)),
-        face_detect_every_saved=int(video_raw.get("face_detect_every_saved", 6)),
-        face_detect_force_on_scenecut=_to_bool(video_raw.get("face_detect_force_on_scenecut", True)),
-        face_blur_strength=int(video_raw.get("face_blur_strength", 31)),
-        face_conf_threshold=float(video_raw.get("face_conf_threshold", 0.5)),
+        jpeg_quality_frames=int(_video_io_get("jpeg_quality_frames", 82)),
+        jpeg_quality_small=int(_video_io_get("jpeg_quality_small", 75)),
+        face_detect_every_saved=int(_video_io_get("face_detect_every_saved", 6)),
+        face_detect_force_on_scenecut=_to_bool(_video_io_get("face_detect_force_on_scenecut", True)),
+        face_blur_strength=int(_video_io_get("face_blur_strength", 31)),
+        face_conf_threshold=float(_video_io_get("face_conf_threshold", 0.5)),
     )
 
     clips_raw = raw["clips"]
@@ -263,6 +362,8 @@ def load_pipeline_config(config_path: Path) -> PipelineConfig:
         top_k=int(model_raw.get("top_k", 40)),
         repetition_penalty=float(model_raw.get("repetition_penalty", 1.0)),
         do_sample=_to_bool(model_raw.get("do_sample", False)),
+        attn_implementation=str(model_raw.get("attn_implementation", "auto")),
+        max_batch_frames=int(model_raw.get("max_batch_frames", 0)),
         timeout_sec=int(model_raw.get("timeout_sec", 60)),
     )
 
@@ -277,16 +378,33 @@ def load_pipeline_config(config_path: Path) -> PipelineConfig:
         cuda_tf32=_to_bool(runtime_raw.get("cuda_tf32", True)),
         matmul_precision=str(runtime_raw.get("matmul_precision", "high")),
         autocast_infer=_to_bool(runtime_raw.get("autocast_infer", True)),
+        torch_compile=_to_bool(runtime_raw.get("torch_compile", False)),
+        torch_compile_mode=str(runtime_raw.get("torch_compile_mode", "reduce-overhead")),
+        torch_compile_fullgraph=_to_bool(runtime_raw.get("torch_compile_fullgraph", False)),
+    )
+
+    translation_raw = raw.get("translation") or {}
+    translation = TranslationConfig(
+        model_name_or_path=str(translation_raw.get("model_name_or_path", "facebook/nllb-200-distilled-1.3B")),
+        device=str(translation_raw.get("device", model.device)),
+        dtype=str(translation_raw.get("dtype", model.dtype)),
+        batch_size=int(translation_raw.get("batch_size", 8)),
+        max_new_tokens=int(translation_raw.get("max_new_tokens", 128)),
+        source_lang=str(translation_raw.get("source_lang", "en")),
+        target_langs=[str(x) for x in (translation_raw.get("target_langs") or ["ru", "kz"])],
+        cache_enabled=_to_bool(translation_raw.get("cache_enabled", True)),
     )
 
     cfg = PipelineConfig(
         paths=paths,
         ui=ui,
+        backend=backend,
         search=search,
         video=video,
         clips=clips,
         model=model,
         runtime=runtime,
+        translation=translation,
     )
 
     ensure_dirs(cfg.paths, strict=cfg.runtime.strict_paths)

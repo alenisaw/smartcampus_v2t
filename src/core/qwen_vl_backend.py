@@ -9,6 +9,7 @@ and supports single-clip and batched generation.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import importlib.util
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -36,6 +37,10 @@ class QwenVLBackend:
         dtype: str = "auto",
         generation_config: Optional[QwenVLGenerationConfig] = None,
         autocast_infer: bool = True,
+        attn_implementation: str = "auto",
+        torch_compile: bool = False,
+        torch_compile_mode: str = "reduce-overhead",
+        torch_compile_fullgraph: bool = False,
     ) -> None:
         if generation_config is None:
             generation_config = QwenVLGenerationConfig()
@@ -45,6 +50,10 @@ class QwenVLBackend:
         self.dtype = dtype
         self.generation_config = generation_config
         self.autocast_infer = bool(autocast_infer)
+        self.attn_implementation = str(attn_implementation or "auto").strip().lower()
+        self.torch_compile = bool(torch_compile)
+        self.torch_compile_mode = str(torch_compile_mode or "reduce-overhead")
+        self.torch_compile_fullgraph = bool(torch_compile_fullgraph)
 
         if device not in {"auto", "cuda", "cpu"}:
             device = "auto"
@@ -66,16 +75,41 @@ class QwenVLBackend:
         if device == "cuda":
             model_kwargs["device_map"] = "auto"
 
-        self.model = AutoModelForImageTextToText.from_pretrained(
-            model_name_or_path,
-            **model_kwargs,
-        )
+        attn_impl = self._pick_attn_implementation(self.attn_implementation)
+        if attn_impl:
+            model_kwargs["attn_implementation"] = attn_impl
+
+        try:
+            self.model = AutoModelForImageTextToText.from_pretrained(
+                model_name_or_path,
+                **model_kwargs,
+            )
+        except TypeError:
+            if "attn_implementation" in model_kwargs:
+                model_kwargs.pop("attn_implementation", None)
+                self.model = AutoModelForImageTextToText.from_pretrained(
+                    model_name_or_path,
+                    **model_kwargs,
+                )
+            else:
+                raise
+        except ValueError:
+            if "attn_implementation" in model_kwargs:
+                model_kwargs.pop("attn_implementation", None)
+                self.model = AutoModelForImageTextToText.from_pretrained(
+                    model_name_or_path,
+                    **model_kwargs,
+                )
+            else:
+                raise
         self.processor = AutoProcessor.from_pretrained(model_name_or_path)
         self.model.eval()
 
         # If not sharded by HF, we can move explicitly.
         if device in {"cuda", "cpu"} and not hasattr(self.model, "hf_device_map"):
             self.model.to(device)
+
+        self._maybe_compile_model()
 
     @classmethod
     def from_pipeline_config(cls, cfg: PipelineConfig) -> "QwenVLBackend":
@@ -100,7 +134,48 @@ class QwenVLBackend:
             dtype=str(model_cfg.dtype),
             generation_config=gen_cfg,
             autocast_infer=bool(getattr(cfg.runtime, "autocast_infer", True)),
+            attn_implementation=str(getattr(model_cfg, "attn_implementation", "auto")),
+            torch_compile=bool(getattr(cfg.runtime, "torch_compile", False)),
+            torch_compile_mode=str(getattr(cfg.runtime, "torch_compile_mode", "reduce-overhead")),
+            torch_compile_fullgraph=bool(getattr(cfg.runtime, "torch_compile_fullgraph", False)),
         )
+
+    @staticmethod
+    def _flash_attn_available() -> bool:
+        try:
+            return importlib.util.find_spec("flash_attn") is not None
+        except Exception:
+            return False
+
+    def _pick_attn_implementation(self, pref: str) -> Optional[str]:
+        pref = (pref or "").strip().lower()
+        if pref in {"flash_attention_2", "flash"}:
+            return "flash_attention_2" if self._flash_attn_available() else "sdpa"
+        if pref in {"sdpa", "sdp"}:
+            return "sdpa"
+        if pref in {"eager", "vanilla", "none"}:
+            return "eager"
+        if pref in {"auto", ""}:
+            if self._flash_attn_available():
+                return "flash_attention_2"
+            return "sdpa"
+        return "sdpa"
+
+    def _maybe_compile_model(self) -> None:
+        if not self.torch_compile:
+            return
+        if not hasattr(torch, "compile"):
+            return
+        if hasattr(self.model, "hf_device_map"):
+            return
+        try:
+            self.model = torch.compile(
+                self.model,
+                mode=self.torch_compile_mode,
+                fullgraph=self.torch_compile_fullgraph,
+            )
+        except Exception:
+            pass
 
     def _build_messages_for_clip(
         self,
