@@ -31,7 +31,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.utils.config_loader import load_pipeline_config
 
 from .index_builder import (
-    E5Embedder,
+    SentenceTransformerEmbedder,
     HybridIndex,
     MODEL_NAME_DEFAULT,
     _tokenize,
@@ -51,7 +51,7 @@ class SearchResult:
     sparse_score: float
     dense_score: float
     video_id: str
-    run_id: str
+    language: str
     start_sec: float
     end_sec: float
     description: str
@@ -130,7 +130,7 @@ def _dedupe_time_hits_bucket(hits: List[SearchResult], tol_sec: float = 1.0) -> 
     seen = set()
     tol = max(1e-6, float(tol_sec))
     for h in hits:
-        key = (h.video_id, h.run_id, int(round(h.start_sec / tol)), int(round(h.end_sec / tol)))
+        key = (h.video_id, int(round(h.start_sec / tol)), int(round(h.end_sec / tol)))
         if key in seen:
             continue
         seen.add(key)
@@ -144,7 +144,7 @@ def _dedupe_time_hits_overlap_nms(hits: List[SearchResult], overlap_thr: float =
     for h in hits:
         ok = True
         for k in kept:
-            if h.video_id != k.video_id or h.run_id != k.run_id:
+            if h.video_id != k.video_id:
                 continue
             if _interval_iou(h.start_sec, h.end_sec, k.start_sec, k.end_sec) >= thr:
                 ok = False
@@ -230,6 +230,7 @@ class QueryEngine:
         config_path: Optional[Path] = None,
         index_dir: Optional[Path] = None,
         config_fingerprint: Optional[str] = None,
+        language: Optional[str] = None,
         w_bm25: Optional[float] = None,
         w_dense: Optional[float] = None,
         candidate_k_sparse: Optional[int] = None,
@@ -249,7 +250,8 @@ class QueryEngine:
         base_index_dir = Path(index_dir) if index_dir is not None else Path(cfg.paths.indexes_dir)
 
         cfg_fp = config_fingerprint or search_config_fingerprint(cfg)
-        resolved_dir = resolve_index_dir(base_index_dir, cfg_fp)
+        self.language = (language or getattr(cfg.ui, "default_lang", None) or "en").strip().lower()
+        resolved_dir = resolve_index_dir(base_index_dir, cfg_fp, language=self.language)
 
         self.index_dir = base_index_dir
         self.config_fingerprint = str(cfg_fp)
@@ -278,6 +280,8 @@ class QueryEngine:
         )
 
         self.dense_chunk_size = max(256, int(dense_chunk_size))
+        self.normalize_text = bool(getattr(s, "normalize_text", True))
+        self.lemmatize = bool(getattr(s, "lemmatize", False))
 
         meta_model = None
         try:
@@ -291,7 +295,14 @@ class QueryEngine:
             else str(getattr(s, "embed_model_name", None) or meta_model or MODEL_NAME_DEFAULT)
         )
 
-        self.embedder = E5Embedder(model_name=str(model_name), device=device)
+        query_prefix = str(getattr(s, "query_prefix", "query: "))
+        passage_prefix = str(getattr(s, "passage_prefix", "passage: "))
+        self.embedder = SentenceTransformerEmbedder(
+            model_name=str(model_name),
+            device=device,
+            query_prefix=query_prefix,
+            passage_prefix=passage_prefix,
+        )
         self.last_stats: Dict[str, Any] = {}
 
         self._dense_valid_indices_cache: Optional[np.ndarray] = None
@@ -299,12 +310,10 @@ class QueryEngine:
     def get_last_stats(self) -> Dict[str, Any]:
         return dict(self.last_stats or {})
 
-    def _build_mask(self, docs, video_id: Optional[str], run_id: Optional[str]) -> List[bool]:
+    def _build_mask(self, docs, video_id: Optional[str]) -> List[bool]:
         mask = [True] * len(docs)
         if video_id is not None:
             mask = [m and (d.video_id == video_id) for m, d in zip(mask, docs)]
-        if run_id is not None:
-            mask = [m and (d.run_id == run_id) for m, d in zip(mask, docs)]
         return mask
 
     def _dense_valid_indices(self) -> np.ndarray:
@@ -329,7 +338,6 @@ class QueryEngine:
         query: str,
         top_k: int = 10,
         video_id: Optional[str] = None,
-        run_id: Optional[str] = None,
         dedupe: bool = True,
         return_stats: bool = False,
     ) -> Union[List[SearchResult], Tuple[List[SearchResult], Dict[str, Any]]]:
@@ -350,7 +358,7 @@ class QueryEngine:
             return ([], dict(self.last_stats)) if return_stats else []
 
         t_filter0 = time.perf_counter()
-        mask = self._build_mask(docs, video_id=video_id, run_id=run_id)
+        mask = self._build_mask(docs, video_id=video_id)
         valid_indices = [i for i, m in enumerate(mask) if m]
         t_filter_ms = (time.perf_counter() - t_filter0) * 1000.0
 
@@ -367,7 +375,7 @@ class QueryEngine:
             return ([], dict(self.last_stats)) if return_stats else []
 
         t_sparse0 = time.perf_counter()
-        q_tokens = _tokenize(q)
+        q_tokens = _tokenize(q, lang=self.language, lemmatize=self.lemmatize, normalize=self.normalize_text)
         bm25_all = self.index.bm25.score(q_tokens)
         top_sparse = _topn_indices(bm25_all, valid_indices, self.candidate_k_sparse)
         t_sparse_ms = (time.perf_counter() - t_sparse0) * 1000.0
@@ -466,7 +474,7 @@ class QueryEngine:
                     sparse_score=float(sparse_used.get(int(i), 0.0)),
                     dense_score=float(dense_used.get(int(i), 0.0)),
                     video_id=d.video_id,
-                    run_id=d.run_id,
+                    language=self.language,
                     start_sec=float(d.start_sec),
                     end_sec=float(d.end_sec),
                     description=d.text,
@@ -494,10 +502,10 @@ class QueryEngine:
             "ok": True,
             "query": q,
             "query_tokens": int(len(q_tokens)),
-            "filters": {"video_id": video_id, "run_id": run_id},
+            "filters": {"video_id": video_id, "language": self.language},
             "index": {
                 "index_dir": str(self.index_dir),
-                "resolved_index_dir": str(resolve_index_dir(self.index_dir, self.config_fingerprint)),
+                "resolved_index_dir": str(resolve_index_dir(self.index_dir, self.config_fingerprint, self.language)),
                 "config_fingerprint": self.config_fingerprint,
                 "n_docs": int(n_docs),
                 "n_valid": int(len(valid_indices)),

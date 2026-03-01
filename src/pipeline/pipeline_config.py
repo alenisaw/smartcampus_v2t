@@ -14,10 +14,8 @@ class PathsConfig:
     root_dir: Path
     data_dir: Path
 
-    raw_dir: Path
-    prepared_dir: Path
-    runs_dir: Path
-
+    videos_dir: Path
+    cache_dir: Path
     indexes_dir: Path
     thumbs_dir: Path
 
@@ -41,8 +39,22 @@ class UiConfig:
 
 
 @dataclass
+class BackendConfig:
+    scheme: str
+    host: str
+    port: int
+
+
+@dataclass
 class SearchConfig:
     embed_model_name: str
+    query_prefix: str
+    passage_prefix: str
+    normalize_text: bool
+    lemmatize: bool
+    fallback_langs: List[str]
+    translate_queries: bool
+    embed_cache: bool
 
     w_bm25: float
     w_dense: float
@@ -105,6 +117,9 @@ class ModelConfig:
     repetition_penalty: float
     do_sample: bool
 
+    attn_implementation: str
+    max_batch_frames: int
+
     timeout_sec: int
 
 
@@ -123,13 +138,31 @@ class RuntimeConfig:
     matmul_precision: str
     autocast_infer: bool
 
+    torch_compile: bool
+    torch_compile_mode: str
+    torch_compile_fullgraph: bool
+
+
+@dataclass
+class TranslationConfig:
+    model_name_or_path: str
+    device: str
+    dtype: str
+    batch_size: int
+    max_new_tokens: int
+    source_lang: str
+    target_langs: List[str]
+    cache_enabled: bool
+
 
 @dataclass
 class PipelineConfig:
     paths: PathsConfig
     ui: UiConfig
+    backend: BackendConfig
     search: SearchConfig
     video: VideoConfig
     clips: ClipsConfig
     model: ModelConfig
     runtime: RuntimeConfig
+    translation: TranslationConfig

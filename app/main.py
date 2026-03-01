@@ -18,7 +18,7 @@ from app.api_client import BackendClient
 from app.state import UIState
 from app import ui as U
 
-TAB_IDS = ["home", "search"]
+TAB_IDS = ["storage", "analytics", "assistant"]
 CFG_PATH = PROJECT_ROOT / "configs" / "pipeline.yaml"
 
 
@@ -39,7 +39,7 @@ def get_cfg():
     return _cfg_cached(str(CFG_PATH), _mtime(CFG_PATH))
 
 
-def _get_tab_from_query(default_tab: str = "home") -> str:
+def _get_tab_from_query(default_tab: str = "storage") -> str:
     try:
         qp = st.query_params
         tab = qp.get("tab", default_tab)
@@ -72,15 +72,22 @@ def main() -> None:
     if st.session_state.get("ui_lang") not in (langs or ["ru", "kz", "en"]):
         st.session_state["ui_lang"] = default_lang
 
-    base_url = str(getattr(cfg, "backend_url", "") or "http://127.0.0.1:8000")
+    try:
+        b = cfg.backend
+        scheme = str(getattr(b, "scheme", "http") or "http").strip().lower()
+        host = str(getattr(b, "host", "127.0.0.1") or "127.0.0.1").strip()
+        port = int(getattr(b, "port", 8000) or 8000)
+        base_url = f"{scheme}://{host}:{port}"
+    except Exception:
+        base_url = "http://127.0.0.1:8000"
     client = BackendClient(base_url=base_url)
 
     tab = _get_tab_from_query(default_tab="home")
 
     T = U.get_T(ui_text, st.session_state.get("ui_lang", default_lang))
-    labels = T.get("tabs") or ["Home", "Search"]
+    labels = T.get("tabs") or ["Hub", "Analytics", "Assistant"]
     if not isinstance(labels, list) or len(labels) != len(TAB_IDS):
-        labels = ["Home", "Search"]
+        labels = ["Hub", "Analytics", "Assistant"]
 
     U.render_header(
         T=T,
@@ -96,10 +103,12 @@ def main() -> None:
             U.soft_note(f"Backend is not reachable at {base_url}", kind="warn")
             st.stop()
 
-    if tab == "home":
-        U.home_tab(client, cfg, ui_text)
-    else:
+    if tab == "storage":
+        U.gallery_tab(client, cfg, ui_text)
+    elif tab == "analytics":
         U.search_tab(client, cfg, ui_text)
+    else:
+        U.assistant_tab(client, cfg, ui_text)
 
     U.footer(U.get_T(ui_text, st.session_state.get("ui_lang", default_lang)))
     U.render_i18n_metrics()

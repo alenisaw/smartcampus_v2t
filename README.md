@@ -54,7 +54,6 @@ The pipeline is organized into modular components:
 ## Repository Structure
 
 ```text
-```text
 smartcampus_v2t/
   .streamlit/
     config.toml               # Streamlit configuration
@@ -64,7 +63,7 @@ smartcampus_v2t/
       logo.png                # UI logo
       styles.css              # Custom UI styles
       ui_text.json            # UI text + i18n (ru/kz/en)
-    app.py                    # Streamlit UI entrypoint (Home/Search, processing, index updates)
+    main.py                   # Streamlit UI entrypoint (Home/Search, processing, index updates)
 
   configs/
     pipeline.yaml             # Unified configuration (paths, model, clips, search, UI)
@@ -136,6 +135,7 @@ source .venv/bin/activate   # Linux / macOS
 # .venv\Scripts\activate  # Windows
 
 pip install -U pip
+# Install GPU-enabled PyTorch first (see https://pytorch.org/get-started/locally/)
 pip install -r requirements.txt
 ```
 
@@ -144,7 +144,7 @@ pip install -r requirements.txt
 All system parameters are defined in a single file:
 
 ```
-config/pipeline.yaml
+configs/pipeline.yaml
 ```
 
 This includes:

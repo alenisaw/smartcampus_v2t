@@ -2,10 +2,8 @@ paths:
   root_dir: ..
   data_dir: data
 
-  raw_dir: data/raw
-  prepared_dir: data/prepared
-  runs_dir: data/runs
-
+  videos_dir: data/videos
+  cache_dir: data/cache
   indexes_dir: data/indexes
   thumbs_dir: data/thumbs
 
@@ -27,7 +25,14 @@ ui:
 
 
 search:
-  embed_model_name: intfloat/multilingual-e5-base
+  embed_model_name: BAAI/bge-m3
+  query_prefix: "query: "
+  passage_prefix: "passage: "
+  normalize_text: true
+  lemmatize: true
+  fallback_langs: ["en"]
+  translate_queries: true
+  embed_cache: true
   w_bm25: 0.45
   w_dense: 0.55
   candidate_k_sparse: 200
@@ -71,16 +76,28 @@ model:
   model_name_or_path: models/qwen3-vl-2b-instruct
   device: cuda
   dtype: fp16
-  language: kz
+  language: en
 
   batch_size: 3
+  max_batch_frames: 64
   max_new_tokens: 128
   temperature: 0.4
   top_p: 0.9
   top_k: 40
   repetition_penalty: 1.1
   do_sample: true
+  attn_implementation: auto
   timeout_sec: 60
+
+translation:
+  model_name_or_path: facebook/nllb-200-distilled-1.3B
+  device: cuda
+  dtype: fp16
+  batch_size: 8
+  max_new_tokens: 128
+  source_lang: en
+  target_langs: ["ru", "kz"]
+  cache_enabled: true
 
 
 runtime:
@@ -96,8 +113,12 @@ runtime:
   torch_threads: 0
   matmul_precision: high
   autocast_infer: true
+  torch_compile: true
+  torch_compile_mode: reduce-overhead
+  torch_compile_fullgraph: false
 
 backend:
+  scheme: "http"
   host: "127.0.0.1"
   port: 8000
 
@@ -119,5 +140,10 @@ worker:
 
 index:
   auto_update_on_done: true
+
+webhook:
+  enabled: false
+  url: ""
+  timeout_sec: 5
 
 

@@ -26,6 +26,8 @@ import numpy as np
 
 from src.core.types import FrameInfo, VideoMeta
 from src.pipeline.pipeline_config import PipelineConfig
+from src.utils.video_store import cache_dir as video_cache_dir
+from src.utils.video_store import find_video_file
 
 SMALL_SIZE: Tuple[int, int] = (64, 64)
 
@@ -37,6 +39,8 @@ def _cfg_video_io_get(config: PipelineConfig, key: str, default: Any) -> Any:
             vio = getattr(config, "videoio", None)
         if vio is None:
             vio = getattr(config, "video_io_cfg", None)
+        if vio is None:
+            vio = getattr(config, "video", None)
         if vio is None:
             return default
         return getattr(vio, key, default)
@@ -59,7 +63,9 @@ def prepare_video(
     video_cfg = config.video
 
     if video_path is None:
-        video_path = paths_cfg.raw_dir / f"{video_id}.mp4"
+        video_path = find_video_file(Path(paths_cfg.videos_dir), video_id)
+        if video_path is None:
+            video_path = Path(paths_cfg.videos_dir) / video_id / "raw" / f"{video_id}.mp4"
     video_path = video_path.resolve()
     if not video_path.exists():
         raise FileNotFoundError(f"Video not found: {video_path}")
@@ -76,8 +82,7 @@ def prepare_video(
     cfg_fp = _video_cfg_fingerprint(config)
 
     cache_hit = _try_load_cached_video_meta(
-        prepared_base=paths_cfg.prepared_dir,
-        video_id=video_id,
+        prepared_base=video_cache_dir(Path(paths_cfg.videos_dir), video_id),
         video_fp=video_fp,
         cfg_fp=cfg_fp,
     )
@@ -92,8 +97,7 @@ def prepare_video(
         return cache_hit
 
     prepared_root, frames_dir, small_dir = _ensure_cache_dirs(
-        video_id=video_id,
-        prepared_base=paths_cfg.prepared_dir,
+        prepared_base=video_cache_dir(Path(paths_cfg.videos_dir), video_id),
         video_fp=video_fp,
         cfg_fp=cfg_fp,
         save_small=bool(video_cfg.save_small_frames),
@@ -163,13 +167,18 @@ def prepare_video(
     last_face_detect_saved_idx = -10_000
 
     while True:
-        ok, frame = cap.read()
+        ok = cap.grab()
         if not ok:
             break
 
         raw_read_frames += 1
 
         if frame_idx % step_frames != 0:
+            frame_idx += 1
+            continue
+
+        ok, frame = cap.retrieve()
+        if not ok:
             frame_idx += 1
             continue
 
@@ -366,18 +375,17 @@ def _video_cfg_fingerprint(config: PipelineConfig) -> str:
     return hashlib.sha1(raw).hexdigest()[:16]
 
 
-def _cache_dir(prepared_base: Path, video_id: str, video_fp: str, cfg_fp: str) -> Path:
+def _cache_dir(prepared_base: Path, video_fp: str, cfg_fp: str) -> Path:
     vtag = _short_hash(video_fp, 12)
-    return Path(prepared_base) / video_id / "cache" / f"v{vtag}" / f"c{cfg_fp}"
+    return Path(prepared_base) / f"v{vtag}" / f"c{cfg_fp}"
 
 
 def _try_load_cached_video_meta(
     prepared_base: Path,
-    video_id: str,
     video_fp: str,
     cfg_fp: str,
 ) -> Optional[VideoMeta]:
-    root = _cache_dir(prepared_base, video_id, video_fp, cfg_fp)
+    root = _cache_dir(prepared_base, video_fp, cfg_fp)
     meta_path = root / "meta.json"
     if not meta_path.exists():
         return None
@@ -428,13 +436,12 @@ def _video_meta_from_json_obj(obj: Dict[str, Any]) -> VideoMeta:
 
 
 def _ensure_cache_dirs(
-    video_id: str,
     prepared_base: Path,
     video_fp: str,
     cfg_fp: str,
     save_small: bool,
 ) -> Tuple[Path, Path, Optional[Path]]:
-    root = _cache_dir(prepared_base, video_id, video_fp, cfg_fp)
+    root = _cache_dir(prepared_base, video_fp, cfg_fp)
     frames_dir = root / "frames"
     small_dir = root / "small" if save_small else None
 
