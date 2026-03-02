@@ -20,6 +20,8 @@ Writes per index folder:
 
 Layout expected:
 videos_root/<video_id>/outputs/segments/<lang>.jsonl.zst
+or
+videos_root/<video_id>/outputs/variants/<variant>/segments/<lang>.jsonl.zst
 """
 
 from __future__ import annotations
@@ -29,6 +31,7 @@ import json
 import sqlite3
 import logging
 import math
+import numpy as np
 import pickle
 import re
 import sys
@@ -244,23 +247,35 @@ def _read_jsonl_zst(path: Path) -> List[Dict[str, Any]]:
     return rows
 
 
-def _iter_segment_files(videos_root: Path, language: str) -> List[Path]:
+def _iter_segment_files(videos_root: Path, language: str, variant: Optional[str] = None) -> List[Path]:
     videos_root = Path(videos_root)
     if not videos_root.exists():
         return []
     lang = str(language).strip().lower()
+    variant = str(variant).strip().lower() if variant else None
     files: List[Path] = []
-    if zstd is not None:
-        files += list(videos_root.glob(f"*/outputs/segments/{lang}.jsonl.zst"))
-    files += list(videos_root.glob(f"*/outputs/segments/{lang}.jsonl.gz"))
+    if variant:
+        if zstd is not None:
+            files += list(videos_root.glob(f"*/outputs/variants/{variant}/segments/{lang}.jsonl.zst"))
+        files += list(videos_root.glob(f"*/outputs/variants/{variant}/segments/{lang}.jsonl.gz"))
+    else:
+        if zstd is not None:
+            files += list(videos_root.glob(f"*/outputs/segments/{lang}.jsonl.zst"))
+        files += list(videos_root.glob(f"*/outputs/segments/{lang}.jsonl.gz"))
     return sorted(files)
 
 
-def _guess_video_id_from_path(p: Path) -> str:
+def _guess_source_from_path(p: Path) -> Tuple[str, Optional[str]]:
     try:
-        return p.parent.parent.parent.name
+        parts = list(p.parts)
+        idx = parts.index("outputs")
+        video_id = parts[idx - 1] if idx >= 1 else "unknown"
+        variant = None
+        if len(parts) > idx + 2 and parts[idx + 1] == "variants":
+            variant = parts[idx + 2]
+        return str(video_id), (str(variant) if variant else None)
     except Exception:
-        return "unknown"
+        return "unknown", None
 
 
 def _file_fingerprint(p: Path) -> str:
@@ -268,7 +283,9 @@ def _file_fingerprint(p: Path) -> str:
     return f"{st.st_size}:{st.st_mtime_ns}"
 
 
-def _stable_doc_id(video_id: str, i: int) -> str:
+def _stable_doc_id(video_id: str, i: int, variant: Optional[str] = None) -> str:
+    if variant:
+        return f"{video_id}/{variant}/seg_{i:04d}"
     return f"{video_id}/seg_{i:04d}"
 
 
@@ -298,21 +315,33 @@ def config_tag_from_fingerprint(config_fingerprint: Optional[str]) -> str:
 
 
 def resolve_index_dir(
-    base_index_dir: Path, config_fingerprint: Optional[str] = None, language: Optional[str] = None
+    base_index_dir: Path,
+    config_fingerprint: Optional[str] = None,
+    language: Optional[str] = None,
+    variant: Optional[str] = None,
 ) -> Path:
     base = Path(base_index_dir)
     if language:
         base = base / _sanitize_tag(str(language))
+    if variant:
+        base = base / "variants" / _sanitize_tag(str(variant))
     return base / config_tag_from_fingerprint(config_fingerprint)
 
 
 def search_config_fingerprint(cfg: Any) -> str:
+    cfg_fp = getattr(cfg, "config_fingerprint", None)
+    if cfg_fp:
+        return str(cfg_fp)
     try:
         s = cfg.search
         payload = {
             "embed_model_name": str(getattr(s, "embed_model_name", MODEL_NAME_DEFAULT)),
             "query_prefix": str(getattr(s, "query_prefix", "query: ")),
             "passage_prefix": str(getattr(s, "passage_prefix", "passage: ")),
+            "embedding_model_id": str(getattr(s, "embedding_model_id", "")),
+            "embedding_backend": str(getattr(s, "embedding_backend", "auto")),
+            "reranker_model_id": str(getattr(s, "reranker_model_id", "")),
+            "reranker_backend": str(getattr(s, "reranker_backend", "auto")),
             "normalize_text": bool(getattr(s, "normalize_text", True)),
             "lemmatize": bool(getattr(s, "lemmatize", False)),
             "w_bm25": float(getattr(s, "w_bm25", 0.45)),
@@ -342,8 +371,97 @@ class Doc:
     start_sec: float
     end_sec: float
     text: str
+    display_text: Optional[str] = None
     extra: Optional[Dict[str, Any]] = None
     source_path: Optional[str] = None
+
+
+def _coerce_str_list(value: Any) -> List[str]:
+    out: List[str] = []
+    if isinstance(value, list):
+        for item in value:
+            text = str(item or "").strip()
+            if text:
+                out.append(text)
+    elif value is not None:
+        text = str(value).strip()
+        if text:
+            out.append(text)
+    return out
+
+
+def _extract_doc_metadata(item: Dict[str, Any], variant: Optional[str]) -> Dict[str, Any]:
+    base_extra = item.get("extra")
+    meta: Dict[str, Any] = dict(base_extra) if isinstance(base_extra, dict) else {}
+
+    for key in ("segment_id", "event_type", "risk_level", "people_count_bucket", "motion_type"):
+        value = item.get(key)
+        if value is not None:
+            meta[key] = str(value)
+
+    for key in ("tags", "objects", "anomaly_notes"):
+        values = _coerce_str_list(item.get(key))
+        if values:
+            meta[key] = values
+        elif key not in meta:
+            meta[key] = []
+
+    anomaly_flag = item.get("anomaly_flag")
+    if anomaly_flag is not None:
+        meta["anomaly_flag"] = bool(anomaly_flag)
+
+    if variant is not None:
+        meta["variant"] = str(variant)
+
+    return meta
+
+
+def _build_searchable_text(display_text: str, meta: Dict[str, Any]) -> str:
+    parts: List[str] = []
+    base = str(display_text or "").strip()
+    if base:
+        parts.append(base)
+
+    scalar_keys = ("event_type", "risk_level", "people_count_bucket", "motion_type")
+    for key in scalar_keys:
+        value = str(meta.get(key) or "").strip()
+        if value:
+            parts.append(value)
+
+    for key in ("tags", "objects"):
+        for value in _coerce_str_list(meta.get(key)):
+            parts.append(value)
+
+    return " \n ".join(parts)
+
+
+def _normalize_loaded_doc(doc: Any) -> Optional[Doc]:
+    try:
+        if isinstance(doc, dict):
+            getter = doc.get
+        else:
+            getter = lambda key, default=None: getattr(doc, key, default)
+
+        text = str(getter("text", "") or "")
+        display_text = getter("display_text", None)
+        if display_text is None:
+            display_text = text
+        extra = getter("extra", None)
+        if not isinstance(extra, dict):
+            extra = {}
+        return Doc(
+            doc_id=str(getter("doc_id", "") or ""),
+            video_id=str(getter("video_id", "") or ""),
+            language=str(getter("language", "") or ""),
+            start_sec=float(getter("start_sec", 0.0) or 0.0),
+            end_sec=float(getter("end_sec", 0.0) or 0.0),
+            text=text,
+            display_text=str(display_text or ""),
+            extra=extra,
+            source_path=getter("source_path", None),
+        )
+    except Exception:
+        return None
 
 
 class BM25Index:
@@ -395,6 +513,8 @@ class BM25Index:
 
 
 class SentenceTransformerEmbedder:
+    """Embed text with sentence-transformers for dense retrieval."""
+
     def __init__(
         self,
         model_name: str = MODEL_NAME_DEFAULT,
@@ -432,6 +552,185 @@ class SentenceTransformerEmbedder:
         return self.model.encode([self.prep_query(text)], normalize_embeddings=True, show_progress_bar=False)[0]
 
 
+class TransformersTextEmbedder:
+    """Embed text with a generic transformers model using masked mean pooling."""
+
+    def __init__(
+        self,
+        model_name: str,
+        device: Optional[str] = None,
+        query_prefix: str = "query: ",
+        passage_prefix: str = "passage: ",
+    ):
+        try:
+            import torch
+            from transformers import AutoModel, AutoTokenizer
+        except Exception as exc:
+            raise RuntimeError(
+                "Install `transformers` and `torch` to use the transformers embedding backend."
+            ) from exc
+
+        self.model_name = str(model_name)
+        self.query_prefix = str(query_prefix)
+        self.passage_prefix = str(passage_prefix)
+        self._torch = torch
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, trust_remote_code=True)
+        self.model = AutoModel.from_pretrained(self.model_name, trust_remote_code=True)
+        self.model.eval()
+
+        device_name = str(device or "").strip()
+        if device_name:
+            try:
+                self.model.to(device_name)
+            except Exception:
+                pass
+
+    def prep_passage(self, text: str) -> str:
+        return f"{self.passage_prefix}{text}"
+
+    def prep_query(self, text: str) -> str:
+        return f"{self.query_prefix}{text}"
+
+    def _encode(self, texts: List[str], batch_size: int = 32):
+        rows: List[Any] = []
+        model_device = None
+        try:
+            model_device = next(self.model.parameters()).device
+        except Exception:
+            model_device = None
+
+        for start in range(0, len(texts), max(1, int(batch_size))):
+            batch = texts[start : start + max(1, int(batch_size))]
+            encoded = self.tokenizer(
+                batch,
+                padding=True,
+                truncation=True,
+                max_length=512,
+                return_tensors="pt",
+            )
+            if model_device is not None:
+                for key, value in encoded.items():
+                    try:
+                        encoded[key] = value.to(model_device)
+                    except Exception:
+                        pass
+
+            with self._torch.inference_mode():
+                outputs = self.model(**encoded)
+                hidden = getattr(outputs, "last_hidden_state", None)
+                if hidden is None:
+                    hidden = outputs[0]
+                attn = encoded.get("attention_mask")
+                if attn is None:
+                    pooled = hidden.mean(dim=1)
+                else:
+                    mask = attn.unsqueeze(-1).expand(hidden.size()).float()
+                    denom = mask.sum(dim=1).clamp(min=1.0)
+                    pooled = (hidden * mask).sum(dim=1) / denom
+                pooled = self._torch.nn.functional.normalize(pooled, p=2, dim=1)
+                rows.append(pooled.detach().cpu().numpy())
+
+        if not rows:
+            return np.zeros((0, 0), dtype=np.float32)
+        return np.concatenate(rows, axis=0).astype(np.float32, copy=False)
+
+    def encode_passages(self, texts: List[str], batch_size: int = 32):
+        return self._encode([self.prep_passage(t) for t in texts], batch_size=batch_size)
+
+    def encode_query(self, text: str):
+        arr = self._encode([self.prep_query(text)], batch_size=1)
+        return arr[0] if len(arr) else np.zeros((0,), dtype=np.float32)
+
+
+def _looks_like_transformers_model(model_name: str) -> bool:
+    """Detect model ids or paths that should prefer the transformers embedder."""
+
+    text = str(model_name or "").strip()
+    if not text:
+        return False
+    if "qwen" in text.lower():
+        return True
+    path = Path(text)
+    if path.exists():
+        return any(path.glob("*.safetensors")) or any(path.glob("*.bin")) or any(path.glob("*.pt"))
+    return False
+
+
+def select_embedding_model_ref(search_cfg: Any, models_dir: Optional[Path] = None) -> str:
+    """Choose the effective embedding model ref for the current config."""
+
+    backend_name = str(getattr(search_cfg, "embedding_backend", "auto") or "auto").strip().lower() or "auto"
+    fallback_name = str(getattr(search_cfg, "embed_model_name", MODEL_NAME_DEFAULT) or MODEL_NAME_DEFAULT)
+    preferred_name = str(getattr(search_cfg, "embedding_model_id", "") or fallback_name)
+
+    if backend_name == "transformers":
+        return preferred_name
+    if backend_name == "sentence_transformers":
+        return fallback_name
+    if models_dir:
+        local_candidate = Path(models_dir) / preferred_name.split("/")[-1].strip().lower()
+        if _looks_like_transformers_model(str(local_candidate)):
+            return str(local_candidate)
+    return fallback_name
+
+
+def build_text_embedder(
+    *,
+    model_name: str,
+    device: Optional[str],
+    query_prefix: str,
+    passage_prefix: str,
+    backend: str = "auto",
+    fallback_model_name: Optional[str] = None,
+):
+    """Build an embedder with backend auto-selection and a sentence-transformer fallback."""
+
+    backend_name = str(backend or "auto").strip().lower() or "auto"
+
+    def _build_sentence(name: str):
+        return SentenceTransformerEmbedder(
+            model_name=name,
+            device=device,
+            query_prefix=query_prefix,
+            passage_prefix=passage_prefix,
+        )
+
+    def _build_transformers(name: str):
+        return TransformersTextEmbedder(
+            model_name=name,
+            device=device,
+            query_prefix=query_prefix,
+            passage_prefix=passage_prefix,
+        )
+
+    if backend_name == "sentence_transformers":
+        return _build_sentence(model_name)
+    if backend_name == "transformers":
+        try:
+            return _build_transformers(model_name)
+        except Exception:
+            if fallback_model_name:
+                return _build_sentence(fallback_model_name)
+            raise
+
+    if _looks_like_transformers_model(model_name):
+        try:
+            return _build_transformers(model_name)
+        except Exception:
+            if fallback_model_name:
+                return _build_sentence(fallback_model_name)
+
+    try:
+        return _build_sentence(model_name)
+    except Exception:
+        if fallback_model_name and fallback_model_name != model_name:
+            try:
+                return _build_transformers(fallback_model_name)
+            except Exception:
+                pass
+        raise
+
+
 @dataclass
 class HybridIndex:
     docs: List[Doc]
@@ -449,19 +748,20 @@ def _load_manifest(index_dir: Path) -> Dict[str, Any]:
         if zstd is None:
             layout = "videos/<video_id>/outputs/segments/<lang>.jsonl.gz"
         return {
-            "version": 4,
+            "version": 5,
             "model_name": MODEL_NAME_DEFAULT,
             "bm25": {"k1": 1.6, "b": 0.75},
             "sources": {},
             "layout": layout,
             "doc_id_scheme": "stable_by_position",
+            "variant": None,
             "has_dense_valid": True,
         }
     m = _read_json(p)
     if not isinstance(m, dict):
         m = {}
 
-    m.setdefault("version", 4)
+    m.setdefault("version", 5)
     m.setdefault("model_name", MODEL_NAME_DEFAULT)
     m.setdefault("bm25", {"k1": 1.6, "b": 0.75})
     m.setdefault("sources", {})
@@ -471,6 +771,7 @@ def _load_manifest(index_dir: Path) -> Dict[str, Any]:
             m["layout"] = "videos/<video_id>/outputs/segments/<lang>.jsonl.gz"
     m.setdefault("doc_id_scheme", "stable_by_position")
     m.setdefault("language", None)
+    m.setdefault("variant", None)
     m.setdefault("has_dense_valid", True)
     return m
 
@@ -488,7 +789,15 @@ def _load_corpus(index_dir: Path) -> Dict[str, Doc]:
     if pkl.exists():
         obj = pickle.loads(pkl.read_bytes())
         if isinstance(obj, dict):
-            return obj
+            out: Dict[str, Doc] = {}
+            for key, value in obj.items():
+                normalized = _normalize_loaded_doc(value)
+                if normalized is None:
+                    continue
+                if not normalized.doc_id:
+                    normalized.doc_id = str(key)
+                out[str(normalized.doc_id)] = normalized
+            return out
         return {}
     return {}
 
@@ -540,11 +849,14 @@ def build_or_update_index(
     videos_root: Path = DEFAULT_VIDEOS_ROOT,
     index_dir: Path = DEFAULT_INDEX_DIR,
     model_name: str = MODEL_NAME_DEFAULT,
+    embedding_backend: str = "auto",
+    fallback_model_name: Optional[str] = None,
     device: Optional[str] = None,
     bm25_k1: float = 1.6,
     bm25_b: float = 0.75,
     batch_size: int = 64,
     config_fingerprint: Optional[str] = None,
+    variant: Optional[str] = None,
     embed_store_dtype: str = "float32",
     language: str = "en",
     query_prefix: str = "query: ",
@@ -558,17 +870,20 @@ def build_or_update_index(
     t_total0 = time.perf_counter()
 
     base_index_dir = Path(index_dir)
-    real_index_dir = resolve_index_dir(base_index_dir, config_fingerprint, language=language)
+    real_index_dir = resolve_index_dir(base_index_dir, config_fingerprint, language=language, variant=variant)
     real_index_dir.mkdir(parents=True, exist_ok=True)
 
     embed_store_dtype = _normalize_embed_store_dtype(embed_store_dtype)
+    embedding_backend = str(embedding_backend or "auto").strip().lower() or "auto"
     manifest = _load_manifest(real_index_dir)
+    prev_manifest_version = int(manifest.get("version", 0) or 0)
+    schema_changed = prev_manifest_version < 5
 
     old_bm25 = (manifest.get("bm25") or {})
     bm25_changed = (float(old_bm25.get("k1", 1.6)) != float(bm25_k1)) or (float(old_bm25.get("b", 0.75)) != float(bm25_b))
     model_changed = manifest.get("model_name") != model_name
 
-    if model_changed:
+    if model_changed or schema_changed:
         manifest["model_name"] = model_name
         manifest["sources"] = {}
         docs_by_id: Dict[str, Doc] = {}
@@ -580,17 +895,25 @@ def build_or_update_index(
 
     manifest["bm25"] = {"k1": float(bm25_k1), "b": float(bm25_b)}
     manifest.setdefault("sources", {})
-    manifest["layout"] = "videos/<video_id>/outputs/segments/<lang>.jsonl.zst"
-    if zstd is None:
-        manifest["layout"] = "videos/<video_id>/outputs/segments/<lang>.jsonl.gz"
-    manifest["doc_id_scheme"] = "stable_by_position"
+    if variant:
+        manifest["layout"] = "videos/<video_id>/outputs/variants/<variant>/segments/<lang>.jsonl.zst"
+        if zstd is None:
+            manifest["layout"] = "videos/<video_id>/outputs/variants/<variant>/segments/<lang>.jsonl.gz"
+        manifest["doc_id_scheme"] = "stable_by_variant_and_position"
+    else:
+        manifest["layout"] = "videos/<video_id>/outputs/segments/<lang>.jsonl.zst"
+        if zstd is None:
+            manifest["layout"] = "videos/<video_id>/outputs/segments/<lang>.jsonl.gz"
+        manifest["doc_id_scheme"] = "stable_by_position"
     manifest["language"] = str(language)
-    manifest["version"] = int(manifest.get("version", 4) or 4)
+    manifest["variant"] = str(variant) if variant else None
+    manifest["version"] = max(5, int(manifest.get("version", 5) or 5))
     manifest["has_dense_valid"] = True
 
-    files = _iter_segment_files(Path(videos_root), language=language)
+    files = _iter_segment_files(Path(videos_root), language=language, variant=variant)
     if not files:
-        raise RuntimeError(f"No segments found under: {videos_root} (lang={language})")
+        suffix = f", variant={variant}" if variant else ""
+        raise RuntimeError(f"No segments found under: {videos_root} (lang={language}{suffix})")
 
     t_scan0 = time.perf_counter()
 
@@ -615,7 +938,7 @@ def build_or_update_index(
             continue
 
         changed_files += 1
-        video_id = _guess_video_id_from_path(f)
+        video_id, file_variant = _guess_source_from_path(f)
 
         try:
             if f.suffix == ".zst":
@@ -635,19 +958,22 @@ def build_or_update_index(
             try:
                 start = float(item["start_sec"])
                 end = float(item["end_sec"])
-                text = str(item.get("description", "") or "")
+                display_text = str(item.get("normalized_caption") or item.get("description", "") or "")
             except Exception:
                 continue
 
-            doc_id = _stable_doc_id(video_id, i)
+            doc_id = _stable_doc_id(video_id, i, variant=file_variant)
+            doc_extra = _extract_doc_metadata(item, file_variant)
+            search_text = _build_searchable_text(display_text, doc_extra)
             docs_by_id[doc_id] = Doc(
                 doc_id=doc_id,
                 video_id=video_id,
                 language=str(language),
                 start_sec=start,
                 end_sec=end,
-                text=text,
-                extra=item.get("extra"),
+                text=search_text,
+                display_text=display_text,
+                extra=doc_extra,
                 source_path=f_key,
             )
             changed_doc_ids.add(doc_id)
@@ -656,7 +982,7 @@ def build_or_update_index(
 
         if prev_num_docs > new_num_docs:
             for j in range(new_num_docs, prev_num_docs):
-                did = _stable_doc_id(video_id, j)
+                did = _stable_doc_id(video_id, j, variant=file_variant)
                 if did in docs_by_id:
                     docs_by_id.pop(did, None)
                     docs_deleted += 1
@@ -664,6 +990,7 @@ def build_or_update_index(
         manifest["sources"][f_key] = {
             "fingerprint": fp,
             "video_id": video_id,
+            "variant": file_variant,
             "language": str(language),
             "num_docs": int(new_num_docs),
         }
@@ -674,16 +1001,18 @@ def build_or_update_index(
     if not changed_any and not bm25_changed and not model_changed:
         _save_manifest(real_index_dir, manifest)
         meta = {
-            "index_schema_version": 4,
+            "index_schema_version": 5,
             "config_fingerprint": (str(config_fingerprint) if config_fingerprint else None),
             "config_tag": config_tag_from_fingerprint(config_fingerprint),
             "model_name": manifest.get("model_name"),
+            "embedding_backend": embedding_backend,
             "num_docs": int(len(docs_by_id)),
             "bm25": {"k1": float(bm25_k1), "b": float(bm25_b)},
             "embed_store_dtype": embed_store_dtype,
             "layout": manifest.get("layout"),
             "doc_id_scheme": manifest.get("doc_id_scheme"),
             "language": str(language),
+            "variant": (str(variant) if variant else None),
             "query_prefix": str(query_prefix),
             "passage_prefix": str(passage_prefix),
             "normalize_text": bool(normalize_text),
@@ -752,16 +1081,25 @@ def build_or_update_index(
         except Exception:
             return None
 
+    embedder_ref: Any = None
+
+    def _ensure_embedder():
+        nonlocal embedder_ref
+        if embedder_ref is None:
+            embedder_ref = build_text_embedder(
+                model_name=model_name,
+                device=device,
+                query_prefix=query_prefix,
+                passage_prefix=passage_prefix,
+                backend=embedding_backend,
+                fallback_model_name=fallback_model_name,
+            )
+        return embedder_ref
+
     if need_full_reembed:
         hashes = [_hash_text(t) for t in texts] if embed_cache else []
         cached_map: Dict[str, Any] = embed_cache.get_many(hashes) if embed_cache else {}
-
-        embedder = SentenceTransformerEmbedder(
-            model_name=model_name,
-            device=device,
-            query_prefix=query_prefix,
-            passage_prefix=passage_prefix,
-        )
+        embedder = _ensure_embedder()
         rows: List[Any] = []
         to_encode: List[str] = []
         to_encode_idx: List[int] = []
@@ -808,12 +1146,7 @@ def build_or_update_index(
         new_map: Dict[str, Any] = {}
         if to_encode_ids:
             if not embed_cache:
-                embedder = SentenceTransformerEmbedder(
-                    model_name=model_name,
-                    device=device,
-                    query_prefix=query_prefix,
-                    passage_prefix=passage_prefix,
-                )
+                embedder = _ensure_embedder()
                 new_emb = embedder.encode_passages(to_encode_texts, batch_size=batch_size)
                 new_arr = np.asarray(new_emb, dtype=np.float32)
                 new_map = {did: vec for did, vec in zip(to_encode_ids, new_arr)}
@@ -835,12 +1168,7 @@ def build_or_update_index(
                     to_encode_real_hashes.append(h)
 
                 if to_encode_real:
-                    embedder = SentenceTransformerEmbedder(
-                        model_name=model_name,
-                        device=device,
-                        query_prefix=query_prefix,
-                        passage_prefix=passage_prefix,
-                    )
+                    embedder = _ensure_embedder()
                     new_emb = embedder.encode_passages(to_encode_real, batch_size=batch_size)
                     new_arr = np.asarray(new_emb, dtype=np.float32)
                     cache_rows: Dict[str, Any] = {}
@@ -875,6 +1203,10 @@ def build_or_update_index(
 
         emb_arr = np.stack(rows, axis=0).astype(np.float32, copy=False) if rows else np.zeros((0, dim), dtype=np.float32)
 
+    if embedder_ref is not None and getattr(embedder_ref, "model_name", None):
+        model_name = str(getattr(embedder_ref, "model_name"))
+        manifest["model_name"] = model_name
+
     if embed_store_dtype == "float16":
         emb_arr = emb_arr.astype(np.float16)
 
@@ -892,17 +1224,19 @@ def build_or_update_index(
     dense_valid_n = int(np.count_nonzero(dense_valid)) if hasattr(dense_valid, "shape") else 0
 
     meta = {
-        "index_schema_version": 4,
+        "index_schema_version": 5,
         "config_fingerprint": (str(config_fingerprint) if config_fingerprint else None),
         "config_tag": config_tag_from_fingerprint(config_fingerprint),
         "model_name": model_name,
+        "embedding_backend": embedding_backend,
         "num_docs": int(len(docs)),
         "bm25": {"k1": float(bm25_k1), "b": float(bm25_b)},
         "embed_dim": embed_dim,
         "embed_store_dtype": embed_store_dtype,
         "layout": manifest.get("layout"),
-        "doc_id_scheme": "stable_by_position",
+        "doc_id_scheme": manifest.get("doc_id_scheme"),
         "language": str(language),
+        "variant": (str(variant) if variant else None),
         "query_prefix": str(query_prefix),
         "passage_prefix": str(passage_prefix),
         "normalize_text": bool(normalize_text),

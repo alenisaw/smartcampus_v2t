@@ -146,6 +146,8 @@ def prepare_video(
     num_saved_frames = 0
     num_dark_skipped = 0
     num_lazy_skipped = 0
+    num_blur_flagged = 0
+    num_blur_skipped = 0
     num_scene_cuts = 0
     raw_read_frames = 0
 
@@ -154,6 +156,7 @@ def prepare_video(
 
     base_threshold = float(video_cfg.min_change_threshold)
     dark_threshold = float(video_cfg.dark_threshold)
+    blur_threshold = float(video_cfg.blur_threshold)
     max_saved = int(video_cfg.max_frames) if video_cfg.max_frames is not None else None
     model_input_size = tuple(video_cfg.model_input_size)
 
@@ -186,6 +189,14 @@ def prepare_video(
         num_sampled_frames += 1
 
         small_gray = _downscale_for_analysis(frame)
+        blur_score = _blur_variance_score(small_gray)
+        blur_flag = blur_score < blur_threshold
+        if blur_flag:
+            num_blur_flagged += 1
+            if blur_score < max(1.0, blur_threshold * 0.35):
+                num_blur_skipped += 1
+                frame_idx += 1
+                continue
 
         is_dark = _is_dark_frame(small_gray, brightness_threshold=dark_threshold)
         if is_dark:
@@ -265,6 +276,11 @@ def prepare_video(
                 timestamp_sec=float(timestamp),
                 path=frame_path,
                 small_path=small_path,
+                extra={
+                    "blur_score": float(blur_score),
+                    "blur_flag": bool(blur_flag),
+                    "scene_cut": bool(is_scene_cut),
+                },
             )
         )
 
@@ -307,6 +323,8 @@ def prepare_video(
                 "num_saved_frames": num_saved_frames,
                 "num_dark_skipped": num_dark_skipped,
                 "num_lazy_skipped": num_lazy_skipped,
+                "num_blur_flagged": num_blur_flagged,
+                "num_blur_skipped": num_blur_skipped,
                 "num_scene_cuts": num_scene_cuts,
                 "early_stop": early_stop,
             },
@@ -326,6 +344,7 @@ def prepare_video(
                 "face_detect_force_on_scenecut": face_detect_force_on_scenecut,
                 "face_blur_strength": face_blur_strength,
                 "face_conf_threshold": face_conf_threshold,
+                "blur_threshold": blur_threshold,
             },
         },
     )
@@ -507,6 +526,12 @@ def _compute_frame_change_cpu(prev_small: np.ndarray, curr_small: np.ndarray) ->
 
 def _is_dark_frame(small_gray_frame: np.ndarray, brightness_threshold: float) -> bool:
     return float(np.mean(small_gray_frame)) < brightness_threshold
+
+
+def _blur_variance_score(gray_frame: np.ndarray) -> float:
+    """Estimate frame sharpness using variance of the Laplacian."""
+
+    return float(cv2.Laplacian(gray_frame, cv2.CV_64F).var())
 
 
 def _load_face_detector_dnn(proto_path: Path, model_path: Path):

@@ -1,188 +1,147 @@
 # SmartCampus V2T
 
-**SmartCampus V2T** is a practical, end-to-end **video-to-text analytics system** for long-form CCTV and surveillance footage.
-The project focuses on transforming raw video streams into **structured, searchable textual representations** using modern multimodal models and efficient indexing, with a strong emphasis on usability through a Streamlit-based UI.
+SmartCampus V2T is a local-first repository for a video-to-text analytics pipeline aimed at urban surveillance scenarios. The codebase is organized around a reproducible processing flow that turns raw video into structured multilingual artifacts, searchable indexes, and grounded operator-facing outputs.
 
-![Semantic Pipeline Overview](docs/figures/figure1_main.png)
-
----
-
-## Overview
-
-The system processes long, untrimmed surveillance videos and converts them into interpretable text that can be explored, searched, and analyzed.
-Instead of operating on low-level detections alone, SmartCampus V2T prioritizes **semantic understanding** and **human-readable outputs**.
-
-Core ideas:
-- Video understanding expressed directly as text
-- Deterministic, inspectable processing stages
-- UI-first interaction model for experimentation and analysis
+The repository is intentionally split by responsibility: interface code lives separately from backend orchestration, reusable pipeline logic is isolated in `src/`, and experiment notes are kept outside the main repository page.
 
 ---
 
-## System Architecture
+## Repository Layout
 
-<p align="center">
-  <img src="docs/figures/figure2_main.png" width="300">
-</p>
+The project is structured as a layered application rather than a single script-driven prototype.
 
-<p align="center">
-  <em>System architecture of the SmartCampus V2T pipeline</em>
-</p>
+| Path | Role |
+| --- | --- |
+| [`app/`](/C:/Users/alenk/Downloads/smartcampus_v2t/app) | Streamlit UI, assets, and frontend-facing helpers |
+| [`backend/`](/C:/Users/alenk/Downloads/smartcampus_v2t/backend) | FastAPI API, queue control, worker runtime, and job execution |
+| [`src/`](/C:/Users/alenk/Downloads/smartcampus_v2t/src) | Core pipeline modules: preprocessing, structuring, summaries, guard, search, translation, storage |
+| [`configs/`](/C:/Users/alenk/Downloads/smartcampus_v2t/configs) | Runtime profiles and experimental variants |
+| [`data/`](/C:/Users/alenk/Downloads/smartcampus_v2t/data) | Local videos, generated outputs, caches, indexes, research exports |
+| [`models/`](/C:/Users/alenk/Downloads/smartcampus_v2t/models) | Local model directories used by the runtime |
+| [`scripts/`](/C:/Users/alenk/Downloads/smartcampus_v2t/scripts) | Utility script for research-oriented metrics export |
+| [`docs/`](/C:/Users/alenk/Downloads/smartcampus_v2t/docs) | Supporting project documentation such as status tracking and experiment notes |
 
-The pipeline is organized into modular components:
+The repository root also contains the main entrypoints and operational files:
 
-- **Preprocessing layer**
-  Normalizes FPS, filters redundant or dark frames, applies optional face anonymization, and caches prepared frames.
-
-- **Clip generation**
-  Videos are segmented into overlapping temporal windows (clips) suitable for multimodal inference.
-
-- **Video-to-Text inference**
-  Each clip is described using Qwen3-VL with concise, factual prompts (RU / KZ / EN).
-
-- **Temporal post-processing**
-  Adjacent clips with similar semantics are merged to reduce redundancy.
-
-- **Global summarization**
-  A structured summary is generated strictly from clip-level descriptions.
-
-- **Indexing and search**
-  Hybrid sparse+dense indexing enables fast semantic retrieval over time intervals.
+| File | Purpose |
+| --- | --- |
+| [`README.md`](/C:/Users/alenk/Downloads/smartcampus_v2t/README.md) | project-facing repository overview |
+| [`run_all.bat`](/C:/Users/alenk/Downloads/smartcampus_v2t/run_all.bat) | local convenience launcher |
+| [`Dockerfile`](/C:/Users/alenk/Downloads/smartcampus_v2t/Dockerfile) | container image definition |
+| [`docker-compose.yml`](/C:/Users/alenk/Downloads/smartcampus_v2t/docker-compose.yml) | local multi-service stack |
+| [`requirements.txt`](/C:/Users/alenk/Downloads/smartcampus_v2t/requirements.txt) | Python dependencies |
 
 ---
 
-## Repository Structure
+## Application Layers
+
+The repository is built around a clear separation of concerns.
+
+### UI Layer
+
+The Streamlit interface in [`app/`](/C:/Users/alenk/Downloads/smartcampus_v2t/app) provides the operator-facing experience. It handles video browsing, playback, scene inspection, retrieval views, and grounded response presentation. Assets such as styles and multilingual UI text are stored alongside the UI code.
+
+### API and Worker Layer
+
+The HTTP API and job-processing logic live in [`backend/`](/C:/Users/alenk/Downloads/smartcampus_v2t/backend). This layer exposes endpoints for uploads, jobs, outputs, indexing, search, reports, QA, and RAG, while the worker handles queued processing and background tasks.
+
+### Pipeline Layer
+
+Reusable implementation modules are kept in [`src/`](/C:/Users/alenk/Downloads/smartcampus_v2t/src). This is where the actual processing pipeline is implemented: video preprocessing, clip building, caption structuring, summary generation, search indexing, translation, guard logic, and storage helpers.
+
+### Configuration Layer
+
+Profiles and variants are isolated in [`configs/`](/C:/Users/alenk/Downloads/smartcampus_v2t/configs). This keeps runtime behavior declarative and makes it possible to switch between the primary path and controlled experiment variants without editing code.
+
+### Data and Artifact Layer
+
+All local runtime artifacts are written under [`data/`](/C:/Users/alenk/Downloads/smartcampus_v2t/data). This includes uploaded videos, per-video outputs, index data, cache data, and research-oriented metrics exports.
+
+---
+
+## Runtime Profiles
+
+The repository uses two top-level runtime modes.
+
+| Profile | Description |
+| --- | --- |
+| [`main`](/C:/Users/alenk/Downloads/smartcampus_v2t/configs/profiles/main.yaml) | the default operational and demonstration profile |
+| [`experimental`](/C:/Users/alenk/Downloads/smartcampus_v2t/configs/profiles/experimental.yaml) | the comparison profile that expands runs into variants |
+
+The experimental mode is backed by dedicated variant configs:
+
+| Variant | Config |
+| --- | --- |
+| `exp_a` | [`exp_a.yaml`](/C:/Users/alenk/Downloads/smartcampus_v2t/configs/variants/exp_a.yaml) |
+| `exp_b` | [`exp_b.yaml`](/C:/Users/alenk/Downloads/smartcampus_v2t/configs/variants/exp_b.yaml) |
+| `exp_c` | [`exp_c.yaml`](/C:/Users/alenk/Downloads/smartcampus_v2t/configs/variants/exp_c.yaml) |
+
+This layout keeps the operational path simple while preserving a dedicated place for side-by-side evaluation work.
+
+---
+
+## Data Layout
+
+Each video is stored in its own folder under `data/videos/<video_id>/`. The repository keeps raw input and generated artifacts together so that runs remain inspectable and reproducible.
 
 ```text
-smartcampus_v2t/
-  .streamlit/
-    config.toml               # Streamlit configuration
-
-  app/                        # Streamlit application (main control plane)
-    assets/
-      logo.png                # UI logo
-      styles.css              # Custom UI styles
-      ui_text.json            # UI text + i18n (ru/kz/en)
-    main.py                   # Streamlit UI entrypoint (Home/Search, processing, index updates)
-
-  configs/
-    pipeline.yaml             # Unified configuration (paths, model, clips, search, UI)
-
-  src/                        # Core library (pipeline + search + utils)
-    __init__.py
-
-    core/                     # Types + Qwen-VL backend wrapper
-      __init__.py
-      types.py                # Dataclasses: VideoMeta, FrameInfo, Annotation, RunMetrics, etc.
-      qwen_vl_backend.py      # Qwen3-VL backend wrapper (generation, batching, templates)
-
-    preprocessing/            # Video preparation and caching
-      __init__.py
-      video_io.py             # Preprocessing: frame extraction, caching, metadata
-
-    pipeline/                 # Clip V2T, merging, global summary
-      __init__.py
-      pipeline_config.py      # Pipeline config schema
-      video_to_text.py        # VideoToTextPipeline: clip inference + postprocess + metrics
-
-    search/                   # Index builder and query engine
-      __init__.py
-      index_builder.py        # Build/update index from run outputs
-      query_engine.py         # Hybrid search (BM25 + dense), fusion, dedupe
-
-    utils/
-      __init__.py
-      config_loader.py        # Load pipeline.yaml → typed config
-
-  data/                       # Runtime data (typically generated locally)
-    raw/                      # Unprepared/original videos
-    prepared/                 # Prepared frames + preprocessing cache
-    runs/                     # Run outputs per video (manifests, annotations, metrics)
-    indexes/                  # Search index artifacts (manifest/meta + vectors)
-    thumbs/                   # Cached thumbnails for UI carousel
-
-  docs/                       # README figures and user guides
-    figures/
-       figure1_main.png
-       figure2_main.png
-
-  .gitignore
-  Dockerfile
-  README.md
+data/videos/<video_id>/
+  raw/
+  cache/
+  manifest.json
+  outputs/
+    segments/
+    summaries/
+    metrics.json
+    manifest.json
+    run_manifest.json
+    experimental_manifest.json
+    variants/
+      <variant_id>/
+        segments/
+        summaries/
+        metrics.json
+        manifest.json
+        run_manifest.json
 ```
 
-### Run folder layout (`data/runs/<video_id>/run_###/`)
+Beyond per-video data, the repository also keeps:
 
-```text
-data/runs/<video_id>/run_###/
-  run_manifest.json           # Run metadata (language/device, inference_fingerprint, timestamps, status)
-  config.json                 # Snapshot of the effective config used for this run
-  annotations.json            # Timeline segments: {start_sec, end_sec, description, extra}
-  metrics.json                # Timings/counters + extra fields (may include global_summary)
-```
+| Path | Contents |
+| --- | --- |
+| [`data/indexes/`](/C:/Users/alenk/Downloads/smartcampus_v2t/data/indexes) | search indexes |
+| [`data/cache/`](/C:/Users/alenk/Downloads/smartcampus_v2t/data/cache) | translation, embedding, and converted runtime caches |
+| [`data/research/`](/C:/Users/alenk/Downloads/smartcampus_v2t/data/research) | exported metrics snapshots for analysis |
 
 ---
 
-## Installation & Configuration
+## Operational Script
 
-### Environment setup
+The `scripts` directory is intentionally kept minimal. It currently contains a single repository-level utility:
 
-Python 3.10+ is recommended.
+| Script | Purpose |
+| --- | --- |
+| [`collect_metrics.py`](/C:/Users/alenk/Downloads/smartcampus_v2t/scripts/collect_metrics.py) | exports a zipped metrics bundle with per-run, per-video, and system-wide summaries |
 
-```bash
-python -m venv .venv
-source .venv/bin/activate   # Linux / macOS
-# .venv\Scripts\activate  # Windows
-
-pip install -U pip
-# Install GPU-enabled PyTorch first (see https://pytorch.org/get-started/locally/)
-pip install -r requirements.txt
-```
-
-### Configuration
-
-All system parameters are defined in a single file:
-
-```
-configs/pipeline.yaml
-```
-
-This includes:
-- Paths for videos, runs, prepared frames, and indexes
-- Video preprocessing parameters
-- Model and inference settings
-- Search and indexing configuration
+Index rebuilds remain available through the backend and worker flow, while the standalone script is reserved for research and reporting exports.
 
 ---
-## Running the project
 
-The entire workflow is driven from the Streamlit interface.
+## Local Models
 
-```bash
-streamlit run app/main.py
-```
+The repository is designed to work with local model directories. The current workspace keeps its model inventory under [`models/`](/C:/Users/alenk/Downloads/smartcampus_v2t/models), while converted runtime caches live under [`data/cache/ct2_models/`](/C:/Users/alenk/Downloads/smartcampus_v2t/data/cache/ct2_models).
 
-UI will be opened automatically after running command or you may manually open it by next link:
-```
-http://localhost:8501
-```
-
-From the UI you can:
-- Preprocess videos
-- Run video-to-text inference
-- Inspect runs and metrics
-- Build or update indexes
-- Perform semantic search over timelines
+This keeps the runtime local-first and makes the main profile usable without depending on external online model resolution during normal operation.
 
 ---
-## Component Status
 
-| Component                       | Status              |
-|---------------------------------|---------------------|
-| Video preprocessing             | Implemented         |
-| Clip V2T inference              | Implemented         |
-| Temporal merging                | Implemented         |
-| Global summary                  | Implemented         |
-| Hybrid indexing                 | Implemented         |
-| Semantic search                 | Implemented         |
-| Streamlit UI                    | Implemented         |
+## Supporting Documentation
+
+The repository keeps non-primary documentation in the `docs` directory so that the main page remains focused on the codebase itself.
+
+| Document | Purpose |
+| --- | --- |
+| [`docs/STATUS.md`](/C:/Users/alenk/Downloads/smartcampus_v2t/docs/STATUS.md) | detailed local implementation status and remaining work |
+| [`docs/EXPERIMENTS.md`](/C:/Users/alenk/Downloads/smartcampus_v2t/docs/EXPERIMENTS.md) | experiment planning, comparisons, and evaluation notes |
+
+The intended separation is simple: `README` explains the repository, `STATUS` preserves development context, and `EXPERIMENTS` captures research-oriented comparison work.

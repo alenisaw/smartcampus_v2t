@@ -1,0 +1,57 @@
+# docker-compose.yml
+# Minimal demo stack for API, worker, and Streamlit UI.
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: python -m uvicorn backend.api:app --host 0.0.0.0 --port 8000
+    environment:
+      PYTHONUNBUFFERED: "1"
+      SMARTCAMPUS_PROFILE: ${SMARTCAMPUS_PROFILE:-main}
+      SMARTCAMPUS_VARIANT: ${SMARTCAMPUS_VARIANT:-}
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    volumes:
+      - .:/app
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: python -m backend.worker
+    environment:
+      PYTHONUNBUFFERED: "1"
+      SMARTCAMPUS_PROFILE: ${SMARTCAMPUS_PROFILE:-main}
+      SMARTCAMPUS_VARIANT: ${SMARTCAMPUS_VARIANT:-}
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    volumes:
+      - .:/app
+
+  ui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: python -m streamlit run app/main.py --server.address 0.0.0.0 --server.port 8501
+    environment:
+      PYTHONUNBUFFERED: "1"
+      SMARTCAMPUS_PROFILE: ${SMARTCAMPUS_PROFILE:-main}
+      SMARTCAMPUS_VARIANT: ${SMARTCAMPUS_VARIANT:-}
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "8501:8501"
+    restart: unless-stopped
+    volumes:
+      - .:/app

@@ -1,0 +1,18 @@
+video:
+  analysis_fps: 2.0
+  target_fps: 2.0
+  min_change_threshold: 0.04
+  dark_threshold: 32.0
+  blur_threshold: 40.0
+  lazy_motion_threshold: 0.03
+
+clips:
+  window_sec: 4.0
+  stride_sec: 3.0
+  max_clip_frames: 12
+
+search:
+  candidate_k_sparse: 120
+  candidate_k_dense: 120
+  rerank_top_k: 20
+  embedding_dim: 768

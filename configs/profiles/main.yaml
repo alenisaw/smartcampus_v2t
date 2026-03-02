@@ -1,31 +1,34 @@
 paths:
-  root_dir: ..
+  root_dir: ../..
   data_dir: data
-
   videos_dir: data/videos
   cache_dir: data/cache
   indexes_dir: data/indexes
   thumbs_dir: data/thumbs
-
   models_dir: models
-
   dnn_face_proto: models/face_detector/deploy.prototxt
   dnn_face_model: models/face_detector/res10_300x300_ssd_iter_140000.caffemodel
-
 
 ui:
   langs: ["ru", "kz", "en"]
   default_lang: "ru"
   cache_ttl_sec: 2
-
   assets_dir: app/assets
   ui_text_path: app/assets/ui_text.json
   styles_path: app/assets/styles.css
   logo_path: app/assets/logo.png
 
+backend:
+  scheme: "http"
+  host: "127.0.0.1"
+  port: 8000
 
 search:
   embed_model_name: BAAI/bge-m3
+  embedding_model_id: models/qwen3-vl-embedding-2b
+  embedding_backend: transformers
+  reranker_model_id: models/qwen3-vl-reranker-2b
+  reranker_backend: transformers
   query_prefix: "query: "
   passage_prefix: "passage: "
   normalize_text: true
@@ -39,88 +42,119 @@ search:
   candidate_k_dense: 200
   fusion: rrf
   rrf_k: 60
+  rerank_enabled: true
+  rerank_top_k: 30
   dedupe_mode: overlap
   dedupe_tol_sec: 1.0
   dedupe_overlap_thr: 0.7
-
+  embedding_dim: 1024
 
 video:
   target_fps: 3.0
+  analysis_fps: 3.0
   model_input_size: [256, 256]
+  decode_resolution: [1280, 720]
+  pixel_format: yuv420p
   min_change_threshold: 0.03
   dark_threshold: 30.0
+  blur_threshold: 35.0
+  lazy_motion_threshold: 0.02
   save_small_frames: false
-
   face_blur: true
+  anonymization_enabled: true
   max_frames: 5000
-
 
 video_io:
   jpeg_quality_frames: 82
   jpeg_quality_small: 75
-
   face_detect_every_saved: 6
   face_detect_force_on_scenecut: true
   face_blur_strength: 31
   face_conf_threshold: 0.5
-
 
 clips:
   window_sec: 4.0
   stride_sec: 2.0
   min_clip_frames: 2
   max_clip_frames: 16
-
+  keyframe_policy: middle
 
 model:
   model_name_or_path: models/qwen3-vl-2b-instruct
   device: cuda
   dtype: fp16
   language: en
-
   batch_size: 3
   max_batch_frames: 64
   max_new_tokens: 128
-  temperature: 0.4
-  top_p: 0.9
+  temperature: 0.0
+  top_p: 1.0
   top_k: 40
-  repetition_penalty: 1.1
-  do_sample: true
+  repetition_penalty: 1.05
+  do_sample: false
   attn_implementation: auto
   timeout_sec: 60
 
+llm:
+  backend: transformers
+  model_id: models/qwen3-4b-instruct-2507
+  max_new_tokens: 512
+  do_sample: false
+  temperature: 0.0
+  top_p: 1.0
+  timeout_sec: 60
+  transformers:
+    dtype: float16
+    device_map: auto
+    compile: false
+  vllm:
+    base_url: http://127.0.0.1:8001/v1
+    timeout_sec: 30
+
+guard:
+  enabled: true
+  query_gate: true
+  output_gate: true
+  model_id: models/qwen3guard-gen-0.6b
+
 translation:
-  model_name_or_path: facebook/nllb-200-distilled-1.3B
-  device: cuda
-  dtype: fp16
+  backend: ctranslate2
+  model_name_or_path: ct2://router
+  device: cpu
+  dtype: float32
   batch_size: 8
   max_new_tokens: 128
   source_lang: en
   target_langs: ["ru", "kz"]
   cache_enabled: true
-
+  cache_version: v2
+  query_time_translation: true
+  offline_translation: true
+  post_edit_targets: [summary, reports, qa, selected_segments]
+  ctranslate2:
+    device: cpu
+    compute_type: int8
+    inter_threads: 2
+    intra_threads: 0
+  routes:
+    en_ru_model_id: models/opus-mt-en-ru
+    ru_en_model_id: models/opus-mt-ru-en
+    kk_ru_model_id: models/kazrush-kk-ru
+    ru_kk_model_id: models/kazrush-ru-kk
 
 runtime:
   seed: 42
   num_workers: 4
   log_level: INFO
-
-
   overwrite_existing: false
-
   strict_paths: true
-
   torch_threads: 0
+  cuda_tf32: true
   matmul_precision: high
   autocast_infer: true
-  torch_compile: true
+  torch_compile: false
   torch_compile_mode: reduce-overhead
   torch_compile_fullgraph: false
-
-backend:
-  scheme: "http"
-  host: "127.0.0.1"
-  port: 8000
 
 jobs:
   dir: data/jobs
@@ -146,4 +180,7 @@ webhook:
   url: ""
   timeout_sec: 5
 
-
+experiment:
+  mode: main
+  compare_on_single_video: false
+  variant_ids: [exp_a, exp_b, exp_c]

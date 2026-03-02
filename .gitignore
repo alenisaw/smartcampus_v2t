@@ -1,51 +1,42 @@
+# Python
 __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
 *.so
 *.egg-info/
-dist/
-build/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 .coverage
 htmlcov/
-.ipynb_checkpoints/
+dist/
+build/
 
+# Virtual environments
 .venv/
 venv/
 env/
 
+# Editor and OS noise
+.idea/
+.vscode/
+*.code-workspace
+.DS_Store
+Thumbs.db
+
+# Logs
 *.log
 logs/
 log/
 
-.DS_Store
-Thumbs.db
-.idea/
-.vscode/
-*.code-workspace
-
+# Streamlit secrets
 .streamlit/secrets.toml
 
-data/raw/
-data/prepared/
-data/metrics/
-data/indexes/
-data/**/frames/
-data/**/run_*/
-data/jobs
-data/queue
-data/locks
+# Local runtime data, uploaded videos, generated artifacts, indexes, caches, and research exports
+data/
 
-*.mp4
-*.avi
-*.mkv
-*.mov
-*.wav
-*.mp3
-
+# ML and vector artifacts
 *.pkl
 *.pickle
 *.pt
@@ -53,13 +44,12 @@ data/locks
 *.onnx
 *.npy
 *.npz
-
 *.faiss
 *.index
 *.bm25
 *.sqlite
 *.db
 
+# Local model directories
 models/**
 !models/.gitkeep
-data/thumbs
