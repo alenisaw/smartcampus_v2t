@@ -1,11 +1,11 @@
-# src/pipeline/video_to_text.py
+﻿# src/pipeline/video_to_text.py
 """
 Video-to-text pipeline for SmartCampus V2T.
 
 Purpose:
 - Builds per-clip descriptions (RU/KZ/EN) with Qwen3-VL.
 - Performs temporal smoothing (merge similar adjacent segments).
-- Produces optional global summary (1–2 human sentences + 5 strict metric lines).
+- Produces optional global summary (1вЂ“2 human sentences + 5 strict metric lines).
 - Ensures descriptions are factual, human-readable, and non-duplicative.
 """
 from __future__ import annotations
@@ -24,29 +24,29 @@ from src.pipeline.pipeline_config import PipelineConfig
 def build_prompt(lang: str) -> str:
     if lang == "ru":
         return (
-            "Ты описываешь CCTV-фрагмент. Напиши 1–2 коротких предложения естественным языком. "
-            "Начинай сразу с действия (без «На кадре», «На снимке», «Видно», «Наблюдается», «На видео»). "
-            "Только наблюдаемые факты: что делают люди или объекты; движение упоминай только если оно заметно. "
-            "Не придумывай тип места, роли людей, причины или контекст. "
-            "Не указывай возраст, пол, эмоции или намерения. "
-            "Не используй метрики и ярлыки. "
-            "Если ничего необычного нет — просто опиши обычную активность."
+            "РўС‹ РѕРїРёСЃС‹РІР°РµС€СЊ CCTV-С„СЂР°РіРјРµРЅС‚. РќР°РїРёС€Рё 1вЂ“2 РєРѕСЂРѕС‚РєРёС… РїСЂРµРґР»РѕР¶РµРЅРёСЏ РµСЃС‚РµСЃС‚РІРµРЅРЅС‹Рј СЏР·С‹РєРѕРј. "
+            "РќР°С‡РёРЅР°Р№ СЃСЂР°Р·Сѓ СЃ РґРµР№СЃС‚РІРёСЏ (Р±РµР· В«РќР° РєР°РґСЂРµВ», В«РќР° СЃРЅРёРјРєРµВ», В«Р’РёРґРЅРѕВ», В«РќР°Р±Р»СЋРґР°РµС‚СЃСЏВ», В«РќР° РІРёРґРµРѕВ»). "
+            "РўРѕР»СЊРєРѕ РЅР°Р±Р»СЋРґР°РµРјС‹Рµ С„Р°РєС‚С‹: С‡С‚Рѕ РґРµР»Р°СЋС‚ Р»СЋРґРё РёР»Рё РѕР±СЉРµРєС‚С‹; РґРІРёР¶РµРЅРёРµ СѓРїРѕРјРёРЅР°Р№ С‚РѕР»СЊРєРѕ РµСЃР»Рё РѕРЅРѕ Р·Р°РјРµС‚РЅРѕ. "
+            "РќРµ РїСЂРёРґСѓРјС‹РІР°Р№ С‚РёРї РјРµСЃС‚Р°, СЂРѕР»Рё Р»СЋРґРµР№, РїСЂРёС‡РёРЅС‹ РёР»Рё РєРѕРЅС‚РµРєСЃС‚. "
+            "РќРµ СѓРєР°Р·С‹РІР°Р№ РІРѕР·СЂР°СЃС‚, РїРѕР», СЌРјРѕС†РёРё РёР»Рё РЅР°РјРµСЂРµРЅРёСЏ. "
+            "РќРµ РёСЃРїРѕР»СЊР·СѓР№ РјРµС‚СЂРёРєРё Рё СЏСЂР»С‹РєРё. "
+            "Р•СЃР»Рё РЅРёС‡РµРіРѕ РЅРµРѕР±С‹С‡РЅРѕРіРѕ РЅРµС‚ вЂ” РїСЂРѕСЃС‚Рѕ РѕРїРёС€Рё РѕР±С‹С‡РЅСѓСЋ Р°РєС‚РёРІРЅРѕСЃС‚СЊ."
         )
     if lang == "kz":
         return (
-            "CCTV фрагментін сипатта. 1–2 қысқа сөйлемді табиғи тілмен жаз. "
-            "Сөйлемді бірден әрекеттен баста ( «Кадрда», «Суретте», «Көрінеді», «Байқалады» деме). "
-            "Тек көрінетін фактілерді жаз: адамдар немесе нысандар не істеп жатыр; қозғалыс айқын болса ғана айт. "
-            "Орынды, адамдардың рөлін, себеп пен контексті ойдан қоспа. "
-            "Жас, жыныс, эмоция, ниет көрсетпе. "
-            "Метрика немесе жіктеу сөздерін қолданба. "
-            "Ерекше нәрсе болмаса — қалыпты әрекетті сипатта."
+            "CCTV С„СЂР°РіРјРµРЅС‚С–РЅ СЃРёРїР°С‚С‚Р°. 1вЂ“2 Т›С‹СЃТ›Р° СЃУ©Р№Р»РµРјРґС– С‚Р°Р±РёТ“Рё С‚С–Р»РјРµРЅ Р¶Р°Р·. "
+            "РЎУ©Р№Р»РµРјРґС– Р±С–СЂРґРµРЅ У™СЂРµРєРµС‚С‚РµРЅ Р±Р°СЃС‚Р° ( В«РљР°РґСЂРґР°В», В«РЎСѓСЂРµС‚С‚РµВ», В«РљУ©СЂС–РЅРµРґС–В», В«Р‘Р°Р№Т›Р°Р»Р°РґС‹В» РґРµРјРµ). "
+            "РўРµРє РєУ©СЂС–РЅРµС‚С–РЅ С„Р°РєС‚С–Р»РµСЂРґС– Р¶Р°Р·: Р°РґР°РјРґР°СЂ РЅРµРјРµСЃРµ РЅС‹СЃР°РЅРґР°СЂ РЅРµ С–СЃС‚РµРї Р¶Р°С‚С‹СЂ; Т›РѕР·Т“Р°Р»С‹СЃ Р°Р№Т›С‹РЅ Р±РѕР»СЃР° Т“Р°РЅР° Р°Р№С‚. "
+            "РћСЂС‹РЅРґС‹, Р°РґР°РјРґР°СЂРґС‹ТЈ СЂУ©Р»С–РЅ, СЃРµР±РµРї РїРµРЅ РєРѕРЅС‚РµРєСЃС‚С– РѕР№РґР°РЅ Т›РѕСЃРїР°. "
+            "Р–Р°СЃ, Р¶С‹РЅС‹СЃ, СЌРјРѕС†РёСЏ, РЅРёРµС‚ РєУ©СЂСЃРµС‚РїРµ. "
+            "РњРµС‚СЂРёРєР° РЅРµРјРµСЃРµ Р¶С–РєС‚РµСѓ СЃУ©Р·РґРµСЂС–РЅ Т›РѕР»РґР°РЅР±Р°. "
+            "Р•СЂРµРєС€Рµ РЅУ™СЂСЃРµ Р±РѕР»РјР°СЃР° вЂ” Т›Р°Р»С‹РїС‚С‹ У™СЂРµРєРµС‚С‚С– СЃРёРїР°С‚С‚Р°."
         )
     return (
-        "Describe a CCTV segment in 1–2 short natural sentences. "
+        "Describe a CCTV segment in 1вЂ“2 short natural sentences. "
         "Start directly with the action (avoid 'In the frame', 'In the image', 'We can see', 'There is'). "
         "Only observable facts: what people or objects are doing; mention motion only if clearly visible. "
-        "Do not guess the location type, people’s roles, causes, or context. "
+        "Do not guess the location type, peopleвЂ™s roles, causes, or context. "
         "No age, gender, emotions, or intentions. "
         "Do not use metric or classification words. "
         "If nothing unusual is visible, describe normal activity."
@@ -62,50 +62,50 @@ def build_global_summary_prompt(
     header: List[str] = []
 
     if lang == "ru":
-        header.append("Ты — аналитик CCTV. Ниже приведены описания фрагментов одного видео.")
-        header.append("Используй только факты из этих описаний, ничего не выдумывай.")
+        header.append("РўС‹ вЂ” Р°РЅР°Р»РёС‚РёРє CCTV. РќРёР¶Рµ РїСЂРёРІРµРґРµРЅС‹ РѕРїРёСЃР°РЅРёСЏ С„СЂР°РіРјРµРЅС‚РѕРІ РѕРґРЅРѕРіРѕ РІРёРґРµРѕ.")
+        header.append("РСЃРїРѕР»СЊР·СѓР№ С‚РѕР»СЊРєРѕ С„Р°РєС‚С‹ РёР· СЌС‚РёС… РѕРїРёСЃР°РЅРёР№, РЅРёС‡РµРіРѕ РЅРµ РІС‹РґСѓРјС‹РІР°Р№.")
         header.append(
-            "Сначала напиши 1–2 предложения обычным человеческим языком: "
-            "что в целом происходит и как меняется активность со временем. "
-            "Не используй и не повторяй слова-ярлыки: тип сцены, плотность, движение, аномалии, класс безопасности."
+            "РЎРЅР°С‡Р°Р»Р° РЅР°РїРёС€Рё 1вЂ“2 РїСЂРµРґР»РѕР¶РµРЅРёСЏ РѕР±С‹С‡РЅС‹Рј С‡РµР»РѕРІРµС‡РµСЃРєРёРј СЏР·С‹РєРѕРј: "
+            "С‡С‚Рѕ РІ С†РµР»РѕРј РїСЂРѕРёСЃС…РѕРґРёС‚ Рё РєР°Рє РјРµРЅСЏРµС‚СЃСЏ Р°РєС‚РёРІРЅРѕСЃС‚СЊ СЃРѕ РІСЂРµРјРµРЅРµРј. "
+            "РќРµ РёСЃРїРѕР»СЊР·СѓР№ Рё РЅРµ РїРѕРІС‚РѕСЂСЏР№ СЃР»РѕРІР°-СЏСЂР»С‹РєРё: С‚РёРї СЃС†РµРЅС‹, РїР»РѕС‚РЅРѕСЃС‚СЊ, РґРІРёР¶РµРЅРёРµ, Р°РЅРѕРјР°Р»РёРё, РєР»Р°СЃСЃ Р±РµР·РѕРїР°СЃРЅРѕСЃС‚Рё."
         )
-        header.append("Затем выведи РОВНО 5 строк, каждая начинается с '- ' и строго по шаблону:")
-        header.append("- Тип сцены: 1–3 слова или 'неизвестно'")
-        header.append("- Плотность людей: нет людей / низкая / средняя / высокая")
-        header.append("- Тип движения: нет / слабое / стабильное / усиливающееся / хаотичное")
-        header.append("- Аномалии: если есть — 1–3 пункта через '; ' в формате «событие (0:01-0:10)»; если нет — 'нет'")
-        header.append("- Класс безопасности: норма / подозрительно / опасно")
-        header.append(f"\nВидео: {video_id}, длительность ~{int(duration_sec)} секунд.\n")
-        header.append("Фрагменты:")
+        header.append("Р—Р°С‚РµРј РІС‹РІРµРґРё Р РћР’РќРћ 5 СЃС‚СЂРѕРє, РєР°Р¶РґР°СЏ РЅР°С‡РёРЅР°РµС‚СЃСЏ СЃ '- ' Рё СЃС‚СЂРѕРіРѕ РїРѕ С€Р°Р±Р»РѕРЅСѓ:")
+        header.append("- РўРёРї СЃС†РµРЅС‹: 1вЂ“3 СЃР»РѕРІР° РёР»Рё 'РЅРµРёР·РІРµСЃС‚РЅРѕ'")
+        header.append("- РџР»РѕС‚РЅРѕСЃС‚СЊ Р»СЋРґРµР№: РЅРµС‚ Р»СЋРґРµР№ / РЅРёР·РєР°СЏ / СЃСЂРµРґРЅСЏСЏ / РІС‹СЃРѕРєР°СЏ")
+        header.append("- РўРёРї РґРІРёР¶РµРЅРёСЏ: РЅРµС‚ / СЃР»Р°Р±РѕРµ / СЃС‚Р°Р±РёР»СЊРЅРѕРµ / СѓСЃРёР»РёРІР°СЋС‰РµРµСЃСЏ / С…Р°РѕС‚РёС‡РЅРѕРµ")
+        header.append("- РђРЅРѕРјР°Р»РёРё: РµСЃР»Рё РµСЃС‚СЊ вЂ” 1вЂ“3 РїСѓРЅРєС‚Р° С‡РµСЂРµР· '; ' РІ С„РѕСЂРјР°С‚Рµ В«СЃРѕР±С‹С‚РёРµ (0:01-0:10)В»; РµСЃР»Рё РЅРµС‚ вЂ” 'РЅРµС‚'")
+        header.append("- РљР»Р°СЃСЃ Р±РµР·РѕРїР°СЃРЅРѕСЃС‚Рё: РЅРѕСЂРјР° / РїРѕРґРѕР·СЂРёС‚РµР»СЊРЅРѕ / РѕРїР°СЃРЅРѕ")
+        header.append(f"\nР’РёРґРµРѕ: {video_id}, РґР»РёС‚РµР»СЊРЅРѕСЃС‚СЊ ~{int(duration_sec)} СЃРµРєСѓРЅРґ.\n")
+        header.append("Р¤СЂР°РіРјРµРЅС‚С‹:")
 
     elif lang == "kz":
-        header.append("Сен CCTV аналитигісің. Төменде бір бейненің фрагмент сипаттамалары берілген.")
-        header.append("Қорытындыны тек осы сипаттамалардағы фактілерге сүйеніп жаса, ойдан қоспа.")
+        header.append("РЎРµРЅ CCTV Р°РЅР°Р»РёС‚РёРіС–СЃС–ТЈ. РўУ©РјРµРЅРґРµ Р±С–СЂ Р±РµР№РЅРµРЅС–ТЈ С„СЂР°РіРјРµРЅС‚ СЃРёРїР°С‚С‚Р°РјР°Р»Р°СЂС‹ Р±РµСЂС–Р»РіРµРЅ.")
+        header.append("ТљРѕСЂС‹С‚С‹РЅРґС‹РЅС‹ С‚РµРє РѕСЃС‹ СЃРёРїР°С‚С‚Р°РјР°Р»Р°СЂРґР°Т“С‹ С„Р°РєС‚С–Р»РµСЂРіРµ СЃТЇР№РµРЅС–Рї Р¶Р°СЃР°, РѕР№РґР°РЅ Т›РѕСЃРїР°.")
         header.append(
-            "Алдымен 1–2 сөйлеммен қарапайым тілде жалпы не болып жатқанын және уақыт бойынша өзгерісті сипатта. "
-            "Келесі метрика атауларын қолданба және қайталама: сахна түрі, тығыздық, қозғалыс түрі, аномалиялар, қауіп классы."
+            "РђР»РґС‹РјРµРЅ 1вЂ“2 СЃУ©Р№Р»РµРјРјРµРЅ Т›Р°СЂР°РїР°Р№С‹Рј С‚С–Р»РґРµ Р¶Р°Р»РїС‹ РЅРµ Р±РѕР»С‹Рї Р¶Р°С‚Т›Р°РЅС‹РЅ Р¶У™РЅРµ СѓР°Т›С‹С‚ Р±РѕР№С‹РЅС€Р° У©Р·РіРµСЂС–СЃС‚С– СЃРёРїР°С‚С‚Р°. "
+            "РљРµР»РµСЃС– РјРµС‚СЂРёРєР° Р°С‚Р°СѓР»Р°СЂС‹РЅ Т›РѕР»РґР°РЅР±Р° Р¶У™РЅРµ Т›Р°Р№С‚Р°Р»Р°РјР°: СЃР°С…РЅР° С‚ТЇСЂС–, С‚С‹Т“С‹Р·РґС‹Т›, Т›РѕР·Т“Р°Р»С‹СЃ С‚ТЇСЂС–, Р°РЅРѕРјР°Р»РёСЏР»Р°СЂ, Т›Р°СѓС–Рї РєР»Р°СЃСЃС‹."
         )
-        header.append("Содан кейін ДӘЛ 5 жол бер, әр жол '- ' деп басталсын және шаблонға сай болсын:")
-        header.append("- Сахна түрі: 1–3 сөз немесе 'анық емес'")
-        header.append("- Адамдар тығыздығы: жоқ / төмен / орташа / жоғары")
-        header.append("- Қозғалыс түрі: жоқ / әлсіз / тұрақты / күшейіп жатыр / хаотикалық")
-        header.append("- Аномалиялар: бар болса — 1–3 пункт '; ' арқылы «оқиға (0:01-0:10)» форматымен; жоқ болса — 'жоқ'")
-        header.append("- Қауіп классы: норма / күмәнді / қауіпті")
-        header.append(f"\nБейне: {video_id}, ұзақтығы ~{int(duration_sec)} секунд.\n")
-        header.append("Фрагменттер:")
+        header.append("РЎРѕРґР°РЅ РєРµР№С–РЅ Р”УР› 5 Р¶РѕР» Р±РµСЂ, У™СЂ Р¶РѕР» '- ' РґРµРї Р±Р°СЃС‚Р°Р»СЃС‹РЅ Р¶У™РЅРµ С€Р°Р±Р»РѕРЅТ“Р° СЃР°Р№ Р±РѕР»СЃС‹РЅ:")
+        header.append("- РЎР°С…РЅР° С‚ТЇСЂС–: 1вЂ“3 СЃУ©Р· РЅРµРјРµСЃРµ 'Р°РЅС‹Т› РµРјРµСЃ'")
+        header.append("- РђРґР°РјРґР°СЂ С‚С‹Т“С‹Р·РґС‹Т“С‹: Р¶РѕТ› / С‚У©РјРµРЅ / РѕСЂС‚Р°С€Р° / Р¶РѕТ“Р°СЂС‹")
+        header.append("- ТљРѕР·Т“Р°Р»С‹СЃ С‚ТЇСЂС–: Р¶РѕТ› / У™Р»СЃС–Р· / С‚Т±СЂР°Т›С‚С‹ / РєТЇС€РµР№С–Рї Р¶Р°С‚С‹СЂ / С…Р°РѕС‚РёРєР°Р»С‹Т›")
+        header.append("- РђРЅРѕРјР°Р»РёСЏР»Р°СЂ: Р±Р°СЂ Р±РѕР»СЃР° вЂ” 1вЂ“3 РїСѓРЅРєС‚ '; ' Р°СЂТ›С‹Р»С‹ В«РѕТ›РёТ“Р° (0:01-0:10)В» С„РѕСЂРјР°С‚С‹РјРµРЅ; Р¶РѕТ› Р±РѕР»СЃР° вЂ” 'Р¶РѕТ›'")
+        header.append("- ТљР°СѓС–Рї РєР»Р°СЃСЃС‹: РЅРѕСЂРјР° / РєТЇРјУ™РЅРґС– / Т›Р°СѓС–РїС‚С–")
+        header.append(f"\nР‘РµР№РЅРµ: {video_id}, Т±Р·Р°Т›С‚С‹Т“С‹ ~{int(duration_sec)} СЃРµРєСѓРЅРґ.\n")
+        header.append("Р¤СЂР°РіРјРµРЅС‚С‚РµСЂ:")
 
     else:
         header.append("You are a CCTV analyst. Below are descriptions of segments from the same video.")
         header.append("Use only facts from these descriptions. Do not invent anything.")
         header.append(
-            "First, write 1–2 natural sentences describing what is happening overall and how activity changes over time. "
+            "First, write 1вЂ“2 natural sentences describing what is happening overall and how activity changes over time. "
             "Do not use or repeat metric labels: scene type, people density, motion type, anomalies, risk class."
         )
         header.append("Then output EXACTLY 5 lines, each starting with '- ', strictly following this template:")
-        header.append("- Scene type: 1–3 words or 'unknown'")
+        header.append("- Scene type: 1вЂ“3 words or 'unknown'")
         header.append("- People density: none / low / medium / high")
         header.append("- Motion type: none / weak / stable / increasing / chaotic")
-        header.append("- Anomalies: if any — 1–3 items separated by '; ' in the form 'event (0:01-0:10)'; if none — 'none'")
+        header.append("- Anomalies: if any вЂ” 1вЂ“3 items separated by '; ' in the form 'event (0:01-0:10)'; if none вЂ” 'none'")
         header.append("- Risk class: normal / suspicious / dangerous")
         header.append(f"\nVideo: {video_id}, duration ~{int(duration_sec)} seconds.\n")
         header.append("Segments:")
@@ -138,14 +138,14 @@ def _collapse_spaces(s: str) -> str:
 
 
 def _remove_list_prefixes(s: str) -> str:
-    s = re.sub(r"^\s*[-•*—]+\s*", "", s or "")
+    s = re.sub(r"^\s*[-вЂў*вЂ”]+\s*", "", s or "")
     s = re.sub(r"^\s*\(?\d+\)?[.)]\s*", "", s)
     return s.strip()
 
 
 def _strip_generic_openers(s: str) -> str:
     return re.sub(
-        r"^(видно|наблюдается|на видео|we can see|there is|there are|көрінеді|байқалады)\s*[:,\-]?\s*",
+        r"^(РІРёРґРЅРѕ|РЅР°Р±Р»СЋРґР°РµС‚СЃСЏ|РЅР° РІРёРґРµРѕ|we can see|there is|there are|РєУ©СЂС–РЅРµРґС–|Р±Р°Р№Т›Р°Р»Р°РґС‹)\s*[:,\-]?\s*",
         "",
         s,
         flags=re.IGNORECASE,
@@ -220,28 +220,28 @@ def _extract_after_prefix(line: str, prefix: str) -> str:
 
 def _normalize_timed_anomalies(raw: str, lang: str) -> str:
     if not raw:
-        return "нет" if lang == "ru" else ("жоқ" if lang == "kz" else "none")
+        return "РЅРµС‚" if lang == "ru" else ("Р¶РѕТ›" if lang == "kz" else "none")
     low = raw.strip().lower()
-    if lang == "ru" and low in {"нет", "нет.", "отсутствуют", "не обнаружены"}:
-        return "нет"
-    if lang == "kz" and low in {"жоқ", "жоқ.", "анықталмады"}:
-        return "жоқ"
+    if lang == "ru" and low in {"РЅРµС‚", "РЅРµС‚.", "РѕС‚СЃСѓС‚СЃС‚РІСѓСЋС‚", "РЅРµ РѕР±РЅР°СЂСѓР¶РµРЅС‹"}:
+        return "РЅРµС‚"
+    if lang == "kz" and low in {"Р¶РѕТ›", "Р¶РѕТ›.", "Р°РЅС‹Т›С‚Р°Р»РјР°РґС‹"}:
+        return "Р¶РѕТ›"
     if lang == "en" and low in {"none", "none.", "no"}:
         return "none"
 
     items = _TIMED_ITEM_RE.findall(raw)
     if not items:
-        return "нет" if lang == "ru" else ("жоқ" if lang == "kz" else "none")
+        return "РЅРµС‚" if lang == "ru" else ("Р¶РѕТ›" if lang == "kz" else "none")
 
     cleaned: List[str] = []
     for label, s1, s2 in items[:3]:
         lab = _collapse_spaces(label)
         lab = re.sub(r"[;]+$", "", lab).strip()
-        lab = re.sub(r"^[\-\•\*]+\s*", "", lab).strip()
+        lab = re.sub(r"^[\-\вЂў\*]+\s*", "", lab).strip()
         if lab:
             cleaned.append(f"{lab} ({s1}-{s2})")
 
-    return "; ".join(cleaned) if cleaned else ("нет" if lang == "ru" else ("жоқ" if lang == "kz" else "none"))
+    return "; ".join(cleaned) if cleaned else ("РЅРµС‚" if lang == "ru" else ("Р¶РѕТ›" if lang == "kz" else "none"))
 
 
 def _strip_metric_fragments(short_text: str, lang: str) -> str:
@@ -251,39 +251,39 @@ def _strip_metric_fragments(short_text: str, lang: str) -> str:
 
     if lang == "ru":
         cuts = [
-            " - тип сцены:",
-            "- тип сцены:",
-            "тип сцены:",
-            " - плотность людей:",
-            "- плотность людей:",
-            "плотность людей:",
-            " - тип движения:",
-            "- тип движения:",
-            "тип движения:",
-            " - аномалии:",
-            "- аномалии:",
-            "аномалии:",
-            " - класс безопасности:",
-            "- класс безопасности:",
-            "класс безопасности:",
+            " - С‚РёРї СЃС†РµРЅС‹:",
+            "- С‚РёРї СЃС†РµРЅС‹:",
+            "С‚РёРї СЃС†РµРЅС‹:",
+            " - РїР»РѕС‚РЅРѕСЃС‚СЊ Р»СЋРґРµР№:",
+            "- РїР»РѕС‚РЅРѕСЃС‚СЊ Р»СЋРґРµР№:",
+            "РїР»РѕС‚РЅРѕСЃС‚СЊ Р»СЋРґРµР№:",
+            " - С‚РёРї РґРІРёР¶РµРЅРёСЏ:",
+            "- С‚РёРї РґРІРёР¶РµРЅРёСЏ:",
+            "С‚РёРї РґРІРёР¶РµРЅРёСЏ:",
+            " - Р°РЅРѕРјР°Р»РёРё:",
+            "- Р°РЅРѕРјР°Р»РёРё:",
+            "Р°РЅРѕРјР°Р»РёРё:",
+            " - РєР»Р°СЃСЃ Р±РµР·РѕРїР°СЃРЅРѕСЃС‚Рё:",
+            "- РєР»Р°СЃСЃ Р±РµР·РѕРїР°СЃРЅРѕСЃС‚Рё:",
+            "РєР»Р°СЃСЃ Р±РµР·РѕРїР°СЃРЅРѕСЃС‚Рё:",
         ]
     elif lang == "kz":
         cuts = [
-            " - сахна түрі:",
-            "- сахна түрі:",
-            "сахна түрі:",
-            " - адамдар тығыздығы:",
-            "- адамдар тығыздығы:",
-            "адамдар тығыздығы:",
-            " - қозғалыс түрі:",
-            "- қозғалыс түрі:",
-            "қозғалыс түрі:",
-            " - аномалиялар:",
-            "- аномалиялар:",
-            "аномалиялар:",
-            " - қауіп классы:",
-            "- қауіп классы:",
-            "қауіп классы:",
+            " - СЃР°С…РЅР° С‚ТЇСЂС–:",
+            "- СЃР°С…РЅР° С‚ТЇСЂС–:",
+            "СЃР°С…РЅР° С‚ТЇСЂС–:",
+            " - Р°РґР°РјРґР°СЂ С‚С‹Т“С‹Р·РґС‹Т“С‹:",
+            "- Р°РґР°РјРґР°СЂ С‚С‹Т“С‹Р·РґС‹Т“С‹:",
+            "Р°РґР°РјРґР°СЂ С‚С‹Т“С‹Р·РґС‹Т“С‹:",
+            " - Т›РѕР·Т“Р°Р»С‹СЃ С‚ТЇСЂС–:",
+            "- Т›РѕР·Т“Р°Р»С‹СЃ С‚ТЇСЂС–:",
+            "Т›РѕР·Т“Р°Р»С‹СЃ С‚ТЇСЂС–:",
+            " - Р°РЅРѕРјР°Р»РёСЏР»Р°СЂ:",
+            "- Р°РЅРѕРјР°Р»РёСЏР»Р°СЂ:",
+            "Р°РЅРѕРјР°Р»РёСЏР»Р°СЂ:",
+            " - Т›Р°СѓС–Рї РєР»Р°СЃСЃС‹:",
+            "- Т›Р°СѓС–Рї РєР»Р°СЃСЃС‹:",
+            "Т›Р°СѓС–Рї РєР»Р°СЃСЃС‹:",
         ]
     else:
         cuts = [
@@ -315,8 +315,8 @@ def _strip_metric_fragments(short_text: str, lang: str) -> str:
         t = t[:cut_pos].strip()
 
     if lang == "kz":
-        t = re.sub(r"(жалпы\s+түсінікті\s+қорытынды[:\-]?\s*)", "", t, flags=re.IGNORECASE).strip()
-        t = re.sub(r"(қорытынды(ның)?\s+негізінде[^.]*\.)", "", t, flags=re.IGNORECASE).strip()
+        t = re.sub(r"(Р¶Р°Р»РїС‹\s+С‚ТЇСЃС–РЅС–РєС‚С–\s+Т›РѕСЂС‹С‚С‹РЅРґС‹[:\-]?\s*)", "", t, flags=re.IGNORECASE).strip()
+        t = re.sub(r"(Т›РѕСЂС‹С‚С‹РЅРґС‹(РЅС‹ТЈ)?\s+РЅРµРіС–Р·С–РЅРґРµ[^.]*\.)", "", t, flags=re.IGNORECASE).strip()
 
     t = re.sub(r"\s*-\s*$", "", t).strip()
     t = _strip_generic_openers(t)
@@ -329,30 +329,30 @@ def sanitize_global_summary(text: str, lang: str) -> str:
     lines = [l.strip() for l in raw.splitlines() if l.strip()]
 
     if lang == "ru":
-        short_label = "Краткое описание:"
-        legacy_timed_label = "Аномалии по времени:"
+        short_label = "РљСЂР°С‚РєРѕРµ РѕРїРёСЃР°РЅРёРµ:"
+        timed_label = "РђРЅРѕРјР°Р»РёРё РїРѕ РІСЂРµРјРµРЅРё:"
         keys = [
-            ("- Тип сцены:", "неизвестно"),
-            ("- Плотность людей:", "низкая"),
-            ("- Тип движения:", "стабильное"),
-            ("- Аномалии:", "нет"),
-            ("- Класс безопасности:", "норма"),
+            ("- РўРёРї СЃС†РµРЅС‹:", "РЅРµРёР·РІРµСЃС‚РЅРѕ"),
+            ("- РџР»РѕС‚РЅРѕСЃС‚СЊ Р»СЋРґРµР№:", "РЅРёР·РєР°СЏ"),
+            ("- РўРёРї РґРІРёР¶РµРЅРёСЏ:", "СЃС‚Р°Р±РёР»СЊРЅРѕРµ"),
+            ("- РђРЅРѕРјР°Р»РёРё:", "РЅРµС‚"),
+            ("- РљР»Р°СЃСЃ Р±РµР·РѕРїР°СЃРЅРѕСЃС‚Рё:", "РЅРѕСЂРјР°"),
         ]
-        none_anom = "нет"
+        none_anom = "РЅРµС‚"
     elif lang == "kz":
-        short_label = "Қысқаша сипаттама:"
-        legacy_timed_label = "Уақыт бойынша аномалиялар:"
+        short_label = "ТљС‹СЃТ›Р°С€Р° СЃРёРїР°С‚С‚Р°РјР°:"
+        timed_label = "РЈР°Т›С‹С‚ Р±РѕР№С‹РЅС€Р° Р°РЅРѕРјР°Р»РёСЏР»Р°СЂ:"
         keys = [
-            ("- Сахна түрі:", "анық емес"),
-            ("- Адамдар тығыздығы:", "төмен"),
-            ("- Қозғалыс түрі:", "тұрақты"),
-            ("- Аномалиялар:", "жоқ"),
-            ("- Қауіп классы:", "норма"),
+            ("- РЎР°С…РЅР° С‚ТЇСЂС–:", "Р°РЅС‹Т› РµРјРµСЃ"),
+            ("- РђРґР°РјРґР°СЂ С‚С‹Т“С‹Р·РґС‹Т“С‹:", "С‚У©РјРµРЅ"),
+            ("- ТљРѕР·Т“Р°Р»С‹СЃ С‚ТЇСЂС–:", "С‚Т±СЂР°Т›С‚С‹"),
+            ("- РђРЅРѕРјР°Р»РёСЏР»Р°СЂ:", "Р¶РѕТ›"),
+            ("- ТљР°СѓС–Рї РєР»Р°СЃСЃС‹:", "РЅРѕСЂРјР°"),
         ]
-        none_anom = "жоқ"
+        none_anom = "Р¶РѕТ›"
     else:
         short_label = "Short summary:"
-        legacy_timed_label = "Timed anomalies:"
+        timed_label = "Timed anomalies:"
         keys = [
             ("- Scene type:", "unknown"),
             ("- People density:", "low"),
@@ -370,9 +370,9 @@ def sanitize_global_summary(text: str, lang: str) -> str:
     short_text = _strip_generic_openers(short_text)
     short_text = _force_max_sentences(short_text, max_sentences=2)
 
-    legacy_timed_line = _pick_lines_starting(lines, legacy_timed_label)
-    legacy_timed_raw = _extract_after_prefix(legacy_timed_line, legacy_timed_label) if legacy_timed_line else ""
-    legacy_timed_norm = _normalize_timed_anomalies(legacy_timed_raw, lang=lang) if legacy_timed_raw else ""
+    timed_line = _pick_lines_starting(lines, timed_label)
+    timed_raw = _extract_after_prefix(timed_line, timed_label) if timed_line else ""
+    timed_norm = _normalize_timed_anomalies(timed_raw, lang=lang) if timed_raw else ""
 
     found: Dict[str, str] = {}
     for l in lines:
@@ -385,21 +385,21 @@ def sanitize_global_summary(text: str, lang: str) -> str:
     def pick_density(v: str) -> str:
         vlow = (v or "").lower()
         if lang == "ru":
-            if "нет" in vlow:
-                return "нет людей"
-            if "выс" in vlow or "много" in vlow:
-                return "высокая"
-            if "сред" in vlow:
-                return "средняя"
-            return "низкая"
+            if "РЅРµС‚" in vlow:
+                return "РЅРµС‚ Р»СЋРґРµР№"
+            if "РІС‹СЃ" in vlow or "РјРЅРѕРіРѕ" in vlow:
+                return "РІС‹СЃРѕРєР°СЏ"
+            if "СЃСЂРµРґ" in vlow:
+                return "СЃСЂРµРґРЅСЏСЏ"
+            return "РЅРёР·РєР°СЏ"
         if lang == "kz":
-            if "жоқ" in vlow:
-                return "жоқ"
-            if "жоғ" in vlow or "көп" in vlow:
-                return "жоғары"
-            if "орта" in vlow:
-                return "орташа"
-            return "төмен"
+            if "Р¶РѕТ›" in vlow:
+                return "Р¶РѕТ›"
+            if "Р¶РѕТ“" in vlow or "РєУ©Рї" in vlow:
+                return "Р¶РѕТ“Р°СЂС‹"
+            if "РѕСЂС‚Р°" in vlow:
+                return "РѕСЂС‚Р°С€Р°"
+            return "С‚У©РјРµРЅ"
         if "none" in vlow or vlow == "no":
             return "none"
         if "high" in vlow or "many" in vlow:
@@ -411,25 +411,25 @@ def sanitize_global_summary(text: str, lang: str) -> str:
     def pick_motion(v: str) -> str:
         vlow = (v or "").lower()
         if lang == "ru":
-            if "хаот" in vlow:
-                return "хаотичное"
-            if "усил" in vlow or "раст" in vlow:
-                return "усиливающееся"
-            if "слаб" in vlow:
-                return "слабое"
-            if "нет" in vlow:
-                return "нет"
-            return "стабильное"
+            if "С…Р°РѕС‚" in vlow:
+                return "С…Р°РѕС‚РёС‡РЅРѕРµ"
+            if "СѓСЃРёР»" in vlow or "СЂР°СЃС‚" in vlow:
+                return "СѓСЃРёР»РёРІР°СЋС‰РµРµСЃСЏ"
+            if "СЃР»Р°Р±" in vlow:
+                return "СЃР»Р°Р±РѕРµ"
+            if "РЅРµС‚" in vlow:
+                return "РЅРµС‚"
+            return "СЃС‚Р°Р±РёР»СЊРЅРѕРµ"
         if lang == "kz":
-            if "хаот" in vlow:
-                return "хаотикалық"
-            if "күш" in vlow:
-                return "күшейіп жатыр"
-            if "әлсіз" in vlow:
-                return "әлсіз"
-            if "жоқ" in vlow:
-                return "жоқ"
-            return "тұрақты"
+            if "С…Р°РѕС‚" in vlow:
+                return "С…Р°РѕС‚РёРєР°Р»С‹Т›"
+            if "РєТЇС€" in vlow:
+                return "РєТЇС€РµР№С–Рї Р¶Р°С‚С‹СЂ"
+            if "У™Р»СЃС–Р·" in vlow:
+                return "У™Р»СЃС–Р·"
+            if "Р¶РѕТ›" in vlow:
+                return "Р¶РѕТ›"
+            return "С‚Т±СЂР°Т›С‚С‹"
         if "chaot" in vlow:
             return "chaotic"
         if "increas" in vlow:
@@ -443,17 +443,17 @@ def sanitize_global_summary(text: str, lang: str) -> str:
     def pick_risk(v: str) -> str:
         vlow = (v or "").lower()
         if lang == "ru":
-            if "опас" in vlow:
-                return "опасно"
-            if "подоз" in vlow or "күм" in vlow:
-                return "подозрительно"
-            return "норма"
+            if "РѕРїР°СЃ" in vlow:
+                return "РѕРїР°СЃРЅРѕ"
+            if "РїРѕРґРѕР·" in vlow or "РєТЇРј" in vlow:
+                return "РїРѕРґРѕР·СЂРёС‚РµР»СЊРЅРѕ"
+            return "РЅРѕСЂРјР°"
         if lang == "kz":
-            if "қауіп" in vlow:
-                return "қауіпті"
-            if "күм" in vlow:
-                return "күмәнді"
-            return "норма"
+            if "Т›Р°СѓС–Рї" in vlow:
+                return "Т›Р°СѓС–РїС‚С–"
+            if "РєТЇРј" in vlow:
+                return "РєТЇРјУ™РЅРґС–"
+            return "РЅРѕСЂРјР°"
         if "danger" in vlow:
             return "dangerous"
         if "susp" in vlow:
@@ -465,13 +465,13 @@ def sanitize_global_summary(text: str, lang: str) -> str:
         if not v:
             return none_anom
         vlow = v.lower()
-        if lang == "ru" and vlow in {"нет", "нет.", "не обнаружены", "отсутствуют"}:
-            return "нет"
-        if lang == "kz" and vlow in {"жоқ", "жоқ.", "анықталмады"}:
-            return "жоқ"
+        if lang == "ru" and vlow in {"РЅРµС‚", "РЅРµС‚.", "РЅРµ РѕР±РЅР°СЂСѓР¶РµРЅС‹", "РѕС‚СЃСѓС‚СЃС‚РІСѓСЋС‚"}:
+            return "РЅРµС‚"
+        if lang == "kz" and vlow in {"Р¶РѕТ›", "Р¶РѕТ›.", "Р°РЅС‹Т›С‚Р°Р»РјР°РґС‹"}:
+            return "Р¶РѕТ›"
         if lang == "en" and vlow in {"none", "none.", "no"}:
             return "none"
-        v = re.sub(r"^\s*[\-\•\*]+\s*", "", v).strip()
+        v = re.sub(r"^\s*[\-\вЂў\*]+\s*", "", v).strip()
         return (v[:200] if v else none_anom)
 
     out_lines: List[str] = [f"{short_label} {short_text}".strip()]
@@ -484,8 +484,8 @@ def sanitize_global_summary(text: str, lang: str) -> str:
             v = pick_motion(v)
         elif i == 3:
             v = pick_anom(v)
-            if (v.lower() == none_anom) and legacy_timed_norm and legacy_timed_norm != none_anom:
-                v = legacy_timed_norm
+            if (v.lower() == none_anom) and timed_norm and timed_norm != none_anom:
+                v = timed_norm
         elif i == 4:
             v = pick_risk(v)
         out_lines.append(f"{k} {v}".strip())
@@ -762,3 +762,4 @@ class VideoToTextPipeline:
         )
 
         return merged, metrics
+

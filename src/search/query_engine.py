@@ -2,7 +2,7 @@
 """
 Hybrid Query Engine for SmartCampus V2T.
 
-Loads defaults from configs/pipeline.yaml:
+Loads defaults from configs/profiles/main.yaml:
 - paths.indexes_dir
 - search.embed_model_name
 - search weights/candidates/fusion/dedupe
@@ -31,10 +31,11 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.utils.config_loader import load_pipeline_config
 
 from .index_builder import (
-    SentenceTransformerEmbedder,
     HybridIndex,
     MODEL_NAME_DEFAULT,
     _tokenize,
+    _looks_like_transformers_model,
+    build_text_embedder,
     load_index,
     resolve_index_dir,
     search_config_fingerprint,
@@ -42,7 +43,7 @@ from .index_builder import (
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CFG_PATH = PROJECT_ROOT / "configs" / "pipeline.yaml"
+DEFAULT_CFG_PATH = PROJECT_ROOT / "configs" / "profiles" / "main.yaml"
 
 
 @dataclass
@@ -56,6 +57,15 @@ class SearchResult:
     end_sec: float
     description: str
     source_id: str
+    segment_id: Optional[str] = None
+    event_type: Optional[str] = None
+    risk_level: Optional[str] = None
+    tags: Optional[List[str]] = None
+    objects: Optional[List[str]] = None
+    people_count_bucket: Optional[str] = None
+    motion_type: Optional[str] = None
+    anomaly_flag: Optional[bool] = None
+    variant: Optional[str] = None
     extra: Optional[Dict[str, Any]] = None
 
 
@@ -223,6 +233,133 @@ def _in_sorted(sorted_unique: np.ndarray, values: np.ndarray) -> np.ndarray:
     return out
 
 
+def _as_str_set(values: Any) -> Set[str]:
+    out: Set[str] = set()
+    if isinstance(values, list):
+        for item in values:
+            text = str(item or "").strip().lower()
+            if text:
+                out.add(text)
+    elif values is not None:
+        text = str(values).strip().lower()
+        if text:
+            out.add(text)
+    return out
+
+
+def _heuristic_rerank_bonus(query_tokens: Sequence[str], hit: "SearchResult") -> float:
+    """Compute a deterministic rerank bonus from structured metadata and text overlap."""
+
+    if not query_tokens:
+        return 0.0
+
+    qset = {str(token).strip().lower() for token in query_tokens if str(token).strip()}
+    if not qset:
+        return 0.0
+
+    bonus = 0.0
+    desc_tokens = set(_tokenize(str(hit.description or ""), normalize=False))
+    if desc_tokens:
+        bonus += 0.30 * (len(qset & desc_tokens) / max(1, len(qset)))
+
+    for value, weight in (
+        (hit.event_type, 0.30),
+        (hit.risk_level, 0.18),
+        (hit.people_count_bucket, 0.12),
+        (hit.motion_type, 0.12),
+    ):
+        text = str(value or "").strip().lower()
+        if text and text in qset:
+            bonus += weight
+
+    tag_hits = qset & {str(x).strip().lower() for x in (hit.tags or []) if str(x).strip()}
+    if tag_hits:
+        bonus += 0.24 * (len(tag_hits) / max(1, len(qset)))
+
+    object_hits = qset & {str(x).strip().lower() for x in (hit.objects or []) if str(x).strip()}
+    if object_hits:
+        bonus += 0.18 * (len(object_hits) / max(1, len(qset)))
+
+    if hit.anomaly_flag and ({"anomaly", "alert", "warning", "critical"} & qset):
+        bonus += 0.14
+
+    return float(bonus)
+
+
+class TransformersReranker:
+    """Score query-document pairs with a transformers sequence-classification model."""
+
+    def __init__(self, model_name: str, device: Optional[str] = None):
+        try:
+            import torch
+            from transformers import AutoModelForSequenceClassification, AutoTokenizer
+        except Exception as exc:
+            raise RuntimeError("transformers reranker dependencies are not installed.") from exc
+
+        self.model_name = str(model_name)
+        self._torch = torch
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, trust_remote_code=True)
+        self.model = AutoModelForSequenceClassification.from_pretrained(self.model_name, trust_remote_code=True)
+        self.model.eval()
+
+        device_name = str(device or "").strip()
+        if device_name:
+            try:
+                self.model.to(device_name)
+            except Exception:
+                pass
+
+    def score_pairs(self, query: str, passages: Sequence[str]) -> List[float]:
+        """Return one rerank score per passage."""
+
+        if not passages:
+            return []
+
+        model_device = None
+        try:
+            model_device = next(self.model.parameters()).device
+        except Exception:
+            model_device = None
+
+        encoded = self.tokenizer(
+            [str(query or "")] * len(passages),
+            [str(p or "") for p in passages],
+            padding=True,
+            truncation=True,
+            max_length=512,
+            return_tensors="pt",
+        )
+        if model_device is not None:
+            for key, value in encoded.items():
+                try:
+                    encoded[key] = value.to(model_device)
+                except Exception:
+                    pass
+
+        with self._torch.inference_mode():
+            outputs = self.model(**encoded)
+            logits = getattr(outputs, "logits", outputs[0])
+            if len(getattr(logits, "shape", ())) > 1 and int(logits.shape[-1]) > 1:
+                logits = logits[:, 0]
+            else:
+                logits = logits.reshape(-1)
+        return [float(x) for x in logits.detach().cpu().tolist()]
+
+
+def _build_reranker(model_name: str, backend: str, device: Optional[str]) -> Optional[TransformersReranker]:
+    """Build a model reranker when possible, otherwise return None for heuristic fallback."""
+
+    backend_name = str(backend or "auto").strip().lower() or "auto"
+    if backend_name not in {"auto", "transformers"}:
+        return None
+    if backend_name == "auto" and not _looks_like_transformers_model(model_name):
+        return None
+    try:
+        return TransformersReranker(model_name=model_name, device=device)
+    except Exception:
+        return None
+
+
 class QueryEngine:
     def __init__(
         self,
@@ -231,10 +368,17 @@ class QueryEngine:
         index_dir: Optional[Path] = None,
         config_fingerprint: Optional[str] = None,
         language: Optional[str] = None,
+        variant: Optional[str] = None,
         w_bm25: Optional[float] = None,
         w_dense: Optional[float] = None,
         candidate_k_sparse: Optional[int] = None,
         candidate_k_dense: Optional[int] = None,
+        embedding_backend: Optional[str] = None,
+        fallback_embed_model_name: Optional[str] = None,
+        rerank_enabled: Optional[bool] = None,
+        rerank_top_k: Optional[int] = None,
+        reranker_model_name: Optional[str] = None,
+        reranker_backend: Optional[str] = None,
         fusion: Optional[str] = None,
         rrf_k: Optional[int] = None,
         dedupe_mode: Optional[str] = None,
@@ -251,7 +395,8 @@ class QueryEngine:
 
         cfg_fp = config_fingerprint or search_config_fingerprint(cfg)
         self.language = (language or getattr(cfg.ui, "default_lang", None) or "en").strip().lower()
-        resolved_dir = resolve_index_dir(base_index_dir, cfg_fp, language=self.language)
+        self.variant = str(variant).strip().lower() if variant else None
+        resolved_dir = resolve_index_dir(base_index_dir, cfg_fp, language=self.language, variant=self.variant)
 
         self.index_dir = base_index_dir
         self.config_fingerprint = str(cfg_fp)
@@ -282,6 +427,11 @@ class QueryEngine:
         self.dense_chunk_size = max(256, int(dense_chunk_size))
         self.normalize_text = bool(getattr(s, "normalize_text", True))
         self.lemmatize = bool(getattr(s, "lemmatize", False))
+        self.rerank_enabled = bool(rerank_enabled if rerank_enabled is not None else getattr(s, "rerank_enabled", True))
+        self.rerank_top_k = max(
+            1,
+            int(rerank_top_k if rerank_top_k is not None else getattr(s, "rerank_top_k", 30)),
+        )
 
         meta_model = None
         try:
@@ -292,16 +442,38 @@ class QueryEngine:
         model_name = (
             str(embed_model_name)
             if embed_model_name is not None
-            else str(getattr(s, "embed_model_name", None) or meta_model or MODEL_NAME_DEFAULT)
+            else str(meta_model or getattr(s, "embedding_model_id", None) or getattr(s, "embed_model_name", MODEL_NAME_DEFAULT))
+        )
+        embedding_backend_name = str(
+            embedding_backend if embedding_backend is not None else getattr(s, "embedding_backend", "auto")
+        ).strip().lower() or "auto"
+        fallback_name = (
+            str(fallback_embed_model_name)
+            if fallback_embed_model_name is not None
+            else str(getattr(s, "embed_model_name", MODEL_NAME_DEFAULT))
         )
 
         query_prefix = str(getattr(s, "query_prefix", "query: "))
         passage_prefix = str(getattr(s, "passage_prefix", "passage: "))
-        self.embedder = SentenceTransformerEmbedder(
+        self.embedder = build_text_embedder(
             model_name=str(model_name),
             device=device,
             query_prefix=query_prefix,
             passage_prefix=passage_prefix,
+            backend=embedding_backend_name,
+            fallback_model_name=fallback_name,
+        )
+        reranker_name = str(
+            reranker_model_name if reranker_model_name is not None else getattr(s, "reranker_model_id", "")
+        ).strip()
+        reranker_backend_name = str(
+            reranker_backend if reranker_backend is not None else getattr(s, "reranker_backend", "auto")
+        ).strip().lower() or "auto"
+        self.reranker = _build_reranker(reranker_name, reranker_backend_name, device=device)
+        self.reranker_backend = (
+            "transformers"
+            if self.reranker is not None
+            else ("heuristic" if self.rerank_enabled else "disabled")
         )
         self.last_stats: Dict[str, Any] = {}
 
@@ -315,6 +487,52 @@ class QueryEngine:
         if video_id is not None:
             mask = [m and (d.video_id == video_id) for m, d in zip(mask, docs)]
         return mask
+
+    def _matches_filters(self, doc: Any, filters: Optional[Dict[str, Any]]) -> bool:
+        if not filters:
+            return True
+
+        meta = getattr(doc, "extra", None)
+        if not isinstance(meta, dict):
+            meta = {}
+
+        start_sec = float(getattr(doc, "start_sec", 0.0) or 0.0)
+        end_sec = float(getattr(doc, "end_sec", 0.0) or 0.0)
+        duration_sec = max(0.0, end_sec - start_sec)
+
+        if filters.get("start_sec") is not None and start_sec < float(filters["start_sec"]):
+            return False
+        if filters.get("end_sec") is not None and end_sec > float(filters["end_sec"]):
+            return False
+        if filters.get("min_duration_sec") is not None and duration_sec < float(filters["min_duration_sec"]):
+            return False
+        if filters.get("max_duration_sec") is not None and duration_sec > float(filters["max_duration_sec"]):
+            return False
+
+        for key in ("event_type", "risk_level", "people_count_bucket", "motion_type", "variant"):
+            expected = filters.get(key)
+            if expected is None:
+                continue
+            actual = str(meta.get(key) or "").strip().lower()
+            if actual != str(expected).strip().lower():
+                return False
+
+        if filters.get("anomaly_only") is True and not bool(meta.get("anomaly_flag", False)):
+            return False
+
+        expected_tags = _as_str_set(filters.get("tags"))
+        if expected_tags:
+            actual_tags = _as_str_set(meta.get("tags"))
+            if not expected_tags.issubset(actual_tags):
+                return False
+
+        expected_objects = _as_str_set(filters.get("objects"))
+        if expected_objects:
+            actual_objects = _as_str_set(meta.get("objects"))
+            if not expected_objects.issubset(actual_objects):
+                return False
+
+        return True
 
     def _dense_valid_indices(self) -> np.ndarray:
         if self._dense_valid_indices_cache is not None:
@@ -338,6 +556,7 @@ class QueryEngine:
         query: str,
         top_k: int = 10,
         video_id: Optional[str] = None,
+        filters: Optional[Dict[str, Any]] = None,
         dedupe: bool = True,
         return_stats: bool = False,
     ) -> Union[List[SearchResult], Tuple[List[SearchResult], Dict[str, Any]]]:
@@ -357,9 +576,15 @@ class QueryEngine:
             }
             return ([], dict(self.last_stats)) if return_stats else []
 
+        active_filters = {k: v for k, v in (filters or {}).items() if v is not None and v != []}
+
         t_filter0 = time.perf_counter()
         mask = self._build_mask(docs, video_id=video_id)
-        valid_indices = [i for i, m in enumerate(mask) if m]
+        valid_indices = [
+            i
+            for i, (m, d) in enumerate(zip(mask, docs))
+            if m and self._matches_filters(d, active_filters)
+        ]
         t_filter_ms = (time.perf_counter() - t_filter0) * 1000.0
 
         if not valid_indices:
@@ -477,8 +702,17 @@ class QueryEngine:
                     language=self.language,
                     start_sec=float(d.start_sec),
                     end_sec=float(d.end_sec),
-                    description=d.text,
+                    description=str(getattr(d, "display_text", None) or d.text),
                     source_id=d.doc_id,
+                    segment_id=str((d.extra or {}).get("segment_id") or "") or None,
+                    event_type=str((d.extra or {}).get("event_type") or "") or None,
+                    risk_level=str((d.extra or {}).get("risk_level") or "") or None,
+                    tags=list((d.extra or {}).get("tags") or []),
+                    objects=list((d.extra or {}).get("objects") or []),
+                    people_count_bucket=str((d.extra or {}).get("people_count_bucket") or "") or None,
+                    motion_type=str((d.extra or {}).get("motion_type") or "") or None,
+                    anomaly_flag=bool((d.extra or {}).get("anomaly_flag", False)),
+                    variant=str((d.extra or {}).get("variant") or "") or None,
                     extra=d.extra,
                 )
             )
@@ -495,6 +729,43 @@ class QueryEngine:
                 raise ValueError(f"Unknown dedupe_mode: {self.dedupe_mode!r}. Use 'overlap' or 'bucket'.")
         t_dedupe_ms = (time.perf_counter() - t_dedupe0) * 1000.0
 
+        t_rerank0 = time.perf_counter()
+        rerank_mode = "disabled"
+        if self.rerank_enabled and results:
+            rerank_n = min(len(results), max(int(top_k), self.rerank_top_k))
+            prefix = list(results[:rerank_n])
+            suffix = list(results[rerank_n:])
+            rerank_mode = "heuristic"
+            if self.reranker is not None:
+                try:
+                    pair_scores = self.reranker.score_pairs(q, [hit.description for hit in prefix])
+                    if len(pair_scores) == len(prefix):
+                        scored_prefix = []
+                        max_abs = max((abs(float(x)) for x in pair_scores), default=1.0) or 1.0
+                        for hit, rerank_score in zip(prefix, pair_scores):
+                            combined_score = float(hit.score) + (float(rerank_score) / max_abs) * 0.35
+                            scored_prefix.append((combined_score, hit))
+                        scored_prefix.sort(key=lambda item: item[0], reverse=True)
+                        prefix = [hit for _, hit in scored_prefix]
+                        rerank_mode = "transformers"
+                    else:
+                        prefix.sort(
+                            key=lambda hit: float(hit.score) + _heuristic_rerank_bonus(q_tokens, hit),
+                            reverse=True,
+                        )
+                except Exception:
+                    prefix.sort(
+                        key=lambda hit: float(hit.score) + _heuristic_rerank_bonus(q_tokens, hit),
+                        reverse=True,
+                    )
+            else:
+                prefix.sort(
+                    key=lambda hit: float(hit.score) + _heuristic_rerank_bonus(q_tokens, hit),
+                    reverse=True,
+                )
+            results = prefix + suffix
+        t_rerank_ms = (time.perf_counter() - t_rerank0) * 1000.0
+
         results = results[: int(top_k)]
         total_ms = (time.perf_counter() - t0) * 1000.0
 
@@ -502,10 +773,17 @@ class QueryEngine:
             "ok": True,
             "query": q,
             "query_tokens": int(len(q_tokens)),
-            "filters": {"video_id": video_id, "language": self.language},
+            "filters": {"video_id": video_id, "language": self.language, **active_filters},
             "index": {
                 "index_dir": str(self.index_dir),
-                "resolved_index_dir": str(resolve_index_dir(self.index_dir, self.config_fingerprint, self.language)),
+                "resolved_index_dir": str(
+                    resolve_index_dir(
+                        self.index_dir,
+                        self.config_fingerprint,
+                        self.language,
+                        variant=(self.index.meta or {}).get("variant"),
+                    )
+                ),
                 "config_fingerprint": self.config_fingerprint,
                 "n_docs": int(n_docs),
                 "n_valid": int(len(valid_indices)),
@@ -537,6 +815,11 @@ class QueryEngine:
                 "w_dense": float(self.w_dense),
                 "rrf_k": int(self.rrf_k),
             },
+            "rerank": {
+                "enabled": bool(self.rerank_enabled),
+                "top_k": int(self.rerank_top_k),
+                "backend": rerank_mode,
+            },
             "timings_ms": {
                 "filter": float(t_filter_ms),
                 "sparse": float(t_sparse_ms),
@@ -546,6 +829,7 @@ class QueryEngine:
                 "fuse": float(t_fuse_ms),
                 "pack": float(t_pack_ms),
                 "dedupe": float(t_dedupe_ms),
+                "rerank": float(t_rerank_ms),
                 "total": float(total_ms),
             },
             "returned": {"top_k": int(top_k), "n_returned": int(len(results))},

@@ -1,0 +1,18 @@
+extends: main.yaml
+
+experiment:
+  mode: experimental
+  compare_on_single_video: true
+  variant_ids: [exp_a, exp_b, exp_c]
+
+guard:
+  enabled: false
+  query_gate: false
+  output_gate: false
+
+runtime:
+  overwrite_existing: true
+
+search:
+  rerank_enabled: true
+  rerank_top_k: 50

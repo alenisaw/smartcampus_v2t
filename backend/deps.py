@@ -3,7 +3,7 @@
 Backend dependencies for SmartCampus V2T.
 
 Purpose:
-- Load configs/pipeline.yaml and return PipelineConfig + raw dict.
+- Load the effective config (profile + optional variant) and merged raw dict.
 - Resolve backend filesystem paths (jobs/queue/locks/index_state/queue_state).
 - Provide safe JSON read/write helpers, timestamps, host id.
 - Provide helpers to list videos and outputs using the per-video layout.
@@ -19,9 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, List
 
-import yaml
-
-from src.utils.config_loader import load_pipeline_config
+from src.utils.config_loader import load_pipeline_bundle
 
 
 def now_ts() -> float:
@@ -68,12 +66,18 @@ class BackendPaths:
     queue_state_path: Path
 
 
-def load_cfg_and_raw(project_root: Optional[Path] = None, cfg_path: Optional[Path] = None):
-    root = project_root or Path(__file__).resolve().parents[1]
-    cpath = cfg_path or (root / "configs" / "pipeline.yaml")
-    raw = yaml.safe_load(cpath.read_text(encoding="utf-8"))
+def load_cfg_and_raw(
+    project_root: Optional[Path] = None,
+    cfg_path: Optional[Path] = None,
+    *,
+    profile: Optional[str] = None,
+    variant: Optional[str] = None,
+):
+    """Load the merged config and its raw form for backend and worker entrypoints."""
 
-    cfg = load_pipeline_config(cpath)
+    root = project_root or Path(__file__).resolve().parents[1]
+    cpath = cfg_path or (root / "configs" / "profiles" / "main.yaml")
+    cfg, raw = load_pipeline_bundle(cpath, profile=profile, variant=variant)
     return cfg, raw
 
 
@@ -86,18 +90,15 @@ def _resolve_path(root: Path, value: Optional[str], default_rel: str) -> Path:
 
 def get_backend_paths(cfg, raw: Dict[str, Any], project_root: Optional[Path] = None) -> BackendPaths:
     root = project_root or Path(__file__).resolve().parents[1]
-    cfg_path = root / "configs" / "pipeline.yaml"
+    runtime_context = raw.get("runtime_context") or {}
+    cfg_path = Path(str(runtime_context.get("config_path") or (root / "configs" / "profiles" / "main.yaml"))).resolve()
 
     videos_dir = Path(cfg.paths.videos_dir)
     indexes_dir = Path(cfg.paths.indexes_dir)
 
-    jobs_raw = raw.get("jobs") or {}
-    queue_raw = raw.get("queue") or {}
-    locks_raw = raw.get("locks") or {}
-
-    jobs_dir = _resolve_path(root, jobs_raw.get("dir"), "data/jobs")
-    queue_dir = _resolve_path(root, queue_raw.get("dir"), "data/queue")
-    locks_dir = _resolve_path(root, locks_raw.get("dir"), "data/locks")
+    jobs_dir = Path(getattr(cfg.jobs, "dir", _resolve_path(root, None, "data/jobs")))
+    queue_dir = Path(getattr(cfg.queue, "dir", _resolve_path(root, None, "data/queue")))
+    locks_dir = Path(getattr(cfg.locks, "dir", _resolve_path(root, None, "data/locks")))
 
     index_state_path = indexes_dir / "index_state.json"
     queue_state_path = (root / "data" / "queue_state.json").resolve()
@@ -131,13 +132,15 @@ def list_videos(videos_dir: Path) -> List[Dict[str, Any]]:
     return _list_videos(Path(videos_dir))
 
 
-def read_video_outputs(videos_dir: Path, video_id: str, lang: str) -> Dict[str, Any]:
+def read_video_outputs(videos_dir: Path, video_id: str, lang: str, variant: Optional[str] = None) -> Dict[str, Any]:
     from src.utils.video_store import (
+        batch_manifest_path,
         outputs_manifest_path,
         metrics_path,
         read_metrics,
         read_segments,
         read_summary,
+        run_manifest_path,
         segments_path,
         summary_path,
     )
@@ -145,24 +148,29 @@ def read_video_outputs(videos_dir: Path, video_id: str, lang: str) -> Dict[str, 
     out: Dict[str, Any] = {
         "video_id": video_id,
         "language": lang,
+        "variant": variant,
         "manifest": None,
+        "run_manifest": None,
+        "batch_manifest": None,
         "annotations": [],
         "metrics": None,
         "global_summary": None,
     }
 
-    mp = outputs_manifest_path(Path(videos_dir), video_id)
+    mp = outputs_manifest_path(Path(videos_dir), video_id, variant=variant)
     out["manifest"] = read_json(mp, default=None)
+    out["run_manifest"] = read_json(run_manifest_path(Path(videos_dir), video_id, variant=variant), default=None)
+    out["batch_manifest"] = read_json(batch_manifest_path(Path(videos_dir), video_id), default=None)
 
-    seg = segments_path(Path(videos_dir), video_id, lang)
+    seg = segments_path(Path(videos_dir), video_id, lang, variant=variant)
     out["annotations"] = read_segments(seg)
 
-    sp = summary_path(Path(videos_dir), video_id, lang)
+    sp = summary_path(Path(videos_dir), video_id, lang, variant=variant)
     summ = read_summary(sp)
     if isinstance(summ, dict):
-        out["global_summary"] = summ.get("summary")
+        out["global_summary"] = summ.get("global_summary", summ.get("summary"))
 
-    met = read_metrics(metrics_path(Path(videos_dir), video_id))
+    met = read_metrics(metrics_path(Path(videos_dir), video_id, variant=variant))
     if isinstance(met, dict):
         out["metrics"] = met
 
