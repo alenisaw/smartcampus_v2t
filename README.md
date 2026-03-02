@@ -1,6 +1,6 @@
 # SmartCampus V2T
 
-SmartCampus V2T is a local-first repository for a video-to-text analytics pipeline aimed at urban surveillance scenarios. The codebase is organized around a reproducible processing flow that turns raw video into structured multilingual artifacts, searchable indexes, and grounded operator-facing outputs.
+SmartCampus V2T is a a video-to-text analytics pipeline aimed at urban surveillance scenarios. The codebase is organized around a reproducible processing flow that turns raw video into structured multilingual artifacts, searchable indexes, and grounded operator-facing outputs.
 
 The repository is intentionally split by responsibility: interface code lives separately from backend orchestration, reusable pipeline logic is isolated in `src/`, and experiment notes are kept outside the main repository page.
 
