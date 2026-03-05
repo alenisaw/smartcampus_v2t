@@ -10,9 +10,10 @@ Purpose:
 
 from __future__ import annotations
 
+import os
 import time
 import traceback
-from typing import Optional
+from typing import Any, Optional
 
 from backend.deps import get_backend_paths, host_id, load_cfg_and_raw
 from backend.experimental import should_expand_experimental_job
@@ -38,6 +39,43 @@ from backend.worker_runtime import (
 )
 
 
+def _worker_role() -> str:
+    """Return the current worker role selector."""
+
+    role = str(os.environ.get("SMARTCAMPUS_WORKER_ROLE", "all") or "all").strip().lower()
+    return role or "all"
+
+
+def _job_allowed_for_role(job_type: str, role: str) -> bool:
+    """Check whether a worker role should execute a job type."""
+
+    jt = str(job_type or "").strip().lower()
+    rr = str(role or "all").strip().lower() or "all"
+    if rr in {"", "all", "any"}:
+        return True
+    if rr in {"gpu", "worker_gpu"}:
+        return jt == "process"
+    if rr in {"mt", "worker_mt"}:
+        return jt == "translate"
+    if rr in {"cpu", "worker_cpu"}:
+        return jt == "index"
+    return True
+
+
+def _requeue_for_other_role(paths: Any, job_id: str, job_type: str) -> None:
+    """Put a job back to queue when the current worker role does not match."""
+
+    priority = "010"
+    jt = str(job_type or "").strip().lower()
+    if jt == "translate":
+        priority = "020"
+    elif jt == "index":
+        priority = "030"
+    tag = str(int(time.time() * 1000))
+    paths.queue_dir.mkdir(parents=True, exist_ok=True)
+    (paths.queue_dir / f"p{priority}__{tag}__{job_id}.q").write_text(job_id, encoding="utf-8")
+
+
 def worker_main() -> None:
     """Run the main worker loop."""
 
@@ -53,10 +91,14 @@ def worker_main() -> None:
     worker_cfg = raw.get("worker") or {}
     poll_interval = float(worker_cfg.get("poll_interval_sec", 1))
     lease_sec = float(worker_cfg.get("lease_sec", 30))
+    role = _worker_role()
     owner = host_id()
     context = build_worker_context(cfg, raw)
 
-    print(f"[worker] owner={owner} jobs={paths.jobs_dir} queue={paths.queue_dir} locks={paths.locks_dir}")
+    print(
+        f"[worker] owner={owner} role={role} jobs={paths.jobs_dir} "
+        f"queue={paths.queue_dir} locks={paths.locks_dir}"
+    )
     active_job_id: Optional[str] = None
 
     while True:
@@ -116,6 +158,21 @@ def worker_main() -> None:
             device = str(extra.get("device") or cfg.model.device)
             force_overwrite = bool(extra.get("force_overwrite", cfg.runtime.overwrite_existing))
             index_only = bool(extra.get("index_only", False)) or job_type == "index"
+
+            if not _job_allowed_for_role(job_type, role):
+                _requeue_for_other_role(paths, job_id, job_type)
+                set_state(
+                    paths,
+                    job_id,
+                    "queued",
+                    stage="queued",
+                    progress=0.0,
+                    message=f"Waiting for worker role for job_type={job_type}",
+                )
+                remove_lock_if_exists(paths, job_id)
+                active_job_id = None
+                time.sleep(0.1)
+                continue
 
             if should_expand_experimental_job(job_type, cfg, cfg.active_variant):
                 expand_experimental_job(

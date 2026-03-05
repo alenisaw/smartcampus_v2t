@@ -12,7 +12,10 @@ guard:
 
 runtime:
   overwrite_existing: true
+  metrics_repeats: 3
+  metrics_store_samples: true
 
 search:
   rerank_enabled: true
   rerank_top_k: 50
+  dense_input_mode: text_keyframe

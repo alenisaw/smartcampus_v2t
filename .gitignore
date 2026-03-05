@@ -53,3 +53,7 @@ data/
 # Local model directories
 models/**
 !models/.gitkeep
+
+# Local private planning/status notes (not for repository)
+docs/local-*.md
+docs/local_progress.md

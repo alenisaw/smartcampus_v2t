@@ -83,6 +83,7 @@ class SearchConfig:
     dedupe_tol_sec: float
     dedupe_overlap_thr: float
     embedding_dim: int
+    dense_input_mode: str
 
 
 @dataclass
@@ -186,6 +187,8 @@ class RuntimeConfig:
     torch_compile: bool
     torch_compile_mode: str
     torch_compile_fullgraph: bool
+    metrics_repeats: int
+    metrics_store_samples: bool
 
 
 @dataclass
@@ -205,6 +208,7 @@ class TranslationConfig:
     query_time_translation: bool
     offline_translation: bool
     post_edit_targets: List[str]
+    post_edit_max_items: int
     ctranslate2_device: str
     ctranslate2_compute_type: str
     ctranslate2_inter_threads: int

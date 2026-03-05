@@ -16,6 +16,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+try:
+    import cv2
+except Exception:
+    cv2 = None
+
 from src.core.qwen_vl_backend import QwenVLBackend
 from src.core.types import Annotation, RunMetrics
 from src.pipeline.pipeline_config import PipelineConfig
@@ -575,9 +580,40 @@ def build_clips_from_video_meta(
     stride_sec: float,
     min_clip_frames: int,
     max_clip_frames: int,
-) -> Tuple[List[List[str]], List[Tuple[float, float]]]:
+    keyframe_policy: str = "middle",
+    return_keyframes: bool = False,
+):
+    def _pick_keyframe_path(paths_list: List[str], policy: str) -> Optional[str]:
+        if not paths_list:
+            return None
+        mode = str(policy or "middle").strip().lower()
+        if mode in {"first", "start"}:
+            return str(paths_list[0])
+        if mode in {"last", "end"}:
+            return str(paths_list[-1])
+        if mode in {"middle", "mid", ""}:
+            return str(paths_list[len(paths_list) // 2])
+        if mode in {"sharpest", "max_sharpness"} and cv2 is not None:
+            best_idx = len(paths_list) // 2
+            best_score = -1.0
+            for idx, frame_path in enumerate(paths_list):
+                try:
+                    image = cv2.imread(str(frame_path), cv2.IMREAD_GRAYSCALE)
+                    if image is None:
+                        continue
+                    score = float(cv2.Laplacian(image, cv2.CV_64F).var())
+                    if score > best_score:
+                        best_score = score
+                        best_idx = idx
+                except Exception:
+                    continue
+            return str(paths_list[best_idx])
+        return str(paths_list[len(paths_list) // 2])
+
     frames_raw = getattr(video_meta, "frames", None) or []
     if not frames_raw:
+        if return_keyframes:
+            return [], [], []
         return [], []
 
     frames: List[_FrameLike] = []
@@ -596,8 +632,11 @@ def build_clips_from_video_meta(
 
     clips: List[List[str]] = []
     clip_timestamps: List[Tuple[float, float]] = []
+    clip_keyframes: List[Optional[str]] = []
 
     if window_sec <= 0 or stride_sec <= 0 or duration <= 0:
+        if return_keyframes:
+            return clips, clip_timestamps, clip_keyframes
         return clips, clip_timestamps
 
     n = len(frames)
@@ -625,9 +664,12 @@ def build_clips_from_video_meta(
             last_ts = ts[r - 1] if r - 1 >= l else t_end
             clips.append(win_paths)
             clip_timestamps.append((float(t), float(last_ts)))
+            clip_keyframes.append(_pick_keyframe_path(win_paths, keyframe_policy))
 
         t += float(stride_sec)
 
+    if return_keyframes:
+        return clips, clip_timestamps, clip_keyframes
     return clips, clip_timestamps
 
 

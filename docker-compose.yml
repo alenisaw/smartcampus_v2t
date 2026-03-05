@@ -1,5 +1,5 @@
 # docker-compose.yml
-# Minimal demo stack for API, worker, and Streamlit UI.
+# Reproducible stack for API/UI and split worker roles.
 services:
   api:
     build:
@@ -22,7 +22,7 @@ services:
     volumes:
       - .:/app
 
-  worker:
+  worker_gpu:
     build:
       context: .
       dockerfile: Dockerfile
@@ -31,6 +31,41 @@ services:
       PYTHONUNBUFFERED: "1"
       SMARTCAMPUS_PROFILE: ${SMARTCAMPUS_PROFILE:-main}
       SMARTCAMPUS_VARIANT: ${SMARTCAMPUS_VARIANT:-}
+      SMARTCAMPUS_WORKER_ROLE: gpu
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    volumes:
+      - .:/app
+
+  worker_cpu:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: python -m backend.worker
+    environment:
+      PYTHONUNBUFFERED: "1"
+      SMARTCAMPUS_PROFILE: ${SMARTCAMPUS_PROFILE:-main}
+      SMARTCAMPUS_VARIANT: ${SMARTCAMPUS_VARIANT:-}
+      SMARTCAMPUS_WORKER_ROLE: cpu
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    volumes:
+      - .:/app
+
+  worker_mt:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: python -m backend.worker
+    environment:
+      PYTHONUNBUFFERED: "1"
+      SMARTCAMPUS_PROFILE: ${SMARTCAMPUS_PROFILE:-main}
+      SMARTCAMPUS_VARIANT: ${SMARTCAMPUS_VARIANT:-}
+      SMARTCAMPUS_WORKER_ROLE: mt
     depends_on:
       api:
         condition: service_healthy
@@ -55,3 +90,30 @@ services:
     restart: unless-stopped
     volumes:
       - .:/app
+
+  vllm:
+    image: vllm/vllm-openai:latest
+    profiles: ["with_vllm"]
+    environment:
+      PYTHONUNBUFFERED: "1"
+    command: >
+      --model ${VLLM_MODEL_ID:-Qwen/Qwen3-4B-Instruct-2507}
+      --host 0.0.0.0
+      --port 8001
+      --dtype ${VLLM_DTYPE:-float16}
+      --max-model-len ${VLLM_MAX_MODEL_LEN:-4096}
+    ports:
+      - "8001:8001"
+    restart: unless-stopped
+    volumes:
+      - .:/app
+
+  mt_service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    profiles: ["with_ct2"]
+    command: python -c "import ctranslate2, sentencepiece; print('CTranslate2 backend is available')"
+    environment:
+      PYTHONUNBUFFERED: "1"
+    restart: "no"

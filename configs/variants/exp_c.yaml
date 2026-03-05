@@ -1,6 +1,7 @@
 video:
   analysis_fps: 2.0
   target_fps: 2.0
+  decode_resolution: [960, 540]
   min_change_threshold: 0.04
   dark_threshold: 32.0
   blur_threshold: 40.0
@@ -10,9 +11,16 @@ clips:
   window_sec: 4.0
   stride_sec: 3.0
   max_clip_frames: 12
+  keyframe_policy: first
 
 search:
   candidate_k_sparse: 120
   candidate_k_dense: 120
-  rerank_top_k: 20
+  rerank_top_k: 15
+  w_dense: 0.50
+  w_bm25: 0.50
+  dense_input_mode: text
   embedding_dim: 768
+
+translation:
+  post_edit_targets: [summary]

@@ -48,6 +48,7 @@ search:
   dedupe_tol_sec: 1.0
   dedupe_overlap_thr: 0.7
   embedding_dim: 1024
+  dense_input_mode: text
 
 video:
   target_fps: 3.0
@@ -131,6 +132,7 @@ translation:
   query_time_translation: true
   offline_translation: true
   post_edit_targets: [summary, reports, qa, selected_segments]
+  post_edit_max_items: 64
   ctranslate2:
     device: cpu
     compute_type: int8
@@ -155,6 +157,8 @@ runtime:
   torch_compile: false
   torch_compile_mode: reduce-overhead
   torch_compile_fullgraph: false
+  metrics_repeats: 1
+  metrics_store_samples: true
 
 jobs:
   dir: data/jobs

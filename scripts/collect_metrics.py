@@ -126,6 +126,36 @@ def _numeric_stats(rows: List[Dict[str, Any]], field: str) -> Dict[str, Any]:
     }
 
 
+def _aggregate_stage_stats(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """Aggregate per-stage timing means across runs."""
+
+    buckets: Dict[str, List[float]] = {}
+    for row in rows:
+        stage_stats = row.get("stage_stats_sec")
+        if not isinstance(stage_stats, dict):
+            continue
+        for stage_name, payload in stage_stats.items():
+            if not isinstance(payload, dict):
+                continue
+            value = _float_or_none(payload.get("mean_sec"))
+            if value is None:
+                value = _float_or_none(payload.get("time_sec"))
+            if value is None:
+                continue
+            buckets.setdefault(str(stage_name), []).append(float(value))
+
+    out: Dict[str, Dict[str, Any]] = {}
+    for stage_name, values in sorted(buckets.items()):
+        if not values:
+            continue
+        out[stage_name] = {
+            "count": len(values),
+            "mean_sec": mean(values),
+            "std_sec": 0.0 if len(values) == 1 else pstdev(values),
+        }
+    return out
+
+
 def _iter_targets(videos_dir: Path) -> Iterable[Tuple[str, Optional[str]]]:
     """Yield base and variant targets for every video folder."""
 
@@ -171,6 +201,7 @@ def _build_row(videos_dir: Path, video_id: str, variant: Optional[str]) -> Optio
         "lazy_drop_ratio": extra.get("lazy_drop_ratio"),
         "blur_flag_ratio": extra.get("blur_flag_ratio"),
         "anonymized": extra.get("anonymized"),
+        "stage_stats_sec": metrics.get("stage_stats_sec") if isinstance(metrics.get("stage_stats_sec"), dict) else {},
     }
 
 
@@ -207,6 +238,7 @@ def _build_system_summary(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
     for field in TRACKED_FIELDS:
         summary[field] = _numeric_stats(rows, field)
+    summary["stage_timings_sec"] = _aggregate_stage_stats(rows)
     return summary
 
 
@@ -276,6 +308,7 @@ def export_metrics_bundle(
             "rows": rows,
             "grouped_by_profile_variant": by_profile_variant,
             "grouped_by_video": per_video,
+            "stage_timings_sec": _aggregate_stage_stats(rows),
             "system": system_summary,
         },
     )
