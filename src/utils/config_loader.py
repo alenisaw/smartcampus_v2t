@@ -362,6 +362,7 @@ def load_pipeline_bundle(
         dedupe_tol_sec=float(search_raw.get("dedupe_tol_sec", 1.0)),
         dedupe_overlap_thr=float(search_raw.get("dedupe_overlap_thr", 0.7)),
         embedding_dim=int(search_raw.get("embedding_dim", 1024)),
+        dense_input_mode=str(search_raw.get("dense_input_mode", "text")).strip().lower() or "text",
     )
 
     video_raw = effective_raw.get("video") or {}
@@ -470,6 +471,8 @@ def load_pipeline_bundle(
         torch_compile=_to_bool(runtime_raw.get("torch_compile", False)),
         torch_compile_mode=str(runtime_raw.get("torch_compile_mode", "reduce-overhead")),
         torch_compile_fullgraph=_to_bool(runtime_raw.get("torch_compile_fullgraph", False)),
+        metrics_repeats=max(1, int(runtime_raw.get("metrics_repeats", 1))),
+        metrics_store_samples=_to_bool(runtime_raw.get("metrics_store_samples", True)),
     )
 
     translation_raw = effective_raw.get("translation") or {}
@@ -492,6 +495,7 @@ def load_pipeline_bundle(
             translation_raw.get("post_edit_targets"),
             default=["summary", "reports", "qa", "selected_segments"],
         ),
+        post_edit_max_items=max(1, int(translation_raw.get("post_edit_max_items", 64))),
         ctranslate2_device=str(ct2_raw.get("device", "cpu")),
         ctranslate2_compute_type=str(ct2_raw.get("compute_type", "int8_float16")),
         ctranslate2_inter_threads=int(ct2_raw.get("inter_threads", 2)),

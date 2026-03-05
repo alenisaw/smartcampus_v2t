@@ -49,6 +49,30 @@ def _is_ct2_model_dir(path: Path) -> bool:
     return any((candidate / name).exists() for name in markers)
 
 
+def _post_edit_prompt(
+    *,
+    source_lang: str,
+    target_lang: str,
+    source_text: str,
+    mt_text: str,
+    target_name: str,
+) -> str:
+    """Build a strict post-edit prompt for translation polishing."""
+
+    return (
+        "You are a machine translation post-editor.\n"
+        "Do not change meaning. Do not add facts. Preserve identifiers, timecodes, names, and numbers.\n"
+        f"Target content type: {target_name}\n"
+        f"Source language: {source_lang}\n"
+        f"Target language: {target_lang}\n"
+        "Source text:\n"
+        f"{source_text}\n\n"
+        "Machine translation output:\n"
+        f"{mt_text}\n\n"
+        "Return only the improved target text."
+    )
+
+
 @dataclass(frozen=True)
 class TranslationRoute:
     """One bilingual translation model route."""
@@ -71,6 +95,14 @@ class TranslationService:
         }
         self._translator_cache: Dict[str, object] = {}
         self._tokenizer_cache: Dict[str, object] = {}
+        self._post_edit_targets = {
+            str(item).strip().lower()
+            for item in (getattr(self.cfg.translation, "post_edit_targets", []) or [])
+            if str(item).strip()
+        }
+        self._post_edit_max_items = int(getattr(self.cfg.translation, "post_edit_max_items", 64) or 64)
+        self._llm_client = None
+        self._llm_client_ready = False
 
     def route_for(self, src_lang: str, tgt_lang: str) -> List[TranslationRoute]:
         """Resolve the chain of bilingual routes for one requested pair."""
@@ -135,6 +167,78 @@ class TranslationService:
             model_version=str(self.cfg.translation.cache_version),
             config_fingerprint=str(self.cfg.config_fingerprint),
         )
+
+    def should_post_edit(self, *, target_name: str, src_lang: str, tgt_lang: str) -> bool:
+        """Return whether post-editing should run for this translation target."""
+
+        target = str(target_name or "").strip().lower()
+        src = _normalize_lang(src_lang)
+        tgt = _normalize_lang(tgt_lang)
+        if target not in self._post_edit_targets:
+            return False
+        if src != "en":
+            return False
+        if tgt not in {"ru", "kz"}:
+            return False
+        self._ensure_llm_client()
+        return self._llm_client is not None
+
+    def post_edit_many(
+        self,
+        source_texts: List[str],
+        translated_texts: List[str],
+        *,
+        src_lang: str,
+        tgt_lang: str,
+        target_name: str,
+    ) -> Tuple[List[str], int]:
+        """Post-edit MT outputs with the text LLM for selected targets."""
+
+        if not self.should_post_edit(target_name=target_name, src_lang=src_lang, tgt_lang=tgt_lang):
+            return list(translated_texts), 0
+        if not source_texts or not translated_texts:
+            return list(translated_texts), 0
+
+        limit = max(1, int(self._post_edit_max_items))
+        out = list(translated_texts)
+        edited = 0
+        n = min(len(source_texts), len(translated_texts))
+
+        for idx in range(n):
+            if idx >= limit:
+                break
+            src = str(source_texts[idx] or "").strip()
+            mt = str(translated_texts[idx] or "").strip()
+            if not src or not mt:
+                continue
+            prompt = _post_edit_prompt(
+                source_lang=str(src_lang),
+                target_lang=str(tgt_lang),
+                source_text=src,
+                mt_text=mt,
+                target_name=str(target_name),
+            )
+            try:
+                edited_text = str(self._llm_client.generate_text(prompt) or "").strip() if self._llm_client else ""
+            except Exception:
+                edited_text = ""
+            if edited_text:
+                out[idx] = edited_text
+                edited += 1
+        return out, edited
+
+    def _ensure_llm_client(self) -> None:
+        """Lazy-initialize the post-edit LLM client only when needed."""
+
+        if self._llm_client_ready:
+            return
+        self._llm_client_ready = True
+        try:
+            from src.llm.client import LLMClient
+
+            self._llm_client = LLMClient.from_config(self.cfg)
+        except Exception:
+            self._llm_client = None
 
     def _translate_one_route(
         self,

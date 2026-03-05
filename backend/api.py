@@ -409,6 +409,51 @@ def _translate_query(cfg, query: str, src_lang: str, tgt_lang: str) -> str:
     return query
 
 
+def _translate_output_text(cfg, text: str, *, target_lang: str, target_name: str) -> str:
+    """Translate generated report/qa text to the requested language with optional post-edit."""
+
+    content = str(text or "").strip()
+    if not content:
+        return content
+    tgt = str(target_lang or "").strip().lower()
+    src = str(getattr(cfg.translation, "source_lang", None) or getattr(cfg.model, "language", "en")).strip().lower() or "en"
+    if not tgt or tgt == src:
+        return content
+
+    translator = _get_translation_service(cfg)
+    if translator is None:
+        return content
+
+    try:
+        translated = translator.translate(
+            [content],
+            src_lang=src,
+            tgt_lang=tgt,
+            batch_size=1,
+            max_new_tokens=int(getattr(cfg.translation, "max_new_tokens", 64)),
+            use_cache=bool(getattr(cfg.translation, "cache_enabled", True)),
+        )
+        if translated:
+            content = str(translated[0] or "").strip() or content
+    except Exception:
+        return content
+
+    if hasattr(translator, "post_edit_many"):
+        try:
+            edited, _edited_count = translator.post_edit_many(
+                [str(text or "")],
+                [content],
+                src_lang=src,
+                tgt_lang=tgt,
+                target_name=str(target_name or ""),
+            )
+            if edited:
+                content = str(edited[0] or "").strip() or content
+        except Exception:
+            pass
+    return content
+
+
 def _get_llm_client(cfg) -> Optional[LLMClient]:
     """Build and cache the main text LLM client for grounded generation."""
 
@@ -982,6 +1027,7 @@ def index_rebuild():
                     passage_prefix=str(getattr(cfg.search, "passage_prefix", "passage: ")),
                     normalize_text=bool(getattr(cfg.search, "normalize_text", True)),
                     lemmatize=bool(getattr(cfg.search, "lemmatize", False)),
+                    dense_input_mode=str(getattr(cfg.search, "dense_input_mode", "text")),
                     cache_dir=Path(cfg.paths.cache_dir),
                     use_embed_cache=bool(getattr(cfg.search, "embed_cache", True)),
                 )
@@ -1175,6 +1221,7 @@ def reports(req: ReportRequest):
         hits=supporting_hits,
         fallback_text=fallback_report,
     )
+    report_text = _translate_output_text(cfg, report_text, target_lang=lang, target_name="reports")
 
     return ReportResponse(
         language=lang,
@@ -1220,6 +1267,7 @@ def qa(req: QaRequest):
         hits=hits,
         fallback_text=fallback_answer,
     )
+    answer_text = _translate_output_text(cfg, answer_text, target_lang=lang, target_name="qa")
 
     return QaResponse(
         language=lang,
@@ -1264,6 +1312,7 @@ def rag(req: RagRequest):
         hits=hits,
         fallback_text=fallback_answer,
     )
+    answer_text = _translate_output_text(cfg, answer_text, target_lang=lang, target_name="qa")
 
     return RagResponse(
         language=lang,

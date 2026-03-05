@@ -41,6 +41,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Iterable
 
 try:
+    import cv2
+except Exception:
+    cv2 = None
+
+try:
     import zstandard as zstd
 except Exception:
     zstd = None
@@ -344,6 +349,7 @@ def search_config_fingerprint(cfg: Any) -> str:
             "reranker_backend": str(getattr(s, "reranker_backend", "auto")),
             "normalize_text": bool(getattr(s, "normalize_text", True)),
             "lemmatize": bool(getattr(s, "lemmatize", False)),
+            "dense_input_mode": str(getattr(s, "dense_input_mode", "text")),
             "w_bm25": float(getattr(s, "w_bm25", 0.45)),
             "w_dense": float(getattr(s, "w_dense", 0.55)),
             "candidate_k_sparse": int(getattr(s, "candidate_k_sparse", 200)),
@@ -433,6 +439,87 @@ def _build_searchable_text(display_text: str, meta: Dict[str, Any]) -> str:
             parts.append(value)
 
     return " \n ".join(parts)
+
+
+def _resolve_keyframe_path(
+    *,
+    raw_path: Optional[str],
+    videos_root: Path,
+    video_id: str,
+    segment_file: Path,
+) -> Optional[str]:
+    """Resolve a keyframe reference into an existing absolute path when possible."""
+
+    text = str(raw_path or "").strip()
+    if not text:
+        return None
+    candidate = Path(text)
+    if candidate.is_absolute() and candidate.exists():
+        return str(candidate)
+
+    checks = [
+        Path(videos_root) / video_id / text,
+        segment_file.parent / text,
+        segment_file.parent.parent / text,
+        segment_file.parent.parent.parent / text,
+    ]
+    for item in checks:
+        try:
+            if item.exists():
+                return str(item.resolve())
+        except Exception:
+            continue
+    return None
+
+
+def _keyframe_visual_tokens(path: Optional[str]) -> List[str]:
+    """Create compact visual tokens from a keyframe for multimodal dense input."""
+
+    if not path or cv2 is None:
+        return []
+    try:
+        image = cv2.imread(str(path), cv2.IMREAD_COLOR)
+        if image is None:
+            return []
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        mean_luma = float(np.mean(gray))
+        if mean_luma < 55:
+            brightness = "vf_brightness_dark"
+        elif mean_luma < 120:
+            brightness = "vf_brightness_dim"
+        elif mean_luma < 190:
+            brightness = "vf_brightness_normal"
+        else:
+            brightness = "vf_brightness_bright"
+
+        edges = cv2.Canny(gray, 80, 160)
+        edge_ratio = float(np.mean(edges > 0))
+        if edge_ratio < 0.03:
+            edge_tag = "vf_edges_low"
+        elif edge_ratio < 0.08:
+            edge_tag = "vf_edges_mid"
+        else:
+            edge_tag = "vf_edges_high"
+
+        means = image.reshape(-1, 3).mean(axis=0)
+        dominant_idx = int(np.argmax(means))
+        dominant = ("vf_color_blue", "vf_color_green", "vf_color_red")[dominant_idx]
+        return [brightness, edge_tag, dominant]
+    except Exception:
+        return []
+
+
+def _build_dense_text(display_text: str, *, dense_input_mode: str, keyframe_path: Optional[str]) -> str:
+    """Build dense embedding text in text-only or text+keyframe mode."""
+
+    base = str(display_text or "").strip()
+    mode = str(dense_input_mode or "text").strip().lower() or "text"
+    if mode != "text_keyframe":
+        return base
+    tokens = _keyframe_visual_tokens(keyframe_path)
+    if not tokens:
+        return base
+    return f"{base} {' '.join(tokens)}".strip()
 
 
 def _normalize_loaded_doc(doc: Any) -> Optional[Doc]:
@@ -752,6 +839,7 @@ def _load_manifest(index_dir: Path) -> Dict[str, Any]:
             "model_name": MODEL_NAME_DEFAULT,
             "bm25": {"k1": 1.6, "b": 0.75},
             "sources": {},
+            "dense_input_mode": "text",
             "layout": layout,
             "doc_id_scheme": "stable_by_position",
             "variant": None,
@@ -772,6 +860,7 @@ def _load_manifest(index_dir: Path) -> Dict[str, Any]:
     m.setdefault("doc_id_scheme", "stable_by_position")
     m.setdefault("language", None)
     m.setdefault("variant", None)
+    m.setdefault("dense_input_mode", "text")
     m.setdefault("has_dense_valid", True)
     return m
 
@@ -863,6 +952,7 @@ def build_or_update_index(
     passage_prefix: str = "passage: ",
     normalize_text: bool = True,
     lemmatize: bool = False,
+    dense_input_mode: str = "text",
     cache_dir: Optional[Path] = None,
     use_embed_cache: bool = True,
 ) -> Path:
@@ -875,6 +965,7 @@ def build_or_update_index(
 
     embed_store_dtype = _normalize_embed_store_dtype(embed_store_dtype)
     embedding_backend = str(embedding_backend or "auto").strip().lower() or "auto"
+    dense_input_mode = str(dense_input_mode or "text").strip().lower() or "text"
     manifest = _load_manifest(real_index_dir)
     prev_manifest_version = int(manifest.get("version", 0) or 0)
     schema_changed = prev_manifest_version < 5
@@ -882,6 +973,7 @@ def build_or_update_index(
     old_bm25 = (manifest.get("bm25") or {})
     bm25_changed = (float(old_bm25.get("k1", 1.6)) != float(bm25_k1)) or (float(old_bm25.get("b", 0.75)) != float(bm25_b))
     model_changed = manifest.get("model_name") != model_name
+    dense_mode_changed = str(manifest.get("dense_input_mode", "text")).strip().lower() != dense_input_mode
 
     if model_changed or schema_changed:
         manifest["model_name"] = model_name
@@ -907,6 +999,7 @@ def build_or_update_index(
         manifest["doc_id_scheme"] = "stable_by_position"
     manifest["language"] = str(language)
     manifest["variant"] = str(variant) if variant else None
+    manifest["dense_input_mode"] = dense_input_mode
     manifest["version"] = max(5, int(manifest.get("version", 5) or 5))
     manifest["has_dense_valid"] = True
 
@@ -964,6 +1057,20 @@ def build_or_update_index(
 
             doc_id = _stable_doc_id(video_id, i, variant=file_variant)
             doc_extra = _extract_doc_metadata(item, file_variant)
+            keyframe_raw = None
+            evidence = item.get("evidence")
+            if isinstance(evidence, dict):
+                keyframe_raw = evidence.get("keyframe_path")
+            if not keyframe_raw:
+                keyframe_raw = doc_extra.get("keyframe_path")
+            keyframe_abs = _resolve_keyframe_path(
+                raw_path=str(keyframe_raw or ""),
+                videos_root=Path(videos_root),
+                video_id=video_id,
+                segment_file=f,
+            )
+            if keyframe_abs:
+                doc_extra["keyframe_path"] = keyframe_abs
             search_text = _build_searchable_text(display_text, doc_extra)
             docs_by_id[doc_id] = Doc(
                 doc_id=doc_id,
@@ -998,7 +1105,7 @@ def build_or_update_index(
 
     t_scan_ms = (time.perf_counter() - t_scan0) * 1000.0
 
-    if not changed_any and not bm25_changed and not model_changed:
+    if not changed_any and not bm25_changed and not model_changed and not dense_mode_changed:
         _save_manifest(real_index_dir, manifest)
         meta = {
             "index_schema_version": 5,
@@ -1017,6 +1124,7 @@ def build_or_update_index(
             "passage_prefix": str(passage_prefix),
             "normalize_text": bool(normalize_text),
             "lemmatize": bool(lemmatize),
+            "dense_input_mode": dense_input_mode,
             "has_dense_valid": True,
             "runtime": {
                 "note": "No changes detected. Index not rebuilt.",
@@ -1049,6 +1157,14 @@ def build_or_update_index(
     docs = [docs_by_id[k] for k in sorted(docs_by_id.keys())]
     doc_ids = [d.doc_id for d in docs]
     texts = [d.text for d in docs]
+    dense_texts = [
+        _build_dense_text(
+            d.text,
+            dense_input_mode=dense_input_mode,
+            keyframe_path=str((d.extra or {}).get("keyframe_path") or ""),
+        )
+        for d in docs
+    ]
 
     t_bm250 = time.perf_counter()
     tokenized = [_tokenize(t, lang=language, lemmatize=lemmatize, normalize=normalize_text) for t in texts]
@@ -1060,7 +1176,7 @@ def build_or_update_index(
 
     t_emb0 = time.perf_counter()
 
-    need_full_reembed = model_changed or (old_emb is None) or (len(old_doc_ids) == 0)
+    need_full_reembed = model_changed or dense_mode_changed or (old_emb is None) or (len(old_doc_ids) == 0)
     n_old = int(len(old_doc_ids))
     n_total = int(len(doc_ids))
 
@@ -1097,7 +1213,7 @@ def build_or_update_index(
         return embedder_ref
 
     if need_full_reembed:
-        hashes = [_hash_text(t) for t in texts] if embed_cache else []
+        hashes = [_hash_text(t) for t in dense_texts] if embed_cache else []
         cached_map: Dict[str, Any] = embed_cache.get_many(hashes) if embed_cache else {}
         embedder = _ensure_embedder()
         rows: List[Any] = []
@@ -1110,7 +1226,7 @@ def build_or_update_index(
                 rows.append(vec)
                 embeddings_reused += 1
             else:
-                to_encode.append(texts[i])
+                to_encode.append(dense_texts[i])
                 to_encode_idx.append(i)
                 rows.append(None)
 
@@ -1125,7 +1241,7 @@ def build_or_update_index(
                     cache_rows[hashes[idx]] = (int(new_arr.shape[1]), "float16", new_arr[j].astype(np.float16).tobytes())
                 embed_cache.put_many(cache_rows)
         else:
-            emb = embedder.encode_passages(texts, batch_size=batch_size)
+            emb = embedder.encode_passages(dense_texts, batch_size=batch_size)
             rows = list(np.asarray(emb, dtype=np.float32))
             embeddings_new = int(n_total)
 
@@ -1139,9 +1255,15 @@ def build_or_update_index(
         for did in doc_ids:
             if did not in old_pos or did in changed_doc_ids:
                 to_encode_ids.append(did)
-                to_encode_texts.append(docs_by_id[did].text)
+                to_encode_texts.append(
+                    _build_dense_text(
+                        docs_by_id[did].text,
+                        dense_input_mode=dense_input_mode,
+                        keyframe_path=str(((docs_by_id[did].extra or {}).get("keyframe_path") or "")),
+                    )
+                )
                 if embed_cache:
-                    to_encode_hashes.append(_hash_text(docs_by_id[did].text))
+                    to_encode_hashes.append(_hash_text(to_encode_texts[-1]))
 
         new_map: Dict[str, Any] = {}
         if to_encode_ids:
@@ -1241,6 +1363,7 @@ def build_or_update_index(
         "passage_prefix": str(passage_prefix),
         "normalize_text": bool(normalize_text),
         "lemmatize": bool(lemmatize),
+        "dense_input_mode": dense_input_mode,
         "has_dense_valid": True,
         "dense_valid_count": dense_valid_n,
         "runtime": {
@@ -1263,6 +1386,7 @@ def build_or_update_index(
                 "docs_deleted": int(docs_deleted),
                 "bm25_changed": bool(bm25_changed),
                 "model_changed": bool(model_changed),
+                "dense_mode_changed": bool(dense_mode_changed),
                 "embeddings_total": int(len(docs)),
                 "embeddings_new": int(embeddings_new),
                 "embeddings_updated": int(embeddings_updated),

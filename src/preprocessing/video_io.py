@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
+import subprocess
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -104,7 +106,16 @@ def prepare_video(
     )
 
     start_time = time.perf_counter()
-    video_info = _get_video_info(str(video_path))
+    decode_started = time.perf_counter()
+    decode_source_path, decode_meta = _prepare_decode_source(
+        source_path=video_path,
+        out_dir=prepared_root,
+        target_fps=float(getattr(video_cfg, "target_fps", 0.0) or 0.0),
+        resolution=tuple(getattr(video_cfg, "decode_resolution", (1280, 720)) or (1280, 720)),
+        pixel_format=str(getattr(video_cfg, "pixel_format", "yuv420p") or "yuv420p"),
+    )
+    decode_meta["time_sec"] = float(time.perf_counter() - decode_started)
+    video_info = _get_video_info(str(decode_source_path))
 
     source_fps = float(video_info["fps"])
     fps = source_fps
@@ -136,9 +147,9 @@ def prepare_video(
         face_detector = None
         face_detector_type = "none"
 
-    cap = cv2.VideoCapture(str(video_path))
+    cap = cv2.VideoCapture(str(decode_source_path))
     if not cap.isOpened():
-        raise RuntimeError(f"Could not open video {video_path}")
+        raise RuntimeError(f"Could not open video {decode_source_path}")
 
     frames: List[FrameInfo] = []
     num_raw_frames = int(video_info["total_frames"])
@@ -337,6 +348,7 @@ def prepare_video(
                 "video_fingerprint": video_fp,
                 "video_cfg_fingerprint": cfg_fp,
             },
+            "decode": decode_meta,
             "video_io": {
                 "jpeg_quality_frames": jpeg_q_frames,
                 "jpeg_quality_small": jpeg_q_small,
@@ -370,6 +382,9 @@ def _video_cfg_fingerprint(config: PipelineConfig) -> str:
 
         payload = {
             "target_fps": getattr(v, "target_fps", None),
+            "analysis_fps": getattr(v, "analysis_fps", None),
+            "decode_resolution": tuple(getattr(v, "decode_resolution", ()) or ()),
+            "pixel_format": str(getattr(v, "pixel_format", "")),
             "min_change_threshold": getattr(v, "min_change_threshold", None),
             "dark_threshold": getattr(v, "dark_threshold", None),
             "max_frames": getattr(v, "max_frames", None),
@@ -614,3 +629,74 @@ def _save_small_frame(small_frame: np.ndarray, out_path: Path, quality: int) -> 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     params = [int(cv2.IMWRITE_JPEG_QUALITY), int(quality)]
     cv2.imwrite(str(out_path), small_frame, params)
+
+
+def _prepare_decode_source(
+    *,
+    source_path: Path,
+    out_dir: Path,
+    target_fps: float,
+    resolution: Tuple[int, int],
+    pixel_format: str,
+) -> Tuple[Path, Dict[str, Any]]:
+    """Normalize decode parameters with FFmpeg when available."""
+
+    target = Path(source_path)
+    width = int(resolution[0]) if resolution and len(resolution) > 0 else 1280
+    height = int(resolution[1]) if resolution and len(resolution) > 1 else 720
+    pix_fmt = str(pixel_format or "yuv420p").strip() or "yuv420p"
+    ffmpeg_bin = shutil.which("ffmpeg")
+    meta: Dict[str, Any] = {
+        "enabled": bool(ffmpeg_bin),
+        "applied": False,
+        "backend": "opencv",
+        "source_path": str(source_path),
+        "decoded_path": str(source_path),
+        "resolution": f"{width}x{height}",
+        "pixel_format": pix_fmt,
+        "target_fps": float(target_fps),
+        "error": None,
+    }
+    if not ffmpeg_bin:
+        return target, meta
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    normalized_path = out_dir / "decoded_normalized.mp4"
+    vf_parts = [f"scale={width}:{height}:flags=lanczos"]
+    if float(target_fps) > 0:
+        vf_parts.insert(0, f"fps={float(target_fps):.3f}")
+    vf_expr = ",".join(vf_parts)
+
+    command = [
+        str(ffmpeg_bin),
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(source_path),
+        "-vf",
+        vf_expr,
+        "-pix_fmt",
+        pix_fmt,
+        "-an",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "23",
+        str(normalized_path),
+    ]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True)
+        if result.returncode == 0 and normalized_path.exists() and normalized_path.stat().st_size > 0:
+            meta["applied"] = True
+            meta["backend"] = "ffmpeg"
+            meta["decoded_path"] = str(normalized_path)
+            return normalized_path, meta
+        stderr = str(result.stderr or "").strip()
+        meta["error"] = stderr[:500] if stderr else "ffmpeg_failed"
+    except Exception as exc:
+        meta["error"] = str(exc)
+    return target, meta
