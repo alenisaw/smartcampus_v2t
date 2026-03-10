@@ -384,6 +384,8 @@ class QueryEngine:
         dedupe_mode: Optional[str] = None,
         dedupe_tol_sec: Optional[float] = None,
         dedupe_overlap_thr: Optional[float] = None,
+        normalize_text: Optional[bool] = None,
+        lemmatize: Optional[bool] = None,
         device: Optional[str] = None,
         embed_model_name: Optional[str] = None,
         dense_chunk_size: int = 4096,
@@ -425,8 +427,12 @@ class QueryEngine:
         )
 
         self.dense_chunk_size = max(256, int(dense_chunk_size))
-        self.normalize_text = bool(getattr(s, "normalize_text", True))
-        self.lemmatize = bool(getattr(s, "lemmatize", False))
+        self.normalize_text = bool(
+            normalize_text if normalize_text is not None else getattr(s, "normalize_text", True)
+        )
+        self.lemmatize = bool(
+            lemmatize if lemmatize is not None else getattr(s, "lemmatize", False)
+        )
         self.rerank_enabled = bool(rerank_enabled if rerank_enabled is not None else getattr(s, "rerank_enabled", True))
         self.rerank_top_k = max(
             1,
