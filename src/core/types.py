@@ -89,7 +89,7 @@ class SearchHit:
 @dataclass
 class RunMetrics:
     video_id: str
-    language: str = "unknown"
+    language: str = ""
 
     video_duration_sec: float = 0.0
     num_frames: int = 0

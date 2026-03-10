@@ -689,6 +689,7 @@ class VideoToTextPipeline:
         if not clips:
             metrics = RunMetrics(
                 video_id=video_id,
+                language=str(getattr(self.cfg.model, "language", "") or ""),
                 video_duration_sec=float(video_duration_sec),
                 num_frames=0,
                 num_clips=0,
@@ -792,6 +793,7 @@ class VideoToTextPipeline:
 
         metrics = RunMetrics(
             video_id=video_id,
+            language=str(getattr(self.cfg.model, "language", "") or ""),
             video_duration_sec=float(video_duration_sec),
             num_frames=int(num_frames),
             num_clips=int(num_clips),

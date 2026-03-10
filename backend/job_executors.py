@@ -487,6 +487,7 @@ def run_process_job(
     process_started_at = time.perf_counter()
     video_id = str(job.get("video_id") or "")
     variant_id = cfg.active_variant
+    job_extra = dict(job.get("extra") or {})
     video_path = find_video_file(Path(cfg.paths.videos_dir), video_id)
     if video_path is None:
         raise RuntimeError(f"Video not found for job video_id={video_id}")
@@ -521,7 +522,7 @@ def run_process_job(
                     variant=cfg.active_variant,
                     language=tgt_lang,
                     source_language=base_lang,
-                    extra={"force_overwrite": force_overwrite},
+                    extra={**job_extra, "force_overwrite": force_overwrite},
                 )
         remove_lock_if_exists(paths, job_id)
         return
@@ -656,6 +657,27 @@ def run_process_job(
         "structuring_time_sec": 0.0,
         "embedding_time_sec": 0.0,
     }
+
+    metrics_extra = metric_payload.get("extra")
+    if not isinstance(metrics_extra, dict):
+        metrics_extra = {}
+    metrics_extra.update(
+        {
+            "processed_fps": float(getattr(video_meta, "processed_fps", 0.0) or 0.0),
+            "source_fps": float(frame_stats.get("source_fps", 0.0) or decode_meta.get("source_fps", 0.0) or 0.0),
+            "decode_backend": str(decode_meta.get("backend", "opencv") or "opencv"),
+            "decode_time_sec": float(decode_meta.get("time_sec", 0.0) or 0.0),
+            "decode_resolution": str(decode_meta.get("resolution", preprocessing_meta["resize"])),
+            "pixel_format": str(decode_meta.get("pixel_format", getattr(cfg.video, "pixel_format", "")) or ""),
+            "dark_drop_ratio": float(preprocessing_meta["dark_drop_ratio"]),
+            "lazy_drop_ratio": float(preprocessing_meta["lazy_drop_ratio"]),
+            "blur_flag_ratio": float(preprocessing_meta["blur_flag_ratio"]),
+            "anonymized": bool(preprocessing_meta["anonymized"]),
+            "raw_frames_read": int(frame_stats.get("raw_read_frames", frame_stats.get("num_raw_frames", 0)) or 0),
+            "frames_saved": int(getattr(video_meta, "num_frames", 0) or 0),
+        }
+    )
+    metric_payload["extra"] = metrics_extra
 
     segment_payloads: List[Dict[str, Any]] = []
     build_segments_started = time.perf_counter()
@@ -806,7 +828,7 @@ def run_process_job(
             variant=cfg.active_variant,
             language=tgt_lang,
             source_language=base_lang,
-            extra={"force_overwrite": force_overwrite},
+            extra={**job_extra, "force_overwrite": force_overwrite},
         )
     _record_stage(metric_payload, "enqueue_translation_jobs", time.perf_counter() - enqueue_started)
 

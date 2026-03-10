@@ -55,5 +55,7 @@ models/**
 !models/.gitkeep
 
 # Local private planning/status notes (not for repository)
+.agent/
+local_progress.md
 docs/local-*.md
 docs/local_progress.md
