@@ -1,9 +1,10 @@
+# scripts/smoke_services.py
 """
-Minimal smoke checks for containerized SmartCampus services.
+Service smoke checks for SmartCampus V2T.
 
-Usage examples:
-  python scripts/smoke_services.py --api http://127.0.0.1:8000
-  python scripts/smoke_services.py --api http://127.0.0.1:8000 --ui http://127.0.0.1:8501
+Purpose:
+- Verify that local API and UI services respond at expected endpoints.
+- Provide a lightweight operational check after refactors or environment changes.
 """
 
 from __future__ import annotations

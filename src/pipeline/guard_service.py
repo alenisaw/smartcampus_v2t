@@ -1,10 +1,10 @@
-# src/guard/service.py
+# src/pipeline/guard_service.py
 """
-Guard policy service for query and output checks.
+Guard service for SmartCampus V2T pipeline runtime.
 
 Purpose:
-- Use the local guard model when enabled.
-- Fall back to deterministic policy checks if model inference is unavailable.
+- Apply query and output policy checks with model-backed or rule-based decisions.
+- Keep guard behavior close to the pipeline LLM runtime layer.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import json
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from src.llm.client import LLMClient
+from src.pipeline.llm_client import LLMClient
 
 _QUERY_BLOCKLIST = (
     "ignore previous instructions",

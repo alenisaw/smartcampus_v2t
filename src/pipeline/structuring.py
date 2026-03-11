@@ -1,11 +1,10 @@
 # src/pipeline/structuring.py
 """
-Structuring layer for enriching Segment Schema v2 with event/risk fields.
+Structuring service for SmartCampus V2T pipeline.
 
 Purpose:
-- Provide a rule-based baseline now.
-- Attempt strict-JSON LLM extraction when available.
-- Keep a robust rule-based fallback and repair path.
+- Enrich segment captions with event, risk, and metadata fields.
+- Combine rule-based fallback logic with optional LLM extraction.
 """
 
 from __future__ import annotations
@@ -14,7 +13,7 @@ import json
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from src.llm.client import LLMClient
+from src.pipeline.llm_client import LLMClient
 
 
 def _contains_any(text: str, terms: List[str]) -> bool:

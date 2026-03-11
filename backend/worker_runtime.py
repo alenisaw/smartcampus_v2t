@@ -1,10 +1,10 @@
 # backend/worker_runtime.py
 """
-Worker runtime helpers for SmartCampus backend.
+Worker runtime helpers for SmartCampus V2T backend.
 
 Purpose:
-- Build and refresh the effective worker context for each job.
-- Keep expansion, cancel, and failure side effects out of the worker loop.
+- Build the effective runtime context for each job.
+- Keep expansion, cancellation, and failure side effects out of the worker loop.
 """
 
 from __future__ import annotations
@@ -13,19 +13,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from backend.deps import atomic_write_json, load_cfg_and_raw, now_ts, read_json
+from backend.deps import load_cfg_and_raw
 from backend.experimental import (
     build_batch_manifest_payload,
     build_variant_child_specs,
     update_batch_variant_status,
 )
+from backend.index_runtime import write_index_state as _write_index_state
 from backend.job_control import create_job, notify_webhook, read_job, remove_lock_if_exists, set_state, write_job
 from backend.job_executors import WorkerServices
-from src.guard.service import GuardService
+from src.pipeline.guard_service import GuardService
 from src.pipeline.summary_service import SummaryService
 from src.pipeline.structuring import StructuringService
 from src.pipeline.video_to_text import VideoToTextPipeline
-from src.search.index_builder import search_config_fingerprint
+from src.search.builder import search_config_fingerprint
 from src.translation.service import TranslationService
 from src.utils.video_store import update_outputs_manifest, write_batch_manifest
 
@@ -205,7 +206,4 @@ def handle_job_failure(
         pass
     remove_lock_if_exists(paths, job_id)
 
-    index_state = read_json(paths.index_state_path, default={}) or {}
-    index_state["updated_at"] = now_ts()
-    index_state["last_error"] = str(error)
-    atomic_write_json(paths.index_state_path, index_state)
+    _write_index_state(paths, built=False, last_error=str(error))

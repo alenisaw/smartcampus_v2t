@@ -1,10 +1,10 @@
 # src/pipeline/summary_service.py
 """
-Summary layer for producing Video Summary Schema v2 artifacts.
+Summary service for SmartCampus V2T pipeline.
 
 Purpose:
-- Attempt strict-JSON summary generation through LLMClient when available.
-- Fall back to deterministic schema v2 assembly from segments.
+- Build canonical video summaries from segment facts.
+- Use optional LLM JSON generation with deterministic fallback repair.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import json
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from src.llm.client import LLMClient
+from src.pipeline.llm_client import LLMClient
 from src.pipeline.schema_v2 import build_video_summary_v2
 
 

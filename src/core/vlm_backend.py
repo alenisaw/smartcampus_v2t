@@ -1,9 +1,10 @@
-# src/core/qwen_vl_backend.py
+# src/core/vlm_backend.py
 """
-Backend wrapper around Qwen3-VL vision-language model.
+Vision-language backend wrapper for SmartCampus V2T.
 
-Loads model and processor, builds chat-style inputs for clips or text prompts,
-and supports single-clip and batched generation.
+Purpose:
+- Load and drive the Qwen-VL captioning model used by the pipeline.
+- Provide single-clip, batched, and prompt-based generation helpers.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from typing import Any, Dict, List, Optional, Sequence
 import torch
 from transformers import AutoModelForImageTextToText, AutoProcessor
 
-from src.pipeline.pipeline_config import PipelineConfig
+from src.pipeline.config import PipelineConfig
 
 
 @dataclass

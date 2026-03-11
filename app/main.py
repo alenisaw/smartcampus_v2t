@@ -1,7 +1,12 @@
 # app/main.py
 """
-SmartCampus V2T Streamlit entrypoint.
+Streamlit entrypoint for SmartCampus V2T.
+
+Purpose:
+- Bootstrap config loading and UI startup for the local operator console.
+- Expose one stable Streamlit launch surface for the application.
 """
+
 from __future__ import annotations
 
 import sys
@@ -18,7 +23,7 @@ from app.api_client import BackendClient
 from app.state import UIState
 from src.utils.config_loader import config_cache_token, load_pipeline_config
 
-TAB_IDS = ["storage", "analytics", "assistant"]
+TAB_IDS = ["home", "processing", "video", "search"]
 CFG_PATH = PROJECT_ROOT / "configs" / "profiles" / "main.yaml"
 
 
@@ -36,7 +41,7 @@ def get_cfg():
     return _cfg_cached(str(CFG_PATH), config_cache_token(CFG_PATH))
 
 
-def _get_tab_from_query(default_tab: str = "storage") -> str:
+def _get_tab_from_query(default_tab: str = "home") -> str:
     """Resolve the current UI tab from query params."""
 
     try:
@@ -49,6 +54,16 @@ def _get_tab_from_query(default_tab: str = "storage") -> str:
         qp = st.experimental_get_query_params()
         tab = (qp.get("tab", [default_tab])[0] or default_tab).strip().lower()
 
+    aliases = {
+        "operations": "processing",
+        "process": "processing",
+        "storage": "video",
+        "videos": "video",
+        "gallery": "video",
+        "analytics": "search",
+        "assistant": "search",
+    }
+    tab = aliases.get(tab, tab)
     return tab if tab in TAB_IDS else default_tab
 
 
@@ -86,19 +101,20 @@ def main() -> None:
         base_url = "http://127.0.0.1:8000"
 
     client = BackendClient(base_url=base_url)
-    tab = _get_tab_from_query(default_tab="storage")
+    tab = _get_tab_from_query(default_tab="home")
 
     T = U.get_T(ui_text, st.session_state.get("ui_lang", default_lang))
-    labels = T.get("tabs") or ["Videos", "Analytics", "Assistant"]
+    labels = T.get("tabs") or ["Overview", "Processing", "Video Analytics", "Search"]
     if not isinstance(labels, list) or len(labels) != len(TAB_IDS):
-        labels = ["Videos", "Analytics", "Assistant"]
+        labels = ["Overview", "Processing", "Video Analytics", "Search"]
 
-    U.render_header(
+    tab = U.render_header(
         T=T,
         labels=labels,
         ids=TAB_IDS,
         current_tab=tab,
         logo_path=Path(cfg.ui.logo_path),
+        cfg=cfg,
     )
 
     health_payload = client.health()
@@ -106,12 +122,14 @@ def main() -> None:
         U.soft_note(f"Backend is not reachable at {base_url}", kind="warn")
         st.stop()
 
-    if tab == "storage":
+    if tab == "home":
+        U.home_tab(client, cfg, ui_text)
+    elif tab == "processing":
+        U.processing_tab(client, cfg, ui_text)
+    elif tab == "video":
         U.gallery_tab(client, cfg, ui_text)
-    elif tab == "analytics":
-        U.search_tab(client, cfg, ui_text)
     else:
-        U.assistant_tab(client, cfg, ui_text)
+        U.search_tab(client, cfg, ui_text)
 
     U.footer(U.get_T(ui_text, st.session_state.get("ui_lang", default_lang)))
     U.render_i18n_metrics()

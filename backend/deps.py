@@ -1,13 +1,12 @@
 # backend/deps.py
 """
-Backend dependencies for SmartCampus V2T.
+Backend dependency helpers for SmartCampus V2T.
 
 Purpose:
-- Load the effective config (profile + optional variant) and merged raw dict.
-- Resolve backend filesystem paths (jobs/queue/locks/index_state/queue_state).
-- Provide safe JSON read/write helpers, timestamps, host id.
-- Provide helpers to list videos and outputs using the per-video layout.
+- Load effective config and resolve backend filesystem paths.
+- Provide shared JSON, timestamp, and output-loading helpers for backend modules.
 """
+
 from __future__ import annotations
 
 import json
@@ -17,7 +16,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, List, Optional
 
 from src.utils.config_loader import load_pipeline_bundle
 
@@ -28,10 +27,10 @@ def now_ts() -> float:
 
 def host_id() -> str:
     try:
-        hn = socket.gethostname()
+        hostname = socket.gethostname()
     except Exception:
-        hn = "host"
-    return f"{hn}:{os.getpid()}"
+        hostname = "host"
+    return f"{hostname}:{os.getpid()}"
 
 
 def read_json(path: Path, default: Any = None) -> Any:
@@ -84,8 +83,8 @@ def load_cfg_and_raw(
 def _resolve_path(root: Path, value: Optional[str], default_rel: str) -> Path:
     if value is None or str(value).strip() == "":
         return (root / default_rel).resolve()
-    p = Path(str(value))
-    return p if p.is_absolute() else (root / p).resolve()
+    path = Path(str(value))
+    return path if path.is_absolute() else (root / path).resolve()
 
 
 def get_backend_paths(cfg, raw: Dict[str, Any], project_root: Optional[Path] = None) -> BackendPaths:
@@ -103,8 +102,8 @@ def get_backend_paths(cfg, raw: Dict[str, Any], project_root: Optional[Path] = N
     index_state_path = indexes_dir / "index_state.json"
     queue_state_path = (root / "data" / "queue_state.json").resolve()
 
-    for p in [videos_dir, indexes_dir, jobs_dir, queue_dir, locks_dir]:
-        p.mkdir(parents=True, exist_ok=True)
+    for path in [videos_dir, indexes_dir, jobs_dir, queue_dir, locks_dir]:
+        path.mkdir(parents=True, exist_ok=True)
 
     if not queue_state_path.exists():
         atomic_write_json(queue_state_path, {"paused": False, "updated_at": now_ts()})
@@ -135,8 +134,8 @@ def list_videos(videos_dir: Path) -> List[Dict[str, Any]]:
 def read_video_outputs(videos_dir: Path, video_id: str, lang: str, variant: Optional[str] = None) -> Dict[str, Any]:
     from src.utils.video_store import (
         batch_manifest_path,
-        outputs_manifest_path,
         metrics_path,
+        outputs_manifest_path,
         read_metrics,
         read_segments,
         read_summary,
@@ -157,21 +156,19 @@ def read_video_outputs(videos_dir: Path, video_id: str, lang: str, variant: Opti
         "global_summary": None,
     }
 
-    mp = outputs_manifest_path(Path(videos_dir), video_id, variant=variant)
-    out["manifest"] = read_json(mp, default=None)
+    out["manifest"] = read_json(outputs_manifest_path(Path(videos_dir), video_id, variant=variant), default=None)
     out["run_manifest"] = read_json(run_manifest_path(Path(videos_dir), video_id, variant=variant), default=None)
     out["batch_manifest"] = read_json(batch_manifest_path(Path(videos_dir), video_id), default=None)
 
-    seg = segments_path(Path(videos_dir), video_id, lang, variant=variant)
-    out["annotations"] = read_segments(seg)
+    seg_path = segments_path(Path(videos_dir), video_id, lang, variant=variant)
+    out["annotations"] = read_segments(seg_path)
 
-    sp = summary_path(Path(videos_dir), video_id, lang, variant=variant)
-    summ = read_summary(sp)
-    if isinstance(summ, dict):
-        out["global_summary"] = summ.get("global_summary", summ.get("summary"))
+    summary_obj = read_summary(summary_path(Path(videos_dir), video_id, lang, variant=variant))
+    if isinstance(summary_obj, dict):
+        out["global_summary"] = summary_obj.get("global_summary", summary_obj.get("summary"))
 
-    met = read_metrics(metrics_path(Path(videos_dir), video_id, variant=variant))
-    if isinstance(met, dict):
-        out["metrics"] = met
+    metrics_obj = read_metrics(metrics_path(Path(videos_dir), video_id, variant=variant))
+    if isinstance(metrics_obj, dict):
+        out["metrics"] = metrics_obj
 
     return out

@@ -10,24 +10,21 @@ if not exist "%PYTHON_EXE%" set "PYTHON_EXE=python"
 echo ======================================
 echo Starting backend (FastAPI)
 echo ======================================
-start "backend" cmd /k ^
-"%PYTHON_EXE%" -m uvicorn backend.api:app --host 127.0.0.1 --port 8000 --reload
+start "backend" cmd /k ""%PYTHON_EXE%" -m uvicorn backend.api:app --host 127.0.0.1 --port 8000 --reload"
 
 timeout /t 2 >nul
 
 echo ======================================
 echo Starting worker
 echo ======================================
-start "worker" cmd /k ^
-"%PYTHON_EXE%" -m backend.worker
+start "worker" cmd /k ""%PYTHON_EXE%" -m backend.worker"
 
 timeout /t 2 >nul
 
 echo ======================================
 echo Starting Streamlit UI
- и всecho ======================================
-start "ui" cmd /k ^
-"%PYTHON_EXE%" -m streamlit run app\main.py --server.port 8501
+echo ======================================
+start "ui" cmd /k ""%PYTHON_EXE%" -m streamlit run app\main.py --server.port 8501"
 
 echo ======================================
 echo All services started

@@ -1,4 +1,11 @@
-"""Media and asset helpers for the Streamlit UI."""
+# app/lib/media.py
+"""
+Media and asset helpers for SmartCampus V2T Streamlit UI.
+
+Purpose:
+- Load CSS, images, and media-related presentation assets.
+- Keep asset and browser rendering helpers out of page modules.
+"""
 
 from __future__ import annotations
 

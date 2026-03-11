@@ -1,4 +1,11 @@
-"""I18n helpers for the Streamlit UI."""
+# app/lib/i18n.py
+"""
+UI translation helpers for SmartCampus V2T.
+
+Purpose:
+- Load localized UI text resources for the Streamlit frontend.
+- Provide lightweight access helpers for the active interface language.
+"""
 
 from __future__ import annotations
 
@@ -18,7 +25,7 @@ def load_ui_text(path_str: str, mtime: float, langs_key: str) -> Dict[str, Dict[
         if not isinstance(bucket, dict):
             raise ValueError(f"Missing UI language: {lang}")
         tabs = bucket.get("tabs")
-        if not isinstance(tabs, list) or len(tabs) != 3:
+        if not isinstance(tabs, list) or len(tabs) != 4:
             raise ValueError(f"Invalid tabs for language: {lang}")
     return data
 

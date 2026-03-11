@@ -1,11 +1,12 @@
+# scripts/build_comparison_report.py
 """
-Build config-level comparison reports from experiment matrix manifests.
+Experiment comparison report builder for SmartCampus V2T.
 
-Storage policy:
-- One latest file per config under data/research/experiments/by_config/.
-- Same config is overwritten by newer runs.
-- Different configs create separate files.
+Purpose:
+- Build config-level comparison summaries from experiment manifests.
+- Persist latest-per-config comparison snapshots for local research review.
 """
+
 from __future__ import annotations
 
 import argparse

@@ -1,17 +1,17 @@
-# src/llm/client.py
+# src/pipeline/llm_client.py
 """
-Unified LLM client abstraction for transformers and vLLM backends.
+LLM client for SmartCampus V2T pipeline runtime.
 
 Purpose:
-- Provide one interface for text and strict-JSON generation.
-- Keep backend selection behind one compact contract used by structuring and summaries.
+- Provide a compact text and JSON generation interface for pipeline services.
+- Support local transformers and OpenAI-compatible vLLM backends.
 """
 
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 import requests

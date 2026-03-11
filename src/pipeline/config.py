@@ -1,10 +1,10 @@
-# src/pipeline/pipeline_config.py
+# src/pipeline/config.py
 """
-Typed configuration contracts for SmartCampus V2T.
+Typed pipeline configuration for SmartCampus V2T.
 
 Purpose:
-- Define the merged effective config after applying one profile + optional variant.
-- Expose the runtime config contract used by the current improved pipeline.
+- Define the effective runtime config contract after profile and variant resolution.
+- Keep strongly typed settings separate from raw config loading logic.
 """
 
 from __future__ import annotations

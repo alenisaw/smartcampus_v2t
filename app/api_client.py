@@ -3,8 +3,8 @@
 HTTP client for SmartCampus V2T backend.
 
 Purpose:
-- Hide REST details from Streamlit UI
-- Provide stable return formats for UI rendering
+- Hide REST details from the Streamlit UI.
+- Provide stable request helpers for videos, jobs, search, and reports.
 """
 
 from __future__ import annotations

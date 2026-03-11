@@ -1,16 +1,12 @@
+# scripts/run_experiment_matrix.py
 """
-Run a local experiment matrix over the existing SmartCampus filesystem queue.
+Experiment matrix runner for SmartCampus V2T.
 
 Purpose:
-- Submit process jobs for one or more videos across profile/variant combinations.
-- Wait for terminal artifacts using the current worker and manifest model.
-- Persist per-run snapshots under data/research/experiments so repeated runs do not get lost.
-- Refresh the research metrics bundle after each completed unit.
-
-Expected usage:
-- Start API/worker stack separately.
-- Run this script from the repository root.
+- Submit and monitor local experiment runs across profile and variant combinations.
+- Persist experiment snapshots and refresh local research artifacts.
 """
+
 from __future__ import annotations
 
 import argparse

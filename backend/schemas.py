@@ -1,10 +1,12 @@
 # backend/schemas.py
 """
-Pydantic schemas for SmartCampus V2T backend.
+Backend schemas for SmartCampus V2T.
 
 Purpose:
-- Define request/response payloads for videos, runs, jobs, queue, search, and index.
+- Define request and response payloads for API routes.
+- Keep backend contracts explicit for videos, jobs, queue, search, and reports.
 """
+
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional

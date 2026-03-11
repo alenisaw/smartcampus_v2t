@@ -1,4 +1,11 @@
-"""Chrome-level UI components such as header, footer, and notices."""
+# app/components/chrome.py
+"""
+Chrome-level UI components for SmartCampus V2T.
+
+Purpose:
+- Render shared page shell elements such as header, footer, and notices.
+- Keep top-level layout framing consistent across Streamlit pages.
+"""
 
 from __future__ import annotations
 
@@ -19,44 +26,63 @@ def soft_note(text: str, kind: str = "info") -> None:
     st.markdown(f"<div class='{css}'>{E(text)}</div>", unsafe_allow_html=True)
 
 
-def render_header(T: Dict[str, Any], labels: List[str], ids: List[str], current_tab: str, logo_path: Path) -> None:
-    """Render the top hero block and tab navigation."""
-
-    links: List[str] = []
-    for label, tab_id in zip(labels, ids):
-        css = "nav-pill active" if tab_id == current_tab else "nav-pill"
-        links.append(f"<a class='{css}' href='?tab={E(tab_id)}' target='_self'>{E(label)}</a>")
+def render_header(T: Dict[str, Any], labels: List[str], ids: List[str], current_tab: str, logo_path: Path, cfg: Any) -> str:
+    """Render the top brand shell, global language control, and tab navigation."""
 
     logo_html = ""
     logo_uri = img_to_data_uri(logo_path)
     if logo_uri:
         logo_html = f"<img class='brand-logo' src='{logo_uri}' alt='logo' />"
 
-    st.markdown(
-        f"""
-        <div class="hero-shell">
-            <div class="hero-grid">
-                <div>
-                    <div class="hero-brand">
-                        <div class="brand-badge">{logo_html}</div>
-                        <div>
-                            <div class="brand-title">{E(Tget(T, "app_title", "SmartCampus V2T"))}</div>
-                            <div class="brand-subtitle">{E(Tget(T, "app_subtitle", ""))}</div>
-                        </div>
+    langs = list(cfg.ui.langs or ["ru", "kz", "en"])
+    current_lang = str(st.session_state.get("ui_lang") or cfg.ui.default_lang or langs[0])
+    if current_lang not in langs:
+        current_lang = langs[0]
+        st.session_state["ui_lang"] = current_lang
+
+    selector_key = "header_ui_lang_selector"
+    if st.session_state.get(selector_key) not in langs:
+        st.session_state[selector_key] = current_lang
+
+    links: List[str] = []
+    for label, tab_id in zip(labels, ids):
+        css = "nav-pill active" if tab_id == current_tab else "nav-pill"
+        links.append(f"<a class='{css}' href='?tab={E(tab_id)}' target='_self'>{E(label)}</a>")
+
+    top = st.columns([5.2, 1.15], gap="small")
+    with top[0]:
+        st.markdown(
+            f"""
+            <div class="hero-shell">
+                <div class="brand-row">
+                    <div class="brand-badge">{logo_html}</div>
+                    <div>
+                        <div class="brand-title">{E(Tget(T, "app_title", "SmartCampus V2T"))}</div>
+                        <div class="brand-subtitle">{E(Tget(T, "app_subtitle", ""))}</div>
                     </div>
-                    <div class="hero-copy">{E(Tget(T, "hero_copy", ""))}</div>
                 </div>
-                <div class="hero-panel">
-                    <div class="hero-panel-label">Pipeline Surface</div>
-                    <div class="hero-panel-value">Process, Search, Report, QA, RAG</div>
-                    <div class="hero-panel-copy">Operator console over FastAPI, workers, translation, and hybrid retrieval.</div>
-                </div>
+                <div class="nav-strip">{''.join(links)}</div>
             </div>
-            <div class="nav-strip">{''.join(links)}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+            """,
+            unsafe_allow_html=True,
+        )
+    with top[1]:
+        st.markdown("<div class='hero-lang-label'>UI</div>", unsafe_allow_html=True)
+        selected_lang = st.selectbox(
+            Tget(T, "ui_lang", "UI language"),
+            options=langs,
+            index=langs.index(current_lang),
+            key=selector_key,
+            label_visibility="visible",
+        )
+        if selected_lang != st.session_state.get("ui_lang"):
+            st.session_state["ui_lang"] = selected_lang
+
+    try:
+        st.query_params["tab"] = current_tab
+    except Exception:
+        pass
+    return str(current_tab)
 
 
 def footer(T: Dict[str, Any]) -> None:
@@ -74,24 +100,11 @@ def footer(T: Dict[str, Any]) -> None:
 
 
 def render_language_switcher(T: Dict[str, Any], cfg: Any) -> None:
-    """Render the global UI language selector."""
+    """Legacy compatibility no-op."""
 
-    langs = list(cfg.ui.langs or ["ru", "kz", "en"])
-    current = str(st.session_state.get("ui_lang") or cfg.ui.default_lang or langs[0])
-    if current not in langs:
-        current = langs[0]
-        st.session_state["ui_lang"] = current
-
-    left, right = st.columns([5, 2], gap="small")
-    with left:
-        st.markdown(f"<div class='page-kicker'>{E(Tget(T, 'page_note', 'Operator analytics console'))}</div>", unsafe_allow_html=True)
-    with right:
-        st.selectbox(
-            Tget(T, "ui_lang", "UI language"),
-            options=langs,
-            index=langs.index(current),
-            key="ui_lang",
-        )
+    _ = T
+    _ = cfg
+    return
 
 
 def render_i18n_metrics() -> None:
