@@ -1,6 +1,10 @@
 # backend/__init__.py
 """
-SmartCampus V2T — Backend package marker.
+Backend package for SmartCampus V2T.
+
+Purpose:
+- Group API, worker, schemas, and backend runtime helpers.
+- Keep service-layer code separate from UI and pipeline source modules.
 """
 
 __all__ = []

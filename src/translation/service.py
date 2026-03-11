@@ -1,11 +1,10 @@
 # src/translation/service.py
 """
-Translation service with CTranslate2-first routing for EN/RU/KZ language pairs.
+Translation service for SmartCampus V2T.
 
 Purpose:
-- Provide one translation interface for API query translation and worker translation jobs.
-- Route bilingual MT models per language pair.
-- Prefer CTranslate2, with on-demand model conversion from Hugging Face checkpoints.
+- Route and execute EN/RU/KZ translation tasks for worker and backend flows.
+- Combine model routing, cache usage, and optional post-edit behavior.
 """
 
 from __future__ import annotations
@@ -14,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
-from src.translation.translation_cache import TranslationCache
+from src.translation.cache import TranslationCache
 
 
 def _normalize_lang(lang: str) -> str:
@@ -234,7 +233,7 @@ class TranslationService:
             return
         self._llm_client_ready = True
         try:
-            from src.llm.client import LLMClient
+            from src.pipeline.llm_client import LLMClient
 
             self._llm_client = LLMClient.from_config(self.cfg)
         except Exception:

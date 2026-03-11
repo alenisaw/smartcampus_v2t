@@ -1,10 +1,10 @@
 # backend/experimental.py
 """
-Helpers for experimental multi-variant orchestration.
+Experimental run helpers for SmartCampus V2T backend.
 
 Purpose:
-- Keep variant expansion logic out of the monolithic worker loop.
-- Build child job specs and batch manifests consistently for experimental runs.
+- Build child jobs and manifests for multi-variant experiment execution.
+- Keep experimental orchestration logic out of the main worker loop.
 """
 
 from __future__ import annotations

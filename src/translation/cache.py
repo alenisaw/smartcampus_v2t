@@ -1,10 +1,10 @@
-# src/translation/translation_cache.py
+# src/translation/cache.py
 """
-SQLite-backed translation cache keyed by text and effective translation context.
+Translation cache for SmartCampus V2T.
 
 Purpose:
-- Prevent cross-run cache leakage between different configs or model revisions.
-- Preserve the previous high-level API (`get_many`, `put_many`) for existing callers.
+- Persist translation results keyed by text and effective translation context.
+- Reduce repeated MT work across jobs, queries, and generated outputs.
 """
 
 from __future__ import annotations

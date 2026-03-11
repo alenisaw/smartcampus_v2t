@@ -1,4 +1,11 @@
-"""Formatting and view-model helpers for the Streamlit UI."""
+# app/lib/formatters.py
+"""
+Formatting helpers for SmartCampus V2T Streamlit UI.
+
+Purpose:
+- Normalize text, metrics, and artifact payloads into UI-friendly shapes.
+- Keep display formatting logic out of page and component modules.
+"""
 
 from __future__ import annotations
 
@@ -69,6 +76,15 @@ def clip_text(text: str, limit: int = 260) -> str:
     if len(clean) <= limit:
         return clean
     return clean[: limit - 3].rstrip() + "..."
+
+
+def humanize_token(value: Any) -> str:
+    """Convert snake_case tokens into compact display labels."""
+
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return " ".join(part for part in text.replace("-", "_").split("_") if part).replace("  ", " ").strip().title()
 
 
 def variant_token(value: Optional[str]) -> str:

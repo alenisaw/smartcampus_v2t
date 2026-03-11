@@ -1,14 +1,13 @@
 # src/core/types.py
-
 """
-Simple shared data structures used across the project.
+Core data types for SmartCampus V2T.
 
-These dataclasses define:
-- how preprocessed videos are represented (frames, meta)
-- how model outputs are stored (caption segments)
-- how annotations/search hits look for RAG/search
-- how runtime metrics are tracked for each run
+Purpose:
+- Define shared dataclasses for frames, videos, annotations, hits, and run metrics.
+- Keep lightweight runtime payload contracts explicit across the codebase.
 """
+
+# src/core/types.py
 
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,15 +21,6 @@ class FrameInfo:
     timestamp_sec: float
     path: Path
     small_path: Optional[Path] = None
-    extra: Optional[Dict[str, Any]] = None
-
-
-@dataclass
-class Clip:
-    video_id: str
-    start_sec: float
-    end_sec: float
-    frames: List[FrameInfo] = field(default_factory=list)
     extra: Optional[Dict[str, Any]] = None
 
 
@@ -51,17 +41,6 @@ class VideoMeta:
 
     frames: List[FrameInfo] = field(default_factory=list)
 
-    extra: Optional[Dict[str, Any]] = None
-
-
-@dataclass
-class CaptionSegment:
-    video_id: str
-    start_sec: float
-    end_sec: float
-    text: str
-
-    raw_output: Optional[Dict[str, Any]] = None
     extra: Optional[Dict[str, Any]] = None
 
 

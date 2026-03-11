@@ -1,10 +1,10 @@
 # src/pipeline/schema_v2.py
 """
-Schema v2 builders for canonical segment and video summary artifacts.
+Schema v2 builders for SmartCampus V2T pipeline.
 
 Purpose:
-- Convert current pipeline outputs into Segment Schema v2 and Video Summary Schema v2.
-- Keep a small compatibility bridge while the rest of the codebase is still migrating.
+- Convert pipeline outputs into canonical segment and video summary artifacts.
+- Keep artifact-shape assembly separate from runtime execution code.
 """
 
 from __future__ import annotations

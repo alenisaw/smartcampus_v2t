@@ -1,13 +1,12 @@
-﻿# src/pipeline/video_to_text.py
+# src/pipeline/video_to_text.py
 """
 Video-to-text pipeline for SmartCampus V2T.
 
 Purpose:
-- Builds per-clip descriptions (RU/KZ/EN) with Qwen3-VL.
-- Performs temporal smoothing (merge similar adjacent segments).
-- Produces optional global summary (1вЂ“2 human sentences + 5 strict metric lines).
-- Ensures descriptions are factual, human-readable, and non-duplicative.
+- Generate canonical English clip captions from preprocessed frames.
+- Smooth adjacent segments and produce optional grounded summary text.
 """
+
 from __future__ import annotations
 
 import re
@@ -21,40 +20,43 @@ try:
 except Exception:
     cv2 = None
 
-from src.core.qwen_vl_backend import QwenVLBackend
+from src.core.vlm_backend import QwenVLBackend
 from src.core.types import Annotation, RunMetrics
-from src.pipeline.pipeline_config import PipelineConfig
+from src.pipeline.config import PipelineConfig
+
+_SENT_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+_TIMED_ITEM_RE = re.compile(r"\b(.+?)\s*\(\s*(\d+:\d{2})\s*-\s*(\d+:\d{2})\s*\)\b")
+_WS_RE = re.compile(r"\s+")
+_LIST_PREFIX_RE = re.compile(r"^\s*[-*]+\s*")
+_ENUM_PREFIX_RE = re.compile(r"^\s*\(?\d+\)?[.)]\s*")
+_GENERIC_OPENERS_RE = re.compile(
+    r"^(in the frame|in the image|in the video|we can see|there is|there are|visible is|shown is)\s*[:,\-]?\s*",
+    flags=re.IGNORECASE,
+)
+_SUMMARY_KEYS: List[Tuple[str, str]] = [
+    ("- Scene type:", "unknown"),
+    ("- People density:", "low"),
+    ("- Motion type:", "stable"),
+    ("- Anomalies:", "none"),
+    ("- Risk class:", "normal"),
+]
 
 
 def build_prompt(lang: str) -> str:
-    if lang == "ru":
-        return (
-            "РўС‹ РѕРїРёСЃС‹РІР°РµС€СЊ CCTV-С„СЂР°РіРјРµРЅС‚. РќР°РїРёС€Рё 1вЂ“2 РєРѕСЂРѕС‚РєРёС… РїСЂРµРґР»РѕР¶РµРЅРёСЏ РµСЃС‚РµСЃС‚РІРµРЅРЅС‹Рј СЏР·С‹РєРѕРј. "
-            "РќР°С‡РёРЅР°Р№ СЃСЂР°Р·Сѓ СЃ РґРµР№СЃС‚РІРёСЏ (Р±РµР· В«РќР° РєР°РґСЂРµВ», В«РќР° СЃРЅРёРјРєРµВ», В«Р’РёРґРЅРѕВ», В«РќР°Р±Р»СЋРґР°РµС‚СЃСЏВ», В«РќР° РІРёРґРµРѕВ»). "
-            "РўРѕР»СЊРєРѕ РЅР°Р±Р»СЋРґР°РµРјС‹Рµ С„Р°РєС‚С‹: С‡С‚Рѕ РґРµР»Р°СЋС‚ Р»СЋРґРё РёР»Рё РѕР±СЉРµРєС‚С‹; РґРІРёР¶РµРЅРёРµ СѓРїРѕРјРёРЅР°Р№ С‚РѕР»СЊРєРѕ РµСЃР»Рё РѕРЅРѕ Р·Р°РјРµС‚РЅРѕ. "
-            "РќРµ РїСЂРёРґСѓРјС‹РІР°Р№ С‚РёРї РјРµСЃС‚Р°, СЂРѕР»Рё Р»СЋРґРµР№, РїСЂРёС‡РёРЅС‹ РёР»Рё РєРѕРЅС‚РµРєСЃС‚. "
-            "РќРµ СѓРєР°Р·С‹РІР°Р№ РІРѕР·СЂР°СЃС‚, РїРѕР», СЌРјРѕС†РёРё РёР»Рё РЅР°РјРµСЂРµРЅРёСЏ. "
-            "РќРµ РёСЃРїРѕР»СЊР·СѓР№ РјРµС‚СЂРёРєРё Рё СЏСЂР»С‹РєРё. "
-            "Р•СЃР»Рё РЅРёС‡РµРіРѕ РЅРµРѕР±С‹С‡РЅРѕРіРѕ РЅРµС‚ вЂ” РїСЂРѕСЃС‚Рѕ РѕРїРёС€Рё РѕР±С‹С‡РЅСѓСЋ Р°РєС‚РёРІРЅРѕСЃС‚СЊ."
-        )
-    if lang == "kz":
-        return (
-            "CCTV С„СЂР°РіРјРµРЅС‚С–РЅ СЃРёРїР°С‚С‚Р°. 1вЂ“2 Т›С‹СЃТ›Р° СЃУ©Р№Р»РµРјРґС– С‚Р°Р±РёТ“Рё С‚С–Р»РјРµРЅ Р¶Р°Р·. "
-            "РЎУ©Р№Р»РµРјРґС– Р±С–СЂРґРµРЅ У™СЂРµРєРµС‚С‚РµРЅ Р±Р°СЃС‚Р° ( В«РљР°РґСЂРґР°В», В«РЎСѓСЂРµС‚С‚РµВ», В«РљУ©СЂС–РЅРµРґС–В», В«Р‘Р°Р№Т›Р°Р»Р°РґС‹В» РґРµРјРµ). "
-            "РўРµРє РєУ©СЂС–РЅРµС‚С–РЅ С„Р°РєС‚С–Р»РµСЂРґС– Р¶Р°Р·: Р°РґР°РјРґР°СЂ РЅРµРјРµСЃРµ РЅС‹СЃР°РЅРґР°СЂ РЅРµ С–СЃС‚РµРї Р¶Р°С‚С‹СЂ; Т›РѕР·Т“Р°Р»С‹СЃ Р°Р№Т›С‹РЅ Р±РѕР»СЃР° Т“Р°РЅР° Р°Р№С‚. "
-            "РћСЂС‹РЅРґС‹, Р°РґР°РјРґР°СЂРґС‹ТЈ СЂУ©Р»С–РЅ, СЃРµР±РµРї РїРµРЅ РєРѕРЅС‚РµРєСЃС‚С– РѕР№РґР°РЅ Т›РѕСЃРїР°. "
-            "Р–Р°СЃ, Р¶С‹РЅС‹СЃ, СЌРјРѕС†РёСЏ, РЅРёРµС‚ РєУ©СЂСЃРµС‚РїРµ. "
-            "РњРµС‚СЂРёРєР° РЅРµРјРµСЃРµ Р¶С–РєС‚РµСѓ СЃУ©Р·РґРµСЂС–РЅ Т›РѕР»РґР°РЅР±Р°. "
-            "Р•СЂРµРєС€Рµ РЅУ™СЂСЃРµ Р±РѕР»РјР°СЃР° вЂ” Т›Р°Р»С‹РїС‚С‹ У™СЂРµРєРµС‚С‚С– СЃРёРїР°С‚С‚Р°."
-        )
+    """Return the canonical clip-description prompt.
+
+    `lang` is kept for compatibility with old callers, but base generation is now
+    always English. RU/KZ remain translation outputs, not direct VLM generations.
+    """
+
+    _ = lang
     return (
-        "Describe a CCTV segment in 1вЂ“2 short natural sentences. "
-        "Start directly with the action (avoid 'In the frame', 'In the image', 'We can see', 'There is'). "
-        "Only observable facts: what people or objects are doing; mention motion only if clearly visible. "
-        "Do not guess the location type, peopleвЂ™s roles, causes, or context. "
-        "No age, gender, emotions, or intentions. "
-        "Do not use metric or classification words. "
-        "If nothing unusual is visible, describe normal activity."
+        "Describe this CCTV segment in 1-2 short natural English sentences. "
+        "Start directly with the observed action. Avoid openers like 'In the frame' or 'We can see'. "
+        "Use only visible facts about people, vehicles, objects, motion, and scene changes. "
+        "Do not guess location type, roles, identity, intent, emotion, or cause. "
+        "Do not use classification labels, safety categories, or metric words. "
+        "If nothing unusual happens, describe ordinary activity plainly."
     )
 
 
@@ -64,105 +66,75 @@ def build_global_summary_prompt(
     duration_sec: float,
     merged_anns: List[Annotation],
 ) -> str:
-    header: List[str] = []
+    """Build the grounded summary prompt for the merged English annotations."""
 
-    if lang == "ru":
-        header.append("РўС‹ вЂ” Р°РЅР°Р»РёС‚РёРє CCTV. РќРёР¶Рµ РїСЂРёРІРµРґРµРЅС‹ РѕРїРёСЃР°РЅРёСЏ С„СЂР°РіРјРµРЅС‚РѕРІ РѕРґРЅРѕРіРѕ РІРёРґРµРѕ.")
-        header.append("РСЃРїРѕР»СЊР·СѓР№ С‚РѕР»СЊРєРѕ С„Р°РєС‚С‹ РёР· СЌС‚РёС… РѕРїРёСЃР°РЅРёР№, РЅРёС‡РµРіРѕ РЅРµ РІС‹РґСѓРјС‹РІР°Р№.")
-        header.append(
-            "РЎРЅР°С‡Р°Р»Р° РЅР°РїРёС€Рё 1вЂ“2 РїСЂРµРґР»РѕР¶РµРЅРёСЏ РѕР±С‹С‡РЅС‹Рј С‡РµР»РѕРІРµС‡РµСЃРєРёРј СЏР·С‹РєРѕРј: "
-            "С‡С‚Рѕ РІ С†РµР»РѕРј РїСЂРѕРёСЃС…РѕРґРёС‚ Рё РєР°Рє РјРµРЅСЏРµС‚СЃСЏ Р°РєС‚РёРІРЅРѕСЃС‚СЊ СЃРѕ РІСЂРµРјРµРЅРµРј. "
-            "РќРµ РёСЃРїРѕР»СЊР·СѓР№ Рё РЅРµ РїРѕРІС‚РѕСЂСЏР№ СЃР»РѕРІР°-СЏСЂР»С‹РєРё: С‚РёРї СЃС†РµРЅС‹, РїР»РѕС‚РЅРѕСЃС‚СЊ, РґРІРёР¶РµРЅРёРµ, Р°РЅРѕРјР°Р»РёРё, РєР»Р°СЃСЃ Р±РµР·РѕРїР°СЃРЅРѕСЃС‚Рё."
-        )
-        header.append("Р—Р°С‚РµРј РІС‹РІРµРґРё Р РћР’РќРћ 5 СЃС‚СЂРѕРє, РєР°Р¶РґР°СЏ РЅР°С‡РёРЅР°РµС‚СЃСЏ СЃ '- ' Рё СЃС‚СЂРѕРіРѕ РїРѕ С€Р°Р±Р»РѕРЅСѓ:")
-        header.append("- РўРёРї СЃС†РµРЅС‹: 1вЂ“3 СЃР»РѕРІР° РёР»Рё 'РЅРµРёР·РІРµСЃС‚РЅРѕ'")
-        header.append("- РџР»РѕС‚РЅРѕСЃС‚СЊ Р»СЋРґРµР№: РЅРµС‚ Р»СЋРґРµР№ / РЅРёР·РєР°СЏ / СЃСЂРµРґРЅСЏСЏ / РІС‹СЃРѕРєР°СЏ")
-        header.append("- РўРёРї РґРІРёР¶РµРЅРёСЏ: РЅРµС‚ / СЃР»Р°Р±РѕРµ / СЃС‚Р°Р±РёР»СЊРЅРѕРµ / СѓСЃРёР»РёРІР°СЋС‰РµРµСЃСЏ / С…Р°РѕС‚РёС‡РЅРѕРµ")
-        header.append("- РђРЅРѕРјР°Р»РёРё: РµСЃР»Рё РµСЃС‚СЊ вЂ” 1вЂ“3 РїСѓРЅРєС‚Р° С‡РµСЂРµР· '; ' РІ С„РѕСЂРјР°С‚Рµ В«СЃРѕР±С‹С‚РёРµ (0:01-0:10)В»; РµСЃР»Рё РЅРµС‚ вЂ” 'РЅРµС‚'")
-        header.append("- РљР»Р°СЃСЃ Р±РµР·РѕРїР°СЃРЅРѕСЃС‚Рё: РЅРѕСЂРјР° / РїРѕРґРѕР·СЂРёС‚РµР»СЊРЅРѕ / РѕРїР°СЃРЅРѕ")
-        header.append(f"\nР’РёРґРµРѕ: {video_id}, РґР»РёС‚РµР»СЊРЅРѕСЃС‚СЊ ~{int(duration_sec)} СЃРµРєСѓРЅРґ.\n")
-        header.append("Р¤СЂР°РіРјРµРЅС‚С‹:")
-
-    elif lang == "kz":
-        header.append("РЎРµРЅ CCTV Р°РЅР°Р»РёС‚РёРіС–СЃС–ТЈ. РўУ©РјРµРЅРґРµ Р±С–СЂ Р±РµР№РЅРµРЅС–ТЈ С„СЂР°РіРјРµРЅС‚ СЃРёРїР°С‚С‚Р°РјР°Р»Р°СЂС‹ Р±РµСЂС–Р»РіРµРЅ.")
-        header.append("ТљРѕСЂС‹С‚С‹РЅРґС‹РЅС‹ С‚РµРє РѕСЃС‹ СЃРёРїР°С‚С‚Р°РјР°Р»Р°СЂРґР°Т“С‹ С„Р°РєС‚С–Р»РµСЂРіРµ СЃТЇР№РµРЅС–Рї Р¶Р°СЃР°, РѕР№РґР°РЅ Т›РѕСЃРїР°.")
-        header.append(
-            "РђР»РґС‹РјРµРЅ 1вЂ“2 СЃУ©Р№Р»РµРјРјРµРЅ Т›Р°СЂР°РїР°Р№С‹Рј С‚С–Р»РґРµ Р¶Р°Р»РїС‹ РЅРµ Р±РѕР»С‹Рї Р¶Р°С‚Т›Р°РЅС‹РЅ Р¶У™РЅРµ СѓР°Т›С‹С‚ Р±РѕР№С‹РЅС€Р° У©Р·РіРµСЂС–СЃС‚С– СЃРёРїР°С‚С‚Р°. "
-            "РљРµР»РµСЃС– РјРµС‚СЂРёРєР° Р°С‚Р°СѓР»Р°СЂС‹РЅ Т›РѕР»РґР°РЅР±Р° Р¶У™РЅРµ Т›Р°Р№С‚Р°Р»Р°РјР°: СЃР°С…РЅР° С‚ТЇСЂС–, С‚С‹Т“С‹Р·РґС‹Т›, Т›РѕР·Т“Р°Р»С‹СЃ С‚ТЇСЂС–, Р°РЅРѕРјР°Р»РёСЏР»Р°СЂ, Т›Р°СѓС–Рї РєР»Р°СЃСЃС‹."
-        )
-        header.append("РЎРѕРґР°РЅ РєРµР№С–РЅ Р”УР› 5 Р¶РѕР» Р±РµСЂ, У™СЂ Р¶РѕР» '- ' РґРµРї Р±Р°СЃС‚Р°Р»СЃС‹РЅ Р¶У™РЅРµ С€Р°Р±Р»РѕРЅТ“Р° СЃР°Р№ Р±РѕР»СЃС‹РЅ:")
-        header.append("- РЎР°С…РЅР° С‚ТЇСЂС–: 1вЂ“3 СЃУ©Р· РЅРµРјРµСЃРµ 'Р°РЅС‹Т› РµРјРµСЃ'")
-        header.append("- РђРґР°РјРґР°СЂ С‚С‹Т“С‹Р·РґС‹Т“С‹: Р¶РѕТ› / С‚У©РјРµРЅ / РѕСЂС‚Р°С€Р° / Р¶РѕТ“Р°СЂС‹")
-        header.append("- ТљРѕР·Т“Р°Р»С‹СЃ С‚ТЇСЂС–: Р¶РѕТ› / У™Р»СЃС–Р· / С‚Т±СЂР°Т›С‚С‹ / РєТЇС€РµР№С–Рї Р¶Р°С‚С‹СЂ / С…Р°РѕС‚РёРєР°Р»С‹Т›")
-        header.append("- РђРЅРѕРјР°Р»РёСЏР»Р°СЂ: Р±Р°СЂ Р±РѕР»СЃР° вЂ” 1вЂ“3 РїСѓРЅРєС‚ '; ' Р°СЂТ›С‹Р»С‹ В«РѕТ›РёТ“Р° (0:01-0:10)В» С„РѕСЂРјР°С‚С‹РјРµРЅ; Р¶РѕТ› Р±РѕР»СЃР° вЂ” 'Р¶РѕТ›'")
-        header.append("- ТљР°СѓС–Рї РєР»Р°СЃСЃС‹: РЅРѕСЂРјР° / РєТЇРјУ™РЅРґС– / Т›Р°СѓС–РїС‚С–")
-        header.append(f"\nР‘РµР№РЅРµ: {video_id}, Т±Р·Р°Т›С‚С‹Т“С‹ ~{int(duration_sec)} СЃРµРєСѓРЅРґ.\n")
-        header.append("Р¤СЂР°РіРјРµРЅС‚С‚РµСЂ:")
-
-    else:
-        header.append("You are a CCTV analyst. Below are descriptions of segments from the same video.")
-        header.append("Use only facts from these descriptions. Do not invent anything.")
-        header.append(
-            "First, write 1вЂ“2 natural sentences describing what is happening overall and how activity changes over time. "
-            "Do not use or repeat metric labels: scene type, people density, motion type, anomalies, risk class."
-        )
-        header.append("Then output EXACTLY 5 lines, each starting with '- ', strictly following this template:")
-        header.append("- Scene type: 1вЂ“3 words or 'unknown'")
-        header.append("- People density: none / low / medium / high")
-        header.append("- Motion type: none / weak / stable / increasing / chaotic")
-        header.append("- Anomalies: if any вЂ” 1вЂ“3 items separated by '; ' in the form 'event (0:01-0:10)'; if none вЂ” 'none'")
-        header.append("- Risk class: normal / suspicious / dangerous")
-        header.append(f"\nVideo: {video_id}, duration ~{int(duration_sec)} seconds.\n")
-        header.append("Segments:")
-
+    _ = lang
+    header = [
+        "You are a CCTV analyst.",
+        "Use only the segment descriptions below. Do not invent facts.",
+        "First write 1-2 natural English sentences describing what happens overall and how activity changes over time.",
+        "Then output exactly 5 lines, each starting with '- ', using this template:",
+        "- Scene type: 1-3 words or 'unknown'",
+        "- People density: none / low / medium / high",
+        "- Motion type: none / weak / stable / increasing / chaotic",
+        "- Anomalies: 1-3 timed items like 'event (0:01-0:10)' or 'none'",
+        "- Risk class: normal / suspicious / dangerous",
+        "",
+        f"Video: {video_id}",
+        f"Duration: ~{int(duration_sec)} seconds",
+        "",
+        "Segments:",
+    ]
     body = [
         f"[{format_ts(ann.start_sec)} - {format_ts(ann.end_sec)}] {strip_prefix(ann.description)}"
         for ann in merged_anns
     ]
-    return "\n".join(header + [""] + body)
-
-
-_SENT_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
-_TIMED_ITEM_RE = re.compile(r"\b(.+?)\s*\(\s*(\d+:\d{2})\s*-\s*(\d+:\d{2})\s*\)\b")
-_WS_RE = re.compile(r"\s+")
+    return "\n".join(header + body)
 
 
 def format_ts(sec: float) -> str:
-    m = int(sec // 60)
-    s = int(sec % 60)
-    return f"{m}:{s:02d}"
+    """Format a second offset as M:SS."""
+
+    minutes = int(sec // 60)
+    seconds = int(sec % 60)
+    return f"{minutes}:{seconds:02d}"
 
 
 def strip_prefix(text: str) -> str:
+    """Drop timeline prefixes like `[0:00 - 0:04]` from captions."""
+
     return re.sub(r"^\[[0-9:\s\-]+\]\s*", "", text or "")
 
 
-def _collapse_spaces(s: str) -> str:
-    s = (s or "").replace("\n", " ").replace("\r", " ").replace("\t", " ")
-    return _WS_RE.sub(" ", s).strip()
+def _collapse_spaces(text: str) -> str:
+    """Collapse all whitespace runs into single spaces."""
+
+    normalized = (text or "").replace("\n", " ").replace("\r", " ").replace("\t", " ")
+    return _WS_RE.sub(" ", normalized).strip()
 
 
-def _remove_list_prefixes(s: str) -> str:
-    s = re.sub(r"^\s*[-вЂў*вЂ”]+\s*", "", s or "")
-    s = re.sub(r"^\s*\(?\d+\)?[.)]\s*", "", s)
-    return s.strip()
+def _remove_list_prefixes(text: str) -> str:
+    """Drop bullet and numbered-list prefixes from one line."""
+
+    out = _LIST_PREFIX_RE.sub("", text or "")
+    out = _ENUM_PREFIX_RE.sub("", out)
+    return out.strip()
 
 
-def _strip_generic_openers(s: str) -> str:
-    return re.sub(
-        r"^(РІРёРґРЅРѕ|РЅР°Р±Р»СЋРґР°РµС‚СЃСЏ|РЅР° РІРёРґРµРѕ|we can see|there is|there are|РєУ©СЂС–РЅРµРґС–|Р±Р°Р№Т›Р°Р»Р°РґС‹)\s*[:,\-]?\s*",
-        "",
-        s,
-        flags=re.IGNORECASE,
-    )
+def _strip_generic_openers(text: str) -> str:
+    """Remove generic, non-informative lead-ins from model output."""
+
+    return _GENERIC_OPENERS_RE.sub("", text or "").strip()
 
 
-def _force_max_sentences(s: str, max_sentences: int = 2) -> str:
-    s = (s or "").strip()
-    if not s:
-        return s
-    parts = [p.strip() for p in _SENT_SPLIT_RE.split(s) if p.strip()]
-    kept = parts[: max(1, int(max_sentences))] if parts else [s]
+def _force_max_sentences(text: str, max_sentences: int = 2) -> str:
+    """Clamp free text to at most N sentences."""
+
+    raw = (text or "").strip()
+    if not raw:
+        return raw
+    parts = [part.strip() for part in _SENT_SPLIT_RE.split(raw) if part.strip()]
+    kept = parts[: max(1, int(max_sentences))] if parts else [raw]
     out = _collapse_spaces(" ".join(kept))
     if out and out[-1] not in ".!?":
         out += "."
@@ -170,12 +142,14 @@ def _force_max_sentences(s: str, max_sentences: int = 2) -> str:
 
 
 def _dedupe_repeated_words(text: str, max_repeat: int = 2) -> str:
+    """Remove pathological local word repetition from VLM output."""
+
     words = (text or "").split()
     out: List[str] = []
     run_word: Optional[str] = None
     run_len = 0
-    for w in words:
-        key = w.lower()
+    for word in words:
+        key = word.lower()
         if key == run_word:
             run_len += 1
             if run_len >= max_repeat:
@@ -183,334 +157,200 @@ def _dedupe_repeated_words(text: str, max_repeat: int = 2) -> str:
         else:
             run_word = key
             run_len = 0
-        out.append(w)
-    t = " ".join(out).strip()
-    if t and t[-1] not in ".!?":
-        t += "."
-    return t
+        out.append(word)
+    merged = " ".join(out).strip()
+    if merged and merged[-1] not in ".!?":
+        merged += "."
+    return merged
 
 
 def sanitize_clip_text(text: str, lang: str) -> str:
-    t = strip_prefix(text)
-    t = _collapse_spaces(t)
-    t = _strip_generic_openers(t)
-    t = _remove_list_prefixes(t)
-    t = _force_max_sentences(t, max_sentences=2)
-    t = _dedupe_repeated_words(t, max_repeat=2)
-    return t
+    """Normalize one raw clip caption into canonical English text."""
+
+    _ = lang
+    normalized = strip_prefix(text)
+    normalized = _collapse_spaces(normalized)
+    normalized = _strip_generic_openers(normalized)
+    normalized = _remove_list_prefixes(normalized)
+    normalized = _force_max_sentences(normalized, max_sentences=2)
+    normalized = _dedupe_repeated_words(normalized, max_repeat=2)
+    return normalized
 
 
-def _extract_first_sentences(text: str, n: int) -> str:
-    t = _collapse_spaces(text)
-    parts = [p.strip() for p in _SENT_SPLIT_RE.split(t) if p.strip()]
-    out = " ".join(parts[:n]).strip() if parts else t.strip()
+def _extract_first_sentences(text: str, count: int) -> str:
+    """Extract the first N sentences from a text block."""
+
+    normalized = _collapse_spaces(text)
+    parts = [part.strip() for part in _SENT_SPLIT_RE.split(normalized) if part.strip()]
+    out = " ".join(parts[:count]).strip() if parts else normalized.strip()
     if out and out[-1] not in ".!?":
         out += "."
     return out
 
 
 def _pick_lines_starting(lines: List[str], prefix: str) -> Optional[str]:
-    p = prefix.lower()
-    for l in lines:
-        if l.lower().startswith(p):
-            return l
+    """Find the first line that starts with the requested prefix."""
+
+    needle = prefix.lower()
+    for line in lines:
+        if line.lower().startswith(needle):
+            return line
     return None
 
 
 def _extract_after_prefix(line: str, prefix: str) -> str:
+    """Return the suffix of a line after a known prefix."""
+
     if line.lower().startswith(prefix.lower()):
-        return line[len(prefix):].strip()
+        return line[len(prefix) :].strip()
     return line.strip()
 
 
-def _normalize_timed_anomalies(raw: str, lang: str) -> str:
+def _normalize_timed_anomalies(raw: str) -> str:
+    """Normalize anomaly line content into compact timed entries."""
+
     if not raw:
-        return "РЅРµС‚" if lang == "ru" else ("Р¶РѕТ›" if lang == "kz" else "none")
+        return "none"
     low = raw.strip().lower()
-    if lang == "ru" and low in {"РЅРµС‚", "РЅРµС‚.", "РѕС‚СЃСѓС‚СЃС‚РІСѓСЋС‚", "РЅРµ РѕР±РЅР°СЂСѓР¶РµРЅС‹"}:
-        return "РЅРµС‚"
-    if lang == "kz" and low in {"Р¶РѕТ›", "Р¶РѕТ›.", "Р°РЅС‹Т›С‚Р°Р»РјР°РґС‹"}:
-        return "Р¶РѕТ›"
-    if lang == "en" and low in {"none", "none.", "no"}:
+    if low in {"none", "none.", "no"}:
         return "none"
 
     items = _TIMED_ITEM_RE.findall(raw)
     if not items:
-        return "РЅРµС‚" if lang == "ru" else ("Р¶РѕТ›" if lang == "kz" else "none")
+        return "none"
 
     cleaned: List[str] = []
-    for label, s1, s2 in items[:3]:
-        lab = _collapse_spaces(label)
-        lab = re.sub(r"[;]+$", "", lab).strip()
-        lab = re.sub(r"^[\-\вЂў\*]+\s*", "", lab).strip()
-        if lab:
-            cleaned.append(f"{lab} ({s1}-{s2})")
+    for label, start, end in items[:3]:
+        compact_label = _collapse_spaces(label)
+        compact_label = re.sub(r"[;]+$", "", compact_label).strip()
+        compact_label = re.sub(r"^[-*]+\s*", "", compact_label).strip()
+        if compact_label:
+            cleaned.append(f"{compact_label} ({start}-{end})")
+    return "; ".join(cleaned) if cleaned else "none"
 
-    return "; ".join(cleaned) if cleaned else ("РЅРµС‚" if lang == "ru" else ("Р¶РѕТ›" if lang == "kz" else "none"))
 
+def _strip_metric_fragments(short_text: str) -> str:
+    """Remove metric-line fragments that leak into the short summary text."""
 
-def _strip_metric_fragments(short_text: str, lang: str) -> str:
-    t = _collapse_spaces(short_text or "")
-    if not t:
-        return t
+    normalized = _collapse_spaces(short_text or "")
+    if not normalized:
+        return normalized
 
-    if lang == "ru":
-        cuts = [
-            " - С‚РёРї СЃС†РµРЅС‹:",
-            "- С‚РёРї СЃС†РµРЅС‹:",
-            "С‚РёРї СЃС†РµРЅС‹:",
-            " - РїР»РѕС‚РЅРѕСЃС‚СЊ Р»СЋРґРµР№:",
-            "- РїР»РѕС‚РЅРѕСЃС‚СЊ Р»СЋРґРµР№:",
-            "РїР»РѕС‚РЅРѕСЃС‚СЊ Р»СЋРґРµР№:",
-            " - С‚РёРї РґРІРёР¶РµРЅРёСЏ:",
-            "- С‚РёРї РґРІРёР¶РµРЅРёСЏ:",
-            "С‚РёРї РґРІРёР¶РµРЅРёСЏ:",
-            " - Р°РЅРѕРјР°Р»РёРё:",
-            "- Р°РЅРѕРјР°Р»РёРё:",
-            "Р°РЅРѕРјР°Р»РёРё:",
-            " - РєР»Р°СЃСЃ Р±РµР·РѕРїР°СЃРЅРѕСЃС‚Рё:",
-            "- РєР»Р°СЃСЃ Р±РµР·РѕРїР°СЃРЅРѕСЃС‚Рё:",
-            "РєР»Р°СЃСЃ Р±РµР·РѕРїР°СЃРЅРѕСЃС‚Рё:",
-        ]
-    elif lang == "kz":
-        cuts = [
-            " - СЃР°С…РЅР° С‚ТЇСЂС–:",
-            "- СЃР°С…РЅР° С‚ТЇСЂС–:",
-            "СЃР°С…РЅР° С‚ТЇСЂС–:",
-            " - Р°РґР°РјРґР°СЂ С‚С‹Т“С‹Р·РґС‹Т“С‹:",
-            "- Р°РґР°РјРґР°СЂ С‚С‹Т“С‹Р·РґС‹Т“С‹:",
-            "Р°РґР°РјРґР°СЂ С‚С‹Т“С‹Р·РґС‹Т“С‹:",
-            " - Т›РѕР·Т“Р°Р»С‹СЃ С‚ТЇСЂС–:",
-            "- Т›РѕР·Т“Р°Р»С‹СЃ С‚ТЇСЂС–:",
-            "Т›РѕР·Т“Р°Р»С‹СЃ С‚ТЇСЂС–:",
-            " - Р°РЅРѕРјР°Р»РёСЏР»Р°СЂ:",
-            "- Р°РЅРѕРјР°Р»РёСЏР»Р°СЂ:",
-            "Р°РЅРѕРјР°Р»РёСЏР»Р°СЂ:",
-            " - Т›Р°СѓС–Рї РєР»Р°СЃСЃС‹:",
-            "- Т›Р°СѓС–Рї РєР»Р°СЃСЃС‹:",
-            "Т›Р°СѓС–Рї РєР»Р°СЃСЃС‹:",
-        ]
-    else:
-        cuts = [
-            " - scene type:",
-            "- scene type:",
-            "scene type:",
-            " - people density:",
-            "- people density:",
-            "people density:",
-            " - motion type:",
-            "- motion type:",
-            "motion type:",
-            " - anomalies:",
-            "- anomalies:",
-            "anomalies:",
-            " - risk class:",
-            "- risk class:",
-            "risk class:",
-        ]
-
-    low = t.lower()
+    low = normalized.lower()
     cut_pos: Optional[int] = None
-    for c in cuts:
-        p = low.find(c)
-        if p != -1:
-            cut_pos = p if cut_pos is None else min(cut_pos, p)
-
+    for prefix, _default in _SUMMARY_KEYS:
+        prefix_low = prefix.lower()
+        for candidate in (prefix_low, prefix_low.replace("- ", ""), f" {prefix_low}"):
+            pos = low.find(candidate)
+            if pos != -1:
+                cut_pos = pos if cut_pos is None else min(cut_pos, pos)
     if cut_pos is not None:
-        t = t[:cut_pos].strip()
+        normalized = normalized[:cut_pos].strip()
 
-    if lang == "kz":
-        t = re.sub(r"(Р¶Р°Р»РїС‹\s+С‚ТЇСЃС–РЅС–РєС‚С–\s+Т›РѕСЂС‹С‚С‹РЅРґС‹[:\-]?\s*)", "", t, flags=re.IGNORECASE).strip()
-        t = re.sub(r"(Т›РѕСЂС‹С‚С‹РЅРґС‹(РЅС‹ТЈ)?\s+РЅРµРіС–Р·С–РЅРґРµ[^.]*\.)", "", t, flags=re.IGNORECASE).strip()
-
-    t = re.sub(r"\s*-\s*$", "", t).strip()
-    t = _strip_generic_openers(t)
-    t = _force_max_sentences(t, max_sentences=2)
-    return t
+    normalized = re.sub(r"(short summary[:\-]?\s*)", "", normalized, flags=re.IGNORECASE).strip()
+    normalized = _strip_generic_openers(normalized)
+    normalized = _force_max_sentences(normalized, max_sentences=2)
+    return normalized
 
 
 def sanitize_global_summary(text: str, lang: str) -> str:
+    """Normalize global summary output into one short summary plus 5 metric lines."""
+
+    _ = lang
     raw = text or ""
-    lines = [l.strip() for l in raw.splitlines() if l.strip()]
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
 
-    if lang == "ru":
-        short_label = "РљСЂР°С‚РєРѕРµ РѕРїРёСЃР°РЅРёРµ:"
-        timed_label = "РђРЅРѕРјР°Р»РёРё РїРѕ РІСЂРµРјРµРЅРё:"
-        keys = [
-            ("- РўРёРї СЃС†РµРЅС‹:", "РЅРµРёР·РІРµСЃС‚РЅРѕ"),
-            ("- РџР»РѕС‚РЅРѕСЃС‚СЊ Р»СЋРґРµР№:", "РЅРёР·РєР°СЏ"),
-            ("- РўРёРї РґРІРёР¶РµРЅРёСЏ:", "СЃС‚Р°Р±РёР»СЊРЅРѕРµ"),
-            ("- РђРЅРѕРјР°Р»РёРё:", "РЅРµС‚"),
-            ("- РљР»Р°СЃСЃ Р±РµР·РѕРїР°СЃРЅРѕСЃС‚Рё:", "РЅРѕСЂРјР°"),
-        ]
-        none_anom = "РЅРµС‚"
-    elif lang == "kz":
-        short_label = "ТљС‹СЃТ›Р°С€Р° СЃРёРїР°С‚С‚Р°РјР°:"
-        timed_label = "РЈР°Т›С‹С‚ Р±РѕР№С‹РЅС€Р° Р°РЅРѕРјР°Р»РёСЏР»Р°СЂ:"
-        keys = [
-            ("- РЎР°С…РЅР° С‚ТЇСЂС–:", "Р°РЅС‹Т› РµРјРµСЃ"),
-            ("- РђРґР°РјРґР°СЂ С‚С‹Т“С‹Р·РґС‹Т“С‹:", "С‚У©РјРµРЅ"),
-            ("- ТљРѕР·Т“Р°Р»С‹СЃ С‚ТЇСЂС–:", "С‚Т±СЂР°Т›С‚С‹"),
-            ("- РђРЅРѕРјР°Р»РёСЏР»Р°СЂ:", "Р¶РѕТ›"),
-            ("- ТљР°СѓС–Рї РєР»Р°СЃСЃС‹:", "РЅРѕСЂРјР°"),
-        ]
-        none_anom = "Р¶РѕТ›"
-    else:
-        short_label = "Short summary:"
-        timed_label = "Timed anomalies:"
-        keys = [
-            ("- Scene type:", "unknown"),
-            ("- People density:", "low"),
-            ("- Motion type:", "stable"),
-            ("- Anomalies:", "none"),
-            ("- Risk class:", "normal"),
-        ]
-        none_anom = "none"
-
+    short_label = "Short summary:"
     short_line = _pick_lines_starting(lines, short_label)
     short_text = _extract_after_prefix(short_line, short_label) if short_line else ""
     short_text = _extract_first_sentences(raw, 2) if not short_text else _collapse_spaces(short_text)
-    short_text = _strip_metric_fragments(short_text, lang=lang)
-    short_text = _collapse_spaces(short_text)
-    short_text = _strip_generic_openers(short_text)
-    short_text = _force_max_sentences(short_text, max_sentences=2)
-
-    timed_line = _pick_lines_starting(lines, timed_label)
-    timed_raw = _extract_after_prefix(timed_line, timed_label) if timed_line else ""
-    timed_norm = _normalize_timed_anomalies(timed_raw, lang=lang) if timed_raw else ""
+    short_text = _strip_metric_fragments(short_text)
 
     found: Dict[str, str] = {}
-    for l in lines:
-        if not l.startswith("-"):
+    for line in lines:
+        if not line.startswith("-"):
             continue
-        for k, d in keys:
-            if l.lower().startswith(k.lower()):
-                found[k] = _collapse_spaces(l[len(k):].strip()) or d
+        for key, default in _SUMMARY_KEYS:
+            if line.lower().startswith(key.lower()):
+                found[key] = _collapse_spaces(line[len(key) :].strip()) or default
 
-    def pick_density(v: str) -> str:
-        vlow = (v or "").lower()
-        if lang == "ru":
-            if "РЅРµС‚" in vlow:
-                return "РЅРµС‚ Р»СЋРґРµР№"
-            if "РІС‹СЃ" in vlow or "РјРЅРѕРіРѕ" in vlow:
-                return "РІС‹СЃРѕРєР°СЏ"
-            if "СЃСЂРµРґ" in vlow:
-                return "СЃСЂРµРґРЅСЏСЏ"
-            return "РЅРёР·РєР°СЏ"
-        if lang == "kz":
-            if "Р¶РѕТ›" in vlow:
-                return "Р¶РѕТ›"
-            if "Р¶РѕТ“" in vlow or "РєУ©Рї" in vlow:
-                return "Р¶РѕТ“Р°СЂС‹"
-            if "РѕСЂС‚Р°" in vlow:
-                return "РѕСЂС‚Р°С€Р°"
-            return "С‚У©РјРµРЅ"
-        if "none" in vlow or vlow == "no":
+    def pick_density(value: str) -> str:
+        low = (value or "").lower()
+        if "none" in low or low == "no":
             return "none"
-        if "high" in vlow or "many" in vlow:
+        if "high" in low or "many" in low or "crowd" in low:
             return "high"
-        if "med" in vlow:
+        if "med" in low:
             return "medium"
         return "low"
 
-    def pick_motion(v: str) -> str:
-        vlow = (v or "").lower()
-        if lang == "ru":
-            if "С…Р°РѕС‚" in vlow:
-                return "С…Р°РѕС‚РёС‡РЅРѕРµ"
-            if "СѓСЃРёР»" in vlow or "СЂР°СЃС‚" in vlow:
-                return "СѓСЃРёР»РёРІР°СЋС‰РµРµСЃСЏ"
-            if "СЃР»Р°Р±" in vlow:
-                return "СЃР»Р°Р±РѕРµ"
-            if "РЅРµС‚" in vlow:
-                return "РЅРµС‚"
-            return "СЃС‚Р°Р±РёР»СЊРЅРѕРµ"
-        if lang == "kz":
-            if "С…Р°РѕС‚" in vlow:
-                return "С…Р°РѕС‚РёРєР°Р»С‹Т›"
-            if "РєТЇС€" in vlow:
-                return "РєТЇС€РµР№С–Рї Р¶Р°С‚С‹СЂ"
-            if "У™Р»СЃС–Р·" in vlow:
-                return "У™Р»СЃС–Р·"
-            if "Р¶РѕТ›" in vlow:
-                return "Р¶РѕТ›"
-            return "С‚Т±СЂР°Т›С‚С‹"
-        if "chaot" in vlow:
+    def pick_motion(value: str) -> str:
+        low = (value or "").lower()
+        if "chaot" in low:
             return "chaotic"
-        if "increas" in vlow:
+        if "increas" in low or "escalat" in low:
             return "increasing"
-        if "weak" in vlow:
+        if "weak" in low or "light" in low:
             return "weak"
-        if "none" in vlow or vlow == "no":
+        if "none" in low or low == "no":
             return "none"
         return "stable"
 
-    def pick_risk(v: str) -> str:
-        vlow = (v or "").lower()
-        if lang == "ru":
-            if "РѕРїР°СЃ" in vlow:
-                return "РѕРїР°СЃРЅРѕ"
-            if "РїРѕРґРѕР·" in vlow or "РєТЇРј" in vlow:
-                return "РїРѕРґРѕР·СЂРёС‚РµР»СЊРЅРѕ"
-            return "РЅРѕСЂРјР°"
-        if lang == "kz":
-            if "Т›Р°СѓС–Рї" in vlow:
-                return "Т›Р°СѓС–РїС‚С–"
-            if "РєТЇРј" in vlow:
-                return "РєТЇРјУ™РЅРґС–"
-            return "РЅРѕСЂРјР°"
-        if "danger" in vlow:
+    def pick_risk(value: str) -> str:
+        low = (value or "").lower()
+        if "danger" in low or "critical" in low:
             return "dangerous"
-        if "susp" in vlow:
+        if "susp" in low or "attention" in low or "warn" in low:
             return "suspicious"
         return "normal"
 
-    def pick_anom(v: str) -> str:
-        v = _collapse_spaces(v or "")
-        if not v:
-            return none_anom
-        vlow = v.lower()
-        if lang == "ru" and vlow in {"РЅРµС‚", "РЅРµС‚.", "РЅРµ РѕР±РЅР°СЂСѓР¶РµРЅС‹", "РѕС‚СЃСѓС‚СЃС‚РІСѓСЋС‚"}:
-            return "РЅРµС‚"
-        if lang == "kz" and vlow in {"Р¶РѕТ›", "Р¶РѕТ›.", "Р°РЅС‹Т›С‚Р°Р»РјР°РґС‹"}:
-            return "Р¶РѕТ›"
-        if lang == "en" and vlow in {"none", "none.", "no"}:
+    def pick_anomalies(value: str) -> str:
+        compact = _collapse_spaces(value or "")
+        if not compact:
             return "none"
-        v = re.sub(r"^\s*[\-\вЂў\*]+\s*", "", v).strip()
-        return (v[:200] if v else none_anom)
+        low = compact.lower()
+        if low in {"none", "none.", "no"}:
+            return "none"
+        compact = re.sub(r"^\s*[-*]+\s*", "", compact).strip()
+        return compact[:200] if compact else "none"
 
-    out_lines: List[str] = [f"{short_label} {short_text}".strip()]
+    timed_line = _pick_lines_starting(lines, "Timed anomalies:")
+    timed_raw = _extract_after_prefix(timed_line, "Timed anomalies:") if timed_line else ""
+    timed_norm = _normalize_timed_anomalies(timed_raw)
 
-    for i, (k, d) in enumerate(keys):
-        v = found.get(k, d)
-        if i == 1:
-            v = pick_density(v)
-        elif i == 2:
-            v = pick_motion(v)
-        elif i == 3:
-            v = pick_anom(v)
-            if (v.lower() == none_anom) and timed_norm and timed_norm != none_anom:
-                v = timed_norm
-        elif i == 4:
-            v = pick_risk(v)
-        out_lines.append(f"{k} {v}".strip())
-
+    out_lines = [f"{short_label} {short_text}".strip()]
+    for index, (key, default) in enumerate(_SUMMARY_KEYS):
+        value = found.get(key, default)
+        if index == 1:
+            value = pick_density(value)
+        elif index == 2:
+            value = pick_motion(value)
+        elif index == 3:
+            value = pick_anomalies(value)
+            if value == "none" and timed_norm != "none":
+                value = timed_norm
+        elif index == 4:
+            value = pick_risk(value)
+        out_lines.append(f"{key} {value}".strip())
     return "\n".join(out_lines).strip()
 
 
 def norm_tokens(text: str) -> List[str]:
-    text = strip_prefix((text or "").lower())
-    text = re.sub(r"[^\w\s]", " ", text, flags=re.UNICODE)
-    return [t for t in text.split() if len(t) > 2]
+    """Normalize caption text into simple searchable tokens."""
+
+    normalized = strip_prefix((text or "").lower())
+    normalized = re.sub(r"[^\w\s]", " ", normalized, flags=re.UNICODE)
+    return [token for token in normalized.split() if len(token) > 2]
 
 
 def text_sim(a: str, b: str) -> float:
-    ta = set(norm_tokens(a))
-    tb = set(norm_tokens(b))
-    if not ta or not tb:
+    """Compute lightweight overlap similarity between two captions."""
+
+    tokens_a = set(norm_tokens(a))
+    tokens_b = set(norm_tokens(b))
+    if not tokens_a or not tokens_b:
         return 0.0
-    inter = len(ta & tb)
-    return inter / float(min(len(ta), len(tb)))
+    return len(tokens_a & tokens_b) / float(min(len(tokens_a), len(tokens_b)))
 
 
 def smooth_annotations(
@@ -518,60 +358,58 @@ def smooth_annotations(
     sim_threshold: float = 0.7,
     gap_tolerance: float = 1.0,
 ) -> List[Annotation]:
+    """Merge adjacent annotations when the time gap is small and text is similar."""
+
     if not anns:
         return []
 
-    anns = sorted(anns, key=lambda a: a.start_sec)
+    ordered = sorted(anns, key=lambda ann: ann.start_sec)
     merged: List[Annotation] = []
-
     current = Annotation(
-        video_id=anns[0].video_id,
-        start_sec=float(anns[0].start_sec),
-        end_sec=float(anns[0].end_sec),
-        description=strip_prefix(anns[0].description),
+        video_id=ordered[0].video_id,
+        start_sec=float(ordered[0].start_sec),
+        end_sec=float(ordered[0].end_sec),
+        description=strip_prefix(ordered[0].description),
         extra={"merged_from": [0]},
     )
 
-    for src_i, nxt in enumerate(anns[1:], start=1):
+    for src_index, nxt in enumerate(ordered[1:], start=1):
         gap = float(nxt.start_sec) - float(current.end_sec)
-        sim = text_sim(current.description, nxt.description)
-
-        if gap <= gap_tolerance and sim >= sim_threshold:
+        similarity = text_sim(current.description, nxt.description)
+        if gap <= gap_tolerance and similarity >= sim_threshold:
             current.end_sec = float(nxt.end_sec)
             current.extra = current.extra or {}
-            current.extra.setdefault("merged_from", []).append(src_i)
-        else:
-            merged.append(current)
-            current = Annotation(
-                video_id=nxt.video_id,
-                start_sec=float(nxt.start_sec),
-                end_sec=float(nxt.end_sec),
-                description=strip_prefix(nxt.description),
-                extra={"merged_from": [src_i]},
-            )
+            current.extra.setdefault("merged_from", []).append(src_index)
+            continue
+
+        merged.append(current)
+        current = Annotation(
+            video_id=nxt.video_id,
+            start_sec=float(nxt.start_sec),
+            end_sec=float(nxt.end_sec),
+            description=strip_prefix(nxt.description),
+            extra={"merged_from": [src_index]},
+        )
 
     merged.append(current)
     return merged
 
 
 def _bucket_indices_by_len(nested: List[List[str]]) -> Dict[int, List[int]]:
+    """Group clip indices by frame-count length for efficient batch inference."""
+
     buckets: Dict[int, List[int]] = {}
-    for i, seq in enumerate(nested):
-        buckets.setdefault(len(seq), []).append(i)
+    for index, seq in enumerate(nested):
+        buckets.setdefault(len(seq), []).append(index)
     return buckets
 
 
 @dataclass(frozen=True)
 class _FrameLike:
+    """Compact frame view used by clip-building helpers."""
+
     path: str
     timestamp_sec: float
-
-
-@dataclass(frozen=True)
-class _VideoMetaLike:
-    video_id: str
-    duration_sec: float
-    frames: List[_FrameLike]
 
 
 def build_clips_from_video_meta(
@@ -583,6 +421,8 @@ def build_clips_from_video_meta(
     keyframe_policy: str = "middle",
     return_keyframes: bool = False,
 ):
+    """Build sliding-window clips from preprocessed frame metadata."""
+
     def _pick_keyframe_path(paths_list: List[str], policy: str) -> Optional[str]:
         if not paths_list:
             return None
@@ -594,9 +434,9 @@ def build_clips_from_video_meta(
         if mode in {"middle", "mid", ""}:
             return str(paths_list[len(paths_list) // 2])
         if mode in {"sharpest", "max_sharpness"} and cv2 is not None:
-            best_idx = len(paths_list) // 2
+            best_index = len(paths_list) // 2
             best_score = -1.0
-            for idx, frame_path in enumerate(paths_list):
+            for index, frame_path in enumerate(paths_list):
                 try:
                     image = cv2.imread(str(frame_path), cv2.IMREAD_GRAYSCALE)
                     if image is None:
@@ -604,10 +444,10 @@ def build_clips_from_video_meta(
                     score = float(cv2.Laplacian(image, cv2.CV_64F).var())
                     if score > best_score:
                         best_score = score
-                        best_idx = idx
+                        best_index = index
                 except Exception:
                     continue
-            return str(paths_list[best_idx])
+            return str(paths_list[best_index])
         return str(paths_list[len(paths_list) // 2])
 
     frames_raw = getattr(video_meta, "frames", None) or []
@@ -616,18 +456,16 @@ def build_clips_from_video_meta(
             return [], [], []
         return [], []
 
-    frames: List[_FrameLike] = []
-    for f in frames_raw:
-        frames.append(
-            _FrameLike(
-                path=str(getattr(f, "path", "")),
-                timestamp_sec=float(getattr(f, "timestamp_sec", 0.0)),
-            )
+    frames = [
+        _FrameLike(
+            path=str(getattr(frame, "path", "")),
+            timestamp_sec=float(getattr(frame, "timestamp_sec", 0.0)),
         )
-
-    frames = sorted(frames, key=lambda x: x.timestamp_sec)
-    ts = [float(x.timestamp_sec) for x in frames]
-    paths = [str(x.path) for x in frames]
+        for frame in frames_raw
+    ]
+    frames = sorted(frames, key=lambda item: item.timestamp_sec)
+    timestamps = [float(item.timestamp_sec) for item in frames]
+    paths = [str(item.path) for item in frames]
     duration = float(getattr(video_meta, "duration_sec", 0.0) or 0.0)
 
     clips: List[List[str]] = []
@@ -639,34 +477,34 @@ def build_clips_from_video_meta(
             return clips, clip_timestamps, clip_keyframes
         return clips, clip_timestamps
 
-    n = len(frames)
-    l = 0
-    r = 0
-    t = 0.0
+    total_frames = len(frames)
+    left = 0
+    right = 0
+    current_time = 0.0
 
-    while t < duration + 1e-6:
-        t_end = min(t + float(window_sec), duration)
+    while current_time < duration + 1e-6:
+        window_end = min(current_time + float(window_sec), duration)
 
-        while l < n and ts[l] < t:
-            l += 1
-        if r < l:
-            r = l
-        while r < n and ts[r] <= t_end:
-            r += 1
+        while left < total_frames and timestamps[left] < current_time:
+            left += 1
+        if right < left:
+            right = left
+        while right < total_frames and timestamps[right] <= window_end:
+            right += 1
 
-        count = r - l
+        count = right - left
         if count >= int(min_clip_frames):
-            win_paths = paths[l:r]
-            if len(win_paths) > int(max_clip_frames):
-                step = len(win_paths) / float(max_clip_frames)
-                idxs = [min(len(win_paths) - 1, int(i * step)) for i in range(int(max_clip_frames))]
-                win_paths = [win_paths[i] for i in idxs]
-            last_ts = ts[r - 1] if r - 1 >= l else t_end
-            clips.append(win_paths)
-            clip_timestamps.append((float(t), float(last_ts)))
-            clip_keyframes.append(_pick_keyframe_path(win_paths, keyframe_policy))
+            window_paths = paths[left:right]
+            if len(window_paths) > int(max_clip_frames):
+                step = len(window_paths) / float(max_clip_frames)
+                indices = [min(len(window_paths) - 1, int(index * step)) for index in range(int(max_clip_frames))]
+                window_paths = [window_paths[index] for index in indices]
+            last_ts = timestamps[right - 1] if right - 1 >= left else window_end
+            clips.append(window_paths)
+            clip_timestamps.append((float(current_time), float(last_ts)))
+            clip_keyframes.append(_pick_keyframe_path(window_paths, keyframe_policy))
 
-        t += float(stride_sec)
+        current_time += float(stride_sec)
 
     if return_keyframes:
         return clips, clip_timestamps, clip_keyframes
@@ -674,6 +512,8 @@ def build_clips_from_video_meta(
 
 
 class VideoToTextPipeline:
+    """Canonical English clip-caption pipeline used by the worker runtime."""
+
     def __init__(self, cfg: PipelineConfig):
         self.cfg = cfg
         self.backend = QwenVLBackend.from_pipeline_config(cfg)
@@ -686,6 +526,8 @@ class VideoToTextPipeline:
         clip_timestamps: List[Tuple[float, float]],
         preprocess_time_sec: float = 0.0,
     ):
+        """Run clip captioning, smoothing, and optional global summary generation."""
+
         if not clips:
             metrics = RunMetrics(
                 video_id=video_id,
@@ -706,35 +548,33 @@ class VideoToTextPipeline:
             raise ValueError("clips and clip_timestamps must match in length")
 
         num_clips = len(clips)
-        num_frames = sum(len(c) for c in clips)
-        avg_clip_duration = float(sum((e - s) for s, e in clip_timestamps) / len(clip_timestamps))
-        clip_lengths = [len(c) for c in clips]
+        num_frames = sum(len(clip) for clip in clips)
+        avg_clip_duration = float(sum((end - start) for start, end in clip_timestamps) / len(clip_timestamps))
+        clip_lengths = [len(clip) for clip in clips]
 
         annotations: List[Annotation] = []
         clip_prompt = build_prompt(self.cfg.model.language)
         batch_size = max(1, int(getattr(self.cfg.model, "batch_size", 1)))
         max_batch_frames = int(getattr(self.cfg.model, "max_batch_frames", 0) or 0)
 
-        t_gen_start = time.perf_counter()
+        generation_started = time.perf_counter()
         buckets = _bucket_indices_by_len(clips)
 
-        for L in sorted(buckets.keys()):
-            idxs = buckets[L]
+        for clip_len in sorted(buckets.keys()):
+            indices = buckets[clip_len]
             effective_batch = batch_size
             if max_batch_frames > 0:
-                effective_batch = max(1, min(batch_size, max_batch_frames // max(1, int(L))))
-            for batch_start in range(0, len(idxs), effective_batch):
-                batch_idxs = idxs[batch_start: batch_start + effective_batch]
-                batch_paths: List[List[Path]] = [[Path(p) for p in clips[i]] for i in batch_idxs]
-                batch_ts = [clip_timestamps[i] for i in batch_idxs]
+                effective_batch = max(1, min(batch_size, max_batch_frames // max(1, int(clip_len))))
+            for batch_start in range(0, len(indices), effective_batch):
+                batch_indices = indices[batch_start : batch_start + effective_batch]
+                batch_paths: List[List[Path]] = [[Path(path) for path in clips[index]] for index in batch_indices]
+                batch_ts = [clip_timestamps[index] for index in batch_indices]
 
                 texts = self.backend.describe_clips_batch(
                     batch_frame_paths=batch_paths,
                     prompt=clip_prompt,
                 )
-
-                lang = self.cfg.model.language
-                texts = [sanitize_clip_text(t, lang=lang) for t in texts]
+                texts = [sanitize_clip_text(text, lang="en") for text in texts]
 
                 for (start, end), text in zip(batch_ts, texts):
                     annotations.append(
@@ -747,50 +587,50 @@ class VideoToTextPipeline:
                         )
                     )
 
-        model_time = time.perf_counter() - t_gen_start
+        model_time = time.perf_counter() - generation_started
 
-        t_post_start = time.perf_counter()
+        post_started = time.perf_counter()
         merged = smooth_annotations(annotations)
-        post_time = time.perf_counter() - t_post_start
+        post_time = time.perf_counter() - post_started
 
         global_summary: Optional[str] = None
         try:
             if merged:
-                subset = merged[:10]
                 summary_prompt = build_global_summary_prompt(
-                    lang=self.cfg.model.language,
+                    lang="en",
                     video_id=video_id,
                     duration_sec=float(video_duration_sec),
-                    merged_anns=subset,
+                    merged_anns=merged[:10],
                 )
                 global_summary = self.backend.generate_text(summary_prompt)
                 if global_summary:
-                    global_summary = sanitize_global_summary(global_summary, lang=self.cfg.model.language)
+                    global_summary = sanitize_global_summary(global_summary, lang="en")
         except Exception:
             global_summary = None
 
-        extra: Dict[str, Any] = {}
-        extra["clip_stats"] = {
-            "num_clips": int(num_clips),
-            "num_frames": int(num_frames),
-            "frames_min": int(min(clip_lengths)) if clip_lengths else 0,
-            "frames_max": int(max(clip_lengths)) if clip_lengths else 0,
-            "frames_avg": float(sum(clip_lengths) / len(clip_lengths)) if clip_lengths else 0.0,
-        }
-        extra["pipeline"] = {
-            "batch_size": int(batch_size),
-            "max_batch_frames": int(getattr(self.cfg.model, "max_batch_frames", 0) or 0),
-            "attn_implementation": str(getattr(self.cfg.model, "attn_implementation", "auto")),
-            "torch_compile": bool(getattr(self.cfg.runtime, "torch_compile", False)),
-            "torch_compile_mode": str(getattr(self.cfg.runtime, "torch_compile_mode", "")),
-            "autocast_infer": bool(getattr(self.cfg.runtime, "autocast_infer", True)),
-            "dtype": str(getattr(self.cfg.model, "dtype", "")),
+        extra: Dict[str, Any] = {
+            "clip_stats": {
+                "num_clips": int(num_clips),
+                "num_frames": int(num_frames),
+                "frames_min": int(min(clip_lengths)) if clip_lengths else 0,
+                "frames_max": int(max(clip_lengths)) if clip_lengths else 0,
+                "frames_avg": float(sum(clip_lengths) / len(clip_lengths)) if clip_lengths else 0.0,
+            },
+            "pipeline": {
+                "batch_size": int(batch_size),
+                "max_batch_frames": int(getattr(self.cfg.model, "max_batch_frames", 0) or 0),
+                "attn_implementation": str(getattr(self.cfg.model, "attn_implementation", "auto")),
+                "torch_compile": bool(getattr(self.cfg.runtime, "torch_compile", False)),
+                "torch_compile_mode": str(getattr(self.cfg.runtime, "torch_compile_mode", "")),
+                "autocast_infer": bool(getattr(self.cfg.runtime, "autocast_infer", True)),
+                "dtype": str(getattr(self.cfg.model, "dtype", "")),
+                "base_generation_lang": "en",
+            },
         }
         if global_summary:
             extra["global_summary"] = global_summary
 
         total_time = float(preprocess_time_sec) + float(model_time) + float(post_time)
-
         metrics = RunMetrics(
             video_id=video_id,
             language=str(getattr(self.cfg.model, "language", "") or ""),
@@ -804,6 +644,4 @@ class VideoToTextPipeline:
             total_time_sec=float(total_time),
             extra=extra or None,
         )
-
         return merged, metrics
-

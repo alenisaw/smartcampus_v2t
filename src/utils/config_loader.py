@@ -1,10 +1,10 @@
 # src/utils/config_loader.py
 """
-Profile-aware configuration loader for SmartCampus V2T.
+Config loader for SmartCampus V2T.
 
 Purpose:
-- Resolve one profile config plus optional variant overrides.
-- Return both a typed config object and the merged raw config used to build it.
+- Resolve profile and variant YAML inputs into typed effective runtime config.
+- Keep raw config merging, path resolution, and validation in one module.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import yaml
 
-from src.pipeline.pipeline_config import (
+from src.pipeline.config import (
     BackendConfig,
     ClipsConfig,
     ExperimentConfig,

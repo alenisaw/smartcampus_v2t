@@ -1,10 +1,10 @@
 # backend/job_control.py
 """
-Shared job and queue control helpers for the backend worker.
+Job control helpers for SmartCampus V2T backend.
 
 Purpose:
-- Keep queue, lock, lease, and job-state file operations in one place.
-- Let worker and executor modules reuse the same control primitives.
+- Centralize job state, queue lock, lease, and webhook side effects.
+- Provide one shared control surface for worker and executor modules.
 """
 
 from __future__ import annotations

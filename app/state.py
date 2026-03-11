@@ -1,7 +1,12 @@
 # app/state.py
 """
-Session-backed UI state for SmartCampus V2T Streamlit app.
+Session-backed UI state for SmartCampus V2T.
+
+Purpose:
+- Define the Streamlit session state contract used by the operator UI.
+- Keep transient UI state handling separate from rendering logic.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass

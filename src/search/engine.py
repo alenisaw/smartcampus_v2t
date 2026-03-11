@@ -1,25 +1,19 @@
-# search/query_engine.py
+# src/search/engine.py
 """
-Hybrid Query Engine for SmartCampus V2T.
+Search query engine for SmartCampus V2T.
 
-Loads defaults from configs/profiles/main.yaml:
-- paths.indexes_dir
-- search.embed_model_name
-- search weights/candidates/fusion/dedupe
-and uses search_config_fingerprint(cfg) to resolve versioned index dir.
-
-Uses dense_valid.npy to avoid dense scoring over invalid/zero embeddings.
+Purpose:
+- Execute hybrid retrieval, deduplication, filtering, and reranking over built indexes.
+- Provide the runtime search surface used by backend and evaluation scripts.
 """
 
 from __future__ import annotations
 
-import heapq
 import logging
 import sys
 import time
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import numpy as np
 
@@ -30,335 +24,36 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.utils.config_loader import load_pipeline_config
 
-from .index_builder import (
-    HybridIndex,
-    MODEL_NAME_DEFAULT,
-    _tokenize,
-    _looks_like_transformers_model,
-    build_text_embedder,
+from .embed import MODEL_NAME_DEFAULT, build_text_embedder, looks_like_transformers_model as _looks_like_transformers_model
+from .builder import (
     load_index,
     resolve_index_dir,
     search_config_fingerprint,
 )
+from .rank import (
+    as_str_set as _as_str_set,
+    build_reranker as _build_reranker,
+    dedupe_time_hits_bucket as _dedupe_time_hits_bucket,
+    dedupe_time_hits_overlap_nms as _dedupe_time_hits_overlap_nms,
+    dense_scores_for_indices as _dense_scores_for_indices,
+    heuristic_rerank_bonus as _heuristic_rerank_bonus,
+    in_sorted as _in_sorted,
+    minmax_norm_from_dict as _minmax_norm_from_dict,
+    minmax_norm_on_indices as _minmax_norm_on_indices,
+    rrf_fuse as _rrf_fuse,
+    topk_dense_over_indices as _topk_dense_over_indices,
+    topn_indices as _topn_indices,
+)
+from .text import tokenize as _tokenize
+from .types import HybridIndex, SearchResult
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_CFG_PATH = PROJECT_ROOT / "configs" / "profiles" / "main.yaml"
 
-
-@dataclass
-class SearchResult:
-    score: float
-    sparse_score: float
-    dense_score: float
-    video_id: str
-    language: str
-    start_sec: float
-    end_sec: float
-    description: str
-    source_id: str
-    segment_id: Optional[str] = None
-    event_type: Optional[str] = None
-    risk_level: Optional[str] = None
-    tags: Optional[List[str]] = None
-    objects: Optional[List[str]] = None
-    people_count_bucket: Optional[str] = None
-    motion_type: Optional[str] = None
-    anomaly_flag: Optional[bool] = None
-    variant: Optional[str] = None
-    extra: Optional[Dict[str, Any]] = None
-
-
-def _minmax_norm_from_dict(values: Dict[int, float], indices: Sequence[int]) -> Dict[int, float]:
-    if not indices:
-        return {}
-    xs = [float(values.get(i, float("-inf"))) for i in indices]
-    if not xs or all(v == float("-inf") for v in xs):
-        return {int(i): 0.0 for i in indices}
-    mn = min(xs)
-    mx = max(xs)
-    if mx - mn < 1e-9:
-        return {int(i): 0.0 for i in indices}
-    denom = mx - mn
-    return {int(i): (float(values.get(i, mn)) - mn) / denom for i in indices}
-
-
-def _minmax_norm_on_indices(values: Sequence[float], indices: Sequence[int]) -> Dict[int, float]:
-    if not indices:
-        return {}
-    xs = [float(values[i]) for i in indices]
-    mn = min(xs)
-    mx = max(xs)
-    if mx - mn < 1e-9:
-        return {int(i): 0.0 for i in indices}
-    denom = mx - mn
-    return {int(i): (float(values[i]) - mn) / denom for i in indices}
-
-
-def _topn_indices(scores: Sequence[float], indices: Sequence[int], n: int) -> List[int]:
-    if n <= 0 or not indices:
-        return []
-    if n >= len(indices):
-        return sorted(indices, key=lambda i: scores[i], reverse=True)
-    return heapq.nlargest(n, indices, key=lambda i: scores[i])
-
-
-def _rrf_fuse(
-    dense_scores: Dict[int, float],
-    sparse_scores: Dict[int, float],
-    candidate_indices: Sequence[int],
-    k: int = 60,
-    w_sparse: float = 0.45,
-    w_dense: float = 0.55,
-) -> Dict[int, float]:
-    cand = list(candidate_indices)
-
-    dense_ranked = sorted(cand, key=lambda i: dense_scores.get(i, float("-inf")), reverse=True)
-    sparse_ranked = sorted(cand, key=lambda i: sparse_scores.get(i, float("-inf")), reverse=True)
-
-    dense_rank: Dict[int, int] = {i: r for r, i in enumerate(dense_ranked, start=1)}
-    sparse_rank: Dict[int, int] = {i: r for r, i in enumerate(sparse_ranked, start=1)}
-
-    fused: Dict[int, float] = {}
-    for i in cand:
-        rd = dense_rank.get(i, len(cand) + 1)
-        rs = sparse_rank.get(i, len(cand) + 1)
-        fused[i] = (w_dense / (k + rd)) + (w_sparse / (k + rs))
-    return fused
-
-
-def _interval_iou(a0: float, a1: float, b0: float, b1: float) -> float:
-    inter = max(0.0, min(a1, b1) - max(a0, b0))
-    if inter <= 0:
-        return 0.0
-    union = max(a1, b1) - min(a0, b0)
-    return inter / (union + 1e-9)
-
-
-def _dedupe_time_hits_bucket(hits: List[SearchResult], tol_sec: float = 1.0) -> List[SearchResult]:
-    out: List[SearchResult] = []
-    seen = set()
-    tol = max(1e-6, float(tol_sec))
-    for h in hits:
-        key = (h.video_id, int(round(h.start_sec / tol)), int(round(h.end_sec / tol)))
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(h)
-    return out
-
-
-def _dedupe_time_hits_overlap_nms(hits: List[SearchResult], overlap_thr: float = 0.7) -> List[SearchResult]:
-    kept: List[SearchResult] = []
-    thr = float(overlap_thr)
-    for h in hits:
-        ok = True
-        for k in kept:
-            if h.video_id != k.video_id:
-                continue
-            if _interval_iou(h.start_sec, h.end_sec, k.start_sec, k.end_sec) >= thr:
-                ok = False
-                break
-        if ok:
-            kept.append(h)
-    return kept
-
-
-def _topk_dense_over_indices(
-    emb: np.ndarray,
-    q_vec: np.ndarray,
-    valid_indices: Sequence[int],
-    k: int,
-    chunk_size: int = 4096,
-) -> List[int]:
-    k = int(k)
-    if k <= 0 or not valid_indices:
-        return []
-    k = min(k, len(valid_indices))
-
-    heap: List[Tuple[float, int]] = []
-    q = np.asarray(q_vec, dtype=np.float32)
-
-    n = len(valid_indices)
-    for s in range(0, n, int(chunk_size)):
-        chunk = valid_indices[s : s + int(chunk_size)]
-        if not chunk:
-            continue
-        idx = np.asarray(chunk, dtype=np.int64)
-        mat = emb[idx]
-        if mat.dtype != np.float32:
-            mat = mat.astype(np.float32, copy=False)
-        scores = mat @ q
-        for gi, sc in zip(chunk, scores.tolist()):
-            if len(heap) < k:
-                heapq.heappush(heap, (float(sc), int(gi)))
-            elif float(sc) > heap[0][0]:
-                heapq.heapreplace(heap, (float(sc), int(gi)))
-
-    heap.sort(key=lambda x: x[0], reverse=True)
-    return [int(gi) for _sc, gi in heap]
-
-
-def _dense_scores_for_indices(emb: np.ndarray, q_vec: np.ndarray, indices: Sequence[int]) -> Dict[int, float]:
-    if not indices:
-        return {}
-    idx = np.asarray(list(indices), dtype=np.int64)
-    mat = emb[idx]
-    if mat.dtype != np.float32:
-        mat = mat.astype(np.float32, copy=False)
-    q = np.asarray(q_vec, dtype=np.float32)
-    scores = (mat @ q).astype(np.float32, copy=False)
-    return {int(i): float(s) for i, s in zip(idx.tolist(), scores.tolist())}
-
-
 def _load_cfg(config_path: Optional[Path]) -> Any:
     p = Path(config_path) if config_path is not None else DEFAULT_CFG_PATH
     return load_pipeline_config(p)
-
-
-def _in_sorted(sorted_unique: np.ndarray, values: np.ndarray) -> np.ndarray:
-    """
-    Safe membership check for sorted_unique (sorted, unique int64) against values (int64).
-    Returns boolean mask aligned with values.
-    """
-    if sorted_unique.size == 0 or values.size == 0:
-        return np.zeros((values.size,), dtype=np.bool_)
-    pos = np.searchsorted(sorted_unique, values)
-    in_range = pos < sorted_unique.size
-    out = np.zeros((values.size,), dtype=np.bool_)
-    if np.any(in_range):
-        vv = values[in_range]
-        pp = pos[in_range]
-        out[in_range] = (sorted_unique[pp] == vv)
-    return out
-
-
-def _as_str_set(values: Any) -> Set[str]:
-    out: Set[str] = set()
-    if isinstance(values, list):
-        for item in values:
-            text = str(item or "").strip().lower()
-            if text:
-                out.add(text)
-    elif values is not None:
-        text = str(values).strip().lower()
-        if text:
-            out.add(text)
-    return out
-
-
-def _heuristic_rerank_bonus(query_tokens: Sequence[str], hit: "SearchResult") -> float:
-    """Compute a deterministic rerank bonus from structured metadata and text overlap."""
-
-    if not query_tokens:
-        return 0.0
-
-    qset = {str(token).strip().lower() for token in query_tokens if str(token).strip()}
-    if not qset:
-        return 0.0
-
-    bonus = 0.0
-    desc_tokens = set(_tokenize(str(hit.description or ""), normalize=False))
-    if desc_tokens:
-        bonus += 0.30 * (len(qset & desc_tokens) / max(1, len(qset)))
-
-    for value, weight in (
-        (hit.event_type, 0.30),
-        (hit.risk_level, 0.18),
-        (hit.people_count_bucket, 0.12),
-        (hit.motion_type, 0.12),
-    ):
-        text = str(value or "").strip().lower()
-        if text and text in qset:
-            bonus += weight
-
-    tag_hits = qset & {str(x).strip().lower() for x in (hit.tags or []) if str(x).strip()}
-    if tag_hits:
-        bonus += 0.24 * (len(tag_hits) / max(1, len(qset)))
-
-    object_hits = qset & {str(x).strip().lower() for x in (hit.objects or []) if str(x).strip()}
-    if object_hits:
-        bonus += 0.18 * (len(object_hits) / max(1, len(qset)))
-
-    if hit.anomaly_flag and ({"anomaly", "alert", "warning", "critical"} & qset):
-        bonus += 0.14
-
-    return float(bonus)
-
-
-class TransformersReranker:
-    """Score query-document pairs with a transformers sequence-classification model."""
-
-    def __init__(self, model_name: str, device: Optional[str] = None):
-        try:
-            import torch
-            from transformers import AutoModelForSequenceClassification, AutoTokenizer
-        except Exception as exc:
-            raise RuntimeError("transformers reranker dependencies are not installed.") from exc
-
-        self.model_name = str(model_name)
-        self._torch = torch
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, trust_remote_code=True)
-        self.model = AutoModelForSequenceClassification.from_pretrained(self.model_name, trust_remote_code=True)
-        self.model.eval()
-
-        device_name = str(device or "").strip()
-        if device_name:
-            try:
-                self.model.to(device_name)
-            except Exception:
-                pass
-
-    def score_pairs(self, query: str, passages: Sequence[str]) -> List[float]:
-        """Return one rerank score per passage."""
-
-        if not passages:
-            return []
-
-        model_device = None
-        try:
-            model_device = next(self.model.parameters()).device
-        except Exception:
-            model_device = None
-
-        encoded = self.tokenizer(
-            [str(query or "")] * len(passages),
-            [str(p or "") for p in passages],
-            padding=True,
-            truncation=True,
-            max_length=512,
-            return_tensors="pt",
-        )
-        if model_device is not None:
-            for key, value in encoded.items():
-                try:
-                    encoded[key] = value.to(model_device)
-                except Exception:
-                    pass
-
-        with self._torch.inference_mode():
-            outputs = self.model(**encoded)
-            logits = getattr(outputs, "logits", outputs[0])
-            if len(getattr(logits, "shape", ())) > 1 and int(logits.shape[-1]) > 1:
-                logits = logits[:, 0]
-            else:
-                logits = logits.reshape(-1)
-        return [float(x) for x in logits.detach().cpu().tolist()]
-
-
-def _build_reranker(model_name: str, backend: str, device: Optional[str]) -> Optional[TransformersReranker]:
-    """Build a model reranker when possible, otherwise return None for heuristic fallback."""
-
-    backend_name = str(backend or "auto").strip().lower() or "auto"
-    if backend_name not in {"auto", "transformers"}:
-        return None
-    if backend_name == "auto" and not _looks_like_transformers_model(model_name):
-        return None
-    try:
-        return TransformersReranker(model_name=model_name, device=device)
-    except Exception:
-        return None
-
 
 class QueryEngine:
     def __init__(
@@ -475,7 +170,12 @@ class QueryEngine:
         reranker_backend_name = str(
             reranker_backend if reranker_backend is not None else getattr(s, "reranker_backend", "auto")
         ).strip().lower() or "auto"
-        self.reranker = _build_reranker(reranker_name, reranker_backend_name, device=device)
+        self.reranker = _build_reranker(
+            reranker_name,
+            reranker_backend_name,
+            device=device,
+            looks_like_transformers_model=_looks_like_transformers_model,
+        )
         self.reranker_backend = (
             "transformers"
             if self.reranker is not None
@@ -756,17 +456,17 @@ class QueryEngine:
                         rerank_mode = "transformers"
                     else:
                         prefix.sort(
-                            key=lambda hit: float(hit.score) + _heuristic_rerank_bonus(q_tokens, hit),
+                            key=lambda hit: float(hit.score) + _heuristic_rerank_bonus(q_tokens, hit, _tokenize),
                             reverse=True,
                         )
                 except Exception:
                     prefix.sort(
-                        key=lambda hit: float(hit.score) + _heuristic_rerank_bonus(q_tokens, hit),
+                        key=lambda hit: float(hit.score) + _heuristic_rerank_bonus(q_tokens, hit, _tokenize),
                         reverse=True,
                     )
             else:
                 prefix.sort(
-                    key=lambda hit: float(hit.score) + _heuristic_rerank_bonus(q_tokens, hit),
+                    key=lambda hit: float(hit.score) + _heuristic_rerank_bonus(q_tokens, hit, _tokenize),
                     reverse=True,
                 )
             results = prefix + suffix

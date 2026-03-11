@@ -4,8 +4,7 @@ Background worker entrypoint for SmartCampus V2T.
 
 Purpose:
 - Poll the filesystem queue and lease jobs safely.
-- Expand experimental batch jobs into variant runs.
-- Dispatch index, translate, and process jobs to dedicated executors.
+- Dispatch process, translate, and index work to dedicated executors.
 """
 
 from __future__ import annotations

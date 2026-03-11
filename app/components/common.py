@@ -1,4 +1,11 @@
-"""Shared mid-level UI components used across Streamlit pages."""
+# app/components/common.py
+"""
+Shared UI components for SmartCampus V2T.
+
+Purpose:
+- Render reusable mid-level Streamlit blocks across multiple pages.
+- Keep repeated UI patterns out of page modules.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +13,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 import streamlit as st
 
-from app.lib.formatters import E, clip_text, collect_scene_capsules, first_sentence, hms, hit_capsules, mmss
+from app.lib.formatters import E, clip_text, collect_scene_capsules, first_sentence, hms, hit_capsules, humanize_token, mmss
 from app.lib.i18n import Tget
 
 
@@ -40,41 +47,30 @@ def render_status_overview(T: Dict[str, Any], queue: Dict[str, Any], index_statu
     queued = queue.get("queued") if isinstance(queue, dict) else []
     status = queue.get("status") if isinstance(queue, dict) else {}
     index_langs = index_status.get("languages") if isinstance(index_status, dict) else {}
+    index_error = str(index_status.get("last_error") or "").strip() if isinstance(index_status, dict) else ""
 
     cards = [
         (
-            "Queue",
-            "Paused" if bool((status or {}).get("paused")) else "Active",
-            f"{len(queued) if isinstance(queued, list) else 0} queued",
+            Tget(T, "queue_title", "Queue"),
+            Tget(T, "paused", "Paused") if bool((status or {}).get("paused")) else Tget(T, "active", "Active"),
+            f"{len(queued) if isinstance(queued, list) else 0} {Tget(T, 'queued_short', 'queued')}",
         ),
+        (Tget(T, "home_running", "Running"), str((running or {}).get("job_type") or "-"), str((running or {}).get("stage") or Tget(T, "idle", "idle"))),
         (
-            "Running",
-            str((running or {}).get("video_id") or "-"),
-            str((running or {}).get("stage") or "idle"),
-        ),
-        (
-            "Index",
-            f"{len(index_langs) if isinstance(index_langs, dict) else 0} language views",
-            "ready" if not index_status.get("last_error") else "error",
+            Tget(T, "home_index", "Index views"),
+            str(len(index_langs) if isinstance(index_langs, dict) else 0),
+            "ready" if not index_error else "error",
         ),
     ]
 
-    html_cards = []
-    for title, value, meta in cards:
-        html_cards.append(
-            f"""
-            <div class="overview-card">
-                <div class="overview-label">{E(title)}</div>
-                <div class="overview-value">{E(value)}</div>
-                <div class="overview-meta">{E(meta)}</div>
-            </div>
-            """
-        )
-    st.markdown(f"<div class='overview-grid'>{''.join(html_cards)}</div>", unsafe_allow_html=True)
+    cols = st.columns(len(cards), gap="small")
+    for col, (title, value, meta) in zip(cols, cards):
+        with col:
+            st.metric(title, value, meta, delta_color="off")
 
     if isinstance(running, dict) and running.get("job_id"):
         st.markdown(
-            f"<div class='queue-inline'>{E(Tget(T, 'running_now', 'Running now'))}: {E(str(running.get('video_id') or ''))} · {E(str(running.get('stage') or ''))}</div>",
+            f"<div class='queue-inline'>{E(Tget(T, 'running_now', 'Running now'))}: {E(str(running.get('video_id') or ''))} | {E(str(running.get('stage') or ''))}</div>",
             unsafe_allow_html=True,
         )
 
@@ -88,22 +84,16 @@ def render_outputs_overview(T: Dict[str, Any], outputs: Dict[str, Any], selected
     languages = manifest.get("languages") if isinstance(manifest.get("languages"), dict) else {}
 
     cards = [
-        ("Profile", str(run_manifest.get("profile") or "main")),
-        ("Variant", str(outputs.get("variant") or "base")),
-        ("Language", str(selected_lang or "en")),
-        ("Config", str(run_manifest.get("config_fingerprint") or "-")[:12] or "-"),
+        (Tget(T, "profile", "Profile"), str(run_manifest.get("profile") or "main")),
+        (Tget(T, "variant", "Variant"), str(outputs.get("variant") or "base")),
+        (Tget(T, "output_language", "Output language"), str(selected_lang or "en")),
+        (Tget(T, "config_label", "Config"), str(run_manifest.get("config_fingerprint") or "-")[:12] or "-"),
     ]
-    html_cards = []
-    for title, value in cards:
-        html_cards.append(
-            f"""
-            <div class="surface-card compact">
-                <div class="surface-label">{E(title)}</div>
-                <div class="surface-value">{E(value)}</div>
-            </div>
-            """
-        )
-    st.markdown(f"<div class='surface-grid'>{''.join(html_cards)}</div>", unsafe_allow_html=True)
+    cols = st.columns(len(cards), gap="small")
+    for col, (title, value) in zip(cols, cards):
+        with col:
+            st.caption(title)
+            st.markdown(f"**{value}**")
 
     if languages:
         status_items = []
@@ -112,18 +102,6 @@ def render_outputs_overview(T: Dict[str, Any], outputs: Dict[str, Any], selected
                 continue
             status_items.append(f"{lang}: {payload.get('status', 'unknown')}")
         render_capsules(status_items)
-
-    stage_stats = metrics.get("stage_stats_sec") if isinstance(metrics.get("stage_stats_sec"), dict) else {}
-    if stage_stats:
-        rows: List[str] = []
-        for stage_name, payload in stage_stats.items():
-            if not isinstance(payload, dict):
-                continue
-            mean_sec = payload.get("mean_sec")
-            if mean_sec is None:
-                continue
-            rows.append(f"{stage_name}: {float(mean_sec):.2f}s")
-        render_stat_row(rows)
 
 
 def render_metrics_summary(T: Dict[str, Any], outputs: Dict[str, Any]) -> None:
@@ -137,37 +115,44 @@ def render_metrics_summary(T: Dict[str, Any], outputs: Dict[str, Any]) -> None:
     translations = metrics.get("translations") if isinstance(metrics.get("translations"), dict) else {}
     indexing = metrics.get("indexing") if isinstance(metrics.get("indexing"), dict) else {}
 
-    cards = [
-        ("Frames", metrics.get("num_frames")),
-        ("Clips", metrics.get("num_clips")),
-        ("Process", f"{float(metrics.get('total_time_sec') or 0.0):.2f}s" if metrics.get("total_time_sec") is not None else "-"),
-        ("Translations", len(translations)),
-        ("Index views", len(indexing)),
-    ]
-    html_cards = []
-    for title, value in cards:
-        html_cards.append(
-            f"""
-            <div class="metric-card">
-                <div class="metric-label">{E(title)}</div>
-                <div class="metric-value">{E(value)}</div>
-            </div>
-            """
-        )
-    st.markdown(f"<div class='metric-grid'>{''.join(html_cards)}</div>", unsafe_allow_html=True)
-
     extra = metrics.get("extra") if isinstance(metrics.get("extra"), dict) else {}
-    detail_items = []
+    stat_items = []
     for label, value in (
-        ("decode", extra.get("decode_backend")),
-        ("source fps", extra.get("source_fps")),
-        ("processed fps", extra.get("processed_fps")),
-        ("drop dark", extra.get("dark_drop_ratio")),
-        ("drop lazy", extra.get("lazy_drop_ratio")),
+        (Tget(T, "metric_frames", "Frames"), metrics.get("num_frames")),
+        (Tget(T, "metric_clips", "Clips"), metrics.get("num_clips")),
+        (Tget(T, "metric_total_time", "Total"), f"{float(metrics.get('total_time_sec') or 0.0):.2f}s" if metrics.get("total_time_sec") is not None else None),
+        (Tget(T, "metric_translations", "Translations"), len(translations) if translations else None),
+        (Tget(T, "metric_index_views", "Index views"), len(indexing) if indexing else None),
+        (Tget(T, "metric_decode", "Decode"), extra.get("decode_backend")),
+        (Tget(T, "metric_source_fps", "Source FPS"), extra.get("source_fps")),
+        (Tget(T, "metric_processed_fps", "Processed FPS"), extra.get("processed_fps")),
+        (Tget(T, "metric_dark_drop", "Dark drop"), extra.get("dark_drop_ratio")),
+        (Tget(T, "metric_lazy_drop", "Lazy drop"), extra.get("lazy_drop_ratio")),
     ):
-        if value not in (None, ""):
-            detail_items.append(f"{label}: {value}")
-    render_stat_row(detail_items)
+        if value not in (None, "", 0):
+            stat_items.append(f"{label}: {value}")
+
+    stage_stats = metrics.get("stage_stats_sec") if isinstance(metrics.get("stage_stats_sec"), dict) else {}
+    stage_label_map = {
+        "preprocess_video": Tget(T, "stage_preprocess_video", "Video preprocess"),
+        "build_clips": Tget(T, "stage_build_clips", "Build clips"),
+        "caption_clips": Tget(T, "stage_caption_clips", "Caption clips"),
+        "structure_segments": Tget(T, "stage_structure_segments", "Structure segments"),
+        "generate_summary": Tget(T, "stage_generate_summary", "Generate summary"),
+        "translate_outputs": Tget(T, "stage_translate_outputs", "Translate outputs"),
+        "build_index": Tget(T, "stage_build_index", "Build index"),
+    }
+    for stage_name, payload in stage_stats.items():
+        if not isinstance(payload, dict):
+            continue
+        mean_sec = payload.get("mean_sec")
+        if mean_sec is None:
+            continue
+        label = stage_label_map.get(stage_name, humanize_token(stage_name))
+        stat_items.append(f"{label}: {float(mean_sec):.2f}s")
+
+    st.markdown(f"<div class='metric-summary-line'>{E(Tget(T, 'metrics', 'Metrics'))}:</div>", unsafe_allow_html=True)
+    render_stat_row(stat_items)
 
 
 def render_scene_panel(T: Dict[str, Any], outputs: Dict[str, Any], video_meta: Dict[str, Any]) -> None:
@@ -211,22 +196,12 @@ def render_segment_cards(T: Dict[str, Any], annotations: List[Dict[str, Any]], s
         start_sec = float(ann.get("start_sec", 0.0) or 0.0)
         end_sec = float(ann.get("end_sec", 0.0) or 0.0)
         caption = str(ann.get("normalized_caption") or ann.get("description") or "").strip()
-        segment_id = str(ann.get("segment_id") or "").strip()
-        cols = st.columns([5, 1], gap="small")
-        with cols[0]:
-            st.markdown(
-                f"""
-                <div class="segment-card">
-                    <div class="segment-time">{E(mmss(start_sec))} - {E(mmss(end_sec))}</div>
-                    <div class="segment-title">{E(segment_id or f"SEGMENT {idx + 1}")}</div>
-                    <div class="segment-text">{E(clip_text(caption, 220))}</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-        with cols[1]:
-            if st.button(Tget(T, "open_clip", "Open"), key=f"{session_key}_{idx}", use_container_width=True):
-                st.session_state["video_seek_sec"] = int(start_sec)
+        st.markdown("<div class='segment-card'>", unsafe_allow_html=True)
+        if st.button(f"{mmss(start_sec)} - {mmss(end_sec)}", key=f"{session_key}_{idx}", use_container_width=True):
+            st.session_state["video_seek_sec"] = int(start_sec)
+            st.rerun()
+        st.markdown(f"<div class='segment-text'>{E(clip_text(caption, 240))}</div>", unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
 
 
 def render_search_results(T: Dict[str, Any], hits: List[Dict[str, Any]], *, open_prefix: str) -> Optional[Dict[str, Any]]:
@@ -255,14 +230,14 @@ def render_search_results(T: Dict[str, Any], hits: List[Dict[str, Any]], *, open
         )
         render_capsules(hit_capsules(hit))
         st.caption(
-            f"hybrid={float(hit.get('score', 0.0) or 0.0):.3f} · "
-            f"sparse={float(hit.get('sparse_score', 0.0) or 0.0):.3f} · "
+            f"hybrid={float(hit.get('score', 0.0) or 0.0):.3f} | "
+            f"sparse={float(hit.get('sparse_score', 0.0) or 0.0):.3f} | "
             f"dense={float(hit.get('dense_score', 0.0) or 0.0):.3f}"
         )
         if st.button(Tget(T, "open_clip", "Open"), key=f"{open_prefix}_{idx}", use_container_width=True):
             st.session_state["selected_video_id"] = str(hit.get("video_id") or "")
             st.session_state["video_seek_sec"] = int(float(hit.get("start_sec", 0.0) or 0.0))
-            st.query_params["tab"] = "storage"
+            st.query_params["tab"] = "video"
             st.rerun()
     return selected_hit
 

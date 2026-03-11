@@ -1,22 +1,10 @@
 # src/utils/video_store.py
 """
-Helpers for per-video storage layout with optional variant-scoped outputs.
+Video storage helpers for SmartCampus V2T.
 
-Layout:
-data/videos/<video_id>/
-  raw/<filename>
-  cache/...
-  outputs/
-    segments/<lang>.jsonl.zst
-    summaries/<lang>.json
-    metrics.json
-    manifest.json
-    variants/<variant_id>/
-      segments/<lang>.jsonl.zst
-      summaries/<lang>.json
-      metrics.json
-      manifest.json
-  manifest.json
+Purpose:
+- Manage per-video artifact paths, manifests, and output persistence helpers.
+- Keep storage layout logic consistent across pipeline, backend, and UI code.
 """
 
 from __future__ import annotations

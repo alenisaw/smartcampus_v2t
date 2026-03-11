@@ -1,6 +1,12 @@
+# scripts/collect_metrics.py
 """
-Export a research-ready metrics bundle for all stored video runs.
+Research metrics bundle exporter for SmartCampus V2T.
+
+Purpose:
+- Aggregate stored run artifacts into research-friendly CSV and JSON outputs.
+- Compute runtime, stage, translation, and comparison-oriented metrics snapshots.
 """
+
 from __future__ import annotations
 
 import argparse

@@ -1,15 +1,10 @@
 # src/preprocessing/video_io.py
 """
-Video preprocessing module for SmartCampus V2T.
+Video preprocessing for SmartCampus V2T.
 
-Features:
-- robust FPS normalization for unstable or variable-FPS videos
-- adaptive motion threshold based on real scene dynamics
-- frame sampling and dark-frame filtering with optional CLAHE brighten
-- detection and skipping of near-identical (lazy) frames
-- DNN-based face anonymization (optimized: detect faces not every frame + reuse boxes)
-- letterbox resize for stable aspect ratio
-- prepared cache: reuse prepared frames if video+video-configs fingerprints match
+Purpose:
+- Decode, normalize, filter, and persist frames for downstream pipeline stages.
+- Handle FPS normalization, anonymization, quality filtering, and cached video meta.
 """
 
 from __future__ import annotations
@@ -27,7 +22,7 @@ import cv2
 import numpy as np
 
 from src.core.types import FrameInfo, VideoMeta
-from src.pipeline.pipeline_config import PipelineConfig
+from src.pipeline.config import PipelineConfig
 from src.utils.video_store import cache_dir as video_cache_dir
 from src.utils.video_store import find_video_file
 

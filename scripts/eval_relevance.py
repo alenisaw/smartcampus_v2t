@@ -1,12 +1,12 @@
+# scripts/eval_relevance.py
 """
-Offline retrieval relevance evaluator for SmartCampus experiment runs.
+Offline relevance evaluator for SmartCampus V2T.
 
-Features:
-- Loads a local query+labels dataset.
-- Evaluates retrieval on one or more targets (profile/variant/video).
-- Computes P@K, Recall@K, nDCG@K, and MRR.
-- Supports targets from an experiment manifest produced by run_experiment_matrix.py.
+Purpose:
+- Evaluate retrieval quality against local query and label datasets.
+- Compute ranking metrics such as P@K, Recall@K, nDCG@K, and MRR.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -24,8 +24,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.deps import get_backend_paths, load_cfg_and_raw, now_ts
-from src.search.index_builder import load_index, resolve_index_dir, search_config_fingerprint
-from src.search.query_engine import QueryEngine
+from src.search.builder import load_index, resolve_index_dir, search_config_fingerprint
+from src.search.engine import QueryEngine
 from src.utils.video_store import (
     list_videos,
     read_segments,
