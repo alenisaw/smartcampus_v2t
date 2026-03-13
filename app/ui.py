@@ -16,7 +16,6 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 import streamlit as st
-import streamlit.components.v1 as components
 
 from app.api_client import BackendClient
 from app.lib.formatters import (
@@ -37,19 +36,15 @@ from app.lib.i18n import Tget, get_T, load_ui_text
 from app.lib.media import ensure_browser_video, get_video_meta, img_to_data_uri, load_and_apply_css, mtime
 
 PAGE_SIZE = 8
-CAROUSEL_INTERVAL_SEC = 12.0
 
-ICON_SEARCH = "⌕"
 ICON_CLEAR = "⌫"
 ICON_REFRESH = "↻"
 ICON_START = "▶"
 ICON_PAUSE = "⏸"
 ICON_RESUME = "▷"
-ICON_SEND = "➤"
 ICON_OPEN = "↗"
 ICON_DELETE = "✕"
 ICON_CONFIRM = "✓"
-ICON_SELECT = "◎"
 ICON_UP = "↑"
 ICON_DOWN = "↓"
 ICON_PREV = "◀"
@@ -67,17 +62,6 @@ def _loc(ru: str, kz: str, en: str, *, lang: Optional[str] = None) -> str:
 
     key = str(lang or _lang()).strip().lower()
     return {"ru": ru, "kz": kz, "en": en}.get(key, en)
-
-
-def _product_subtitle(lang: str) -> str:
-    """Return the localized product subtitle."""
-
-    return _loc(
-        "Многофункциональная аналитическая система событий и видео",
-        "Оқиғалар мен бейнеге арналған көпфункционалды аналитикалық жүйе",
-        "Multifunctional analytics system for events and video",
-        lang=lang,
-    )
 
 
 def _footer_text(lang: str) -> str:
@@ -122,6 +106,78 @@ def _caption(text: str) -> None:
     """Render compact muted copy."""
 
     st.markdown(f"<div class='section-caption'>{E(text)}</div>", unsafe_allow_html=True)
+
+
+def _ui_lang(cfg: Any, default: str = "en") -> str:
+    """Return the active UI language with config fallback."""
+
+    return str(st.session_state.get("ui_lang") or getattr(getattr(cfg, "ui", None), "default_lang", None) or default)
+
+
+def _page_title(title: str) -> None:
+    """Render a consistent page title."""
+
+    st.markdown(f"<div class='page-title'>{E(title)}</div>", unsafe_allow_html=True)
+
+
+def _video_items(client: BackendClient) -> List[Dict[str, Any]]:
+    """Return clean video items from the backend client."""
+
+    return [item for item in client.list_videos() if isinstance(item, dict)]
+
+
+def _video_ids(videos: List[Dict[str, Any]]) -> List[str]:
+    """Return normalized video ids for UI selectors."""
+
+    return [str(item.get("video_id") or "") for item in videos if str(item.get("video_id") or "").strip()]
+
+
+def _session_choice(key: str, options: List[str], *, default: Optional[str] = None) -> str:
+    """Normalize one session-backed choice against the available options."""
+
+    if not options:
+        st.session_state[key] = ""
+        return ""
+    fallback = default if default in options else options[0]
+    value = str(st.session_state.get(key) or fallback)
+    if value not in options:
+        value = fallback
+    st.session_state[key] = value
+    return value
+
+
+def _resolve_video_context(
+    videos: List[Dict[str, Any]],
+    *,
+    video_key: str,
+    variant_key: str,
+    lang_key: str,
+    base_lang: str,
+    allow_empty_video: bool = False,
+) -> Dict[str, Any]:
+    """Resolve video, variant, and language session state for one page."""
+
+    video_ids = _video_ids(videos)
+    video_options = [""] + video_ids if allow_empty_video else video_ids
+    selected_video_id = _session_choice(video_key, video_options, default="" if allow_empty_video else None)
+    selected_item = next((item for item in videos if str(item.get("video_id") or "") == selected_video_id), None) or {}
+
+    variant_tokens = video_variant_tokens(selected_item)
+    current_variant = _session_choice(variant_key, variant_tokens)
+
+    available_languages = collect_available_languages(selected_item, variant_from_token(current_variant))
+    current_lang = _session_choice(lang_key, available_languages or [base_lang], default=base_lang)
+
+    return {
+        "video_ids": video_ids,
+        "video_options": video_options,
+        "selected_video_id": selected_video_id,
+        "selected_item": selected_item,
+        "variant_tokens": variant_tokens,
+        "current_variant": current_variant,
+        "available_languages": available_languages or [base_lang],
+        "current_lang": current_lang,
+    }
 
 
 def soft_note(text: str, kind: str = "info") -> None:
@@ -197,287 +253,6 @@ def render_header(T: Dict[str, Any], labels: List[str], ids: List[str], current_
     except Exception:
         pass
     return str(current_tab)
-
-
-def footer(T: Dict[str, Any], lang: str) -> None:
-    """Render the footer strip."""
-
-    _ = T
-    st.markdown(f"<div class='footer-strip'>{E(_footer_text(lang))}</div>", unsafe_allow_html=True)
-
-
-def _overview_features(lang: str) -> List[Dict[str, str]]:
-    """Return overview feature cards."""
-
-    return [
-        {
-            "tone": "feature-card tone-a",
-            "label": _loc("Обзор системы", "Жүйе шолуы", "System overview", lang=lang),
-            "title": _loc("Понимание контура решения", "Шешім құрылымын түсіну", "Understand the workflow", lang=lang),
-            "copy": _loc(
-                "Интерфейс показывает путь от загрузки видео до поиска событий и итогового отчёта.",
-                "Интерфейс бейненің жүктеуден бастап оқиға іздеу мен қорытынды есепке дейінгі жолын көрсетеді.",
-                "The interface explains how video moves from upload to retrieval and final reporting.",
-                lang=lang,
-            ),
-        },
-        {
-            "tone": "feature-card tone-b",
-            "label": _loc("Хранилище", "Қойма", "Storage", lang=lang),
-            "title": _loc("Библиотека видео", "Бейне кітапханасы", "Video library", lang=lang),
-            "copy": _loc(
-                "Оператор быстро просматривает ролики, выбирает нужный файл и запускает обработку без лишних шагов.",
-                "Оператор бейнелерді тез қарап, керек файлды таңдап, өңдеуді артық қадамсыз іске қосады.",
-                "Operators browse the library, choose a file, and start processing without extra steps.",
-                lang=lang,
-            ),
-        },
-        {
-            "tone": "feature-card tone-c",
-            "label": _loc("Видеоаналитика", "Бейне аналитикасы", "Video analytics", lang=lang),
-            "title": _loc("Разбор одного видео", "Бір бейнені талдау", "Inspect one video", lang=lang),
-            "copy": _loc(
-                "После обработки доступен плеер, описание, статус и компактная временная линия по сегментам.",
-                "Өңдеуден кейін плеер, сипаттама, күй және сегменттер бойынша ықшам уақыт сызығы ашылады.",
-                "After processing, the operator gets a player, a summary, status details, and a compact segment timeline.",
-                lang=lang,
-            ),
-        },
-        {
-            "tone": "feature-card tone-d",
-            "label": _loc("Поиск и отчёты", "Іздеу және есептер", "Search and reports", lang=lang),
-            "title": _loc("Поиск событий и выводы", "Оқиға іздеу және қорытынды", "Retrieve events and report", lang=lang),
-            "copy": _loc(
-                "Результаты поиска, RAG-ассистент и отчёты остаются связанными с найденными фрагментами видео.",
-                "Іздеу нәтижелері, RAG-көмекші және есептер табылған бейне фрагменттерімен байланыста қалады.",
-                "Search results, the RAG assistant, and reports stay grounded in the retrieved video moments.",
-                lang=lang,
-            ),
-        },
-    ]
-
-
-def _overview_stages(lang: str) -> List[Dict[str, str]]:
-    """Return the localized overview pipeline stages."""
-
-    return [
-        {
-            "emoji": "📥",
-            "title": _loc("Загрузка", "Жүктеу", "Ingestion", lang=lang),
-            "short": _loc("Видео попадает в библиотеку и становится доступным для работы.", "Бейне кітапханаға түсіп, жұмысқа дайын болады.", "Video enters the library and becomes available for work.", lang=lang),
-            "copy": _loc(
-                "На первом шаге система фиксирует исходный файл, базовые параметры и создаёт стабильную точку входа для дальнейшей обработки.",
-                "Алғашқы қадамда жүйе бастапқы файлды, негізгі параметрлерді тіркеп, келесі өңдеуге тұрақты кіріс нүктесін дайындайды.",
-                "The system stores the source file, captures the basic metadata, and prepares a stable input for the next stages.",
-                lang=lang,
-            ),
-            "impact": _loc("Без этого этапа нельзя запустить остальную цепочку.", "Бұл кезеңсіз келесі тізбекті бастау мүмкін емес.", "Nothing else in the pipeline starts without this step.", lang=lang),
-        },
-        {
-            "emoji": "⚙️",
-            "title": _loc("Подготовка видео", "Бейнені дайындау", "Preprocessing", lang=lang),
-            "short": _loc("Формат и параметры ролика приводятся к удобному рабочему виду.", "Ролик форматы мен параметрлері жұмысқа ыңғайлы түрге келтіріледі.", "The video format is normalized for reliable downstream work.", lang=lang),
-            "copy": _loc(
-                "Система выравнивает контейнер, частоту кадров и другие технические детали, чтобы аналитика работала стабильно на разных роликах.",
-                "Жүйе контейнерді, кадр жиілігін және басқа техникалық параметрлерді теңестіріп, әртүрлі роликтерде тұрақты талдау жасайды.",
-                "The system normalizes the container, frame rate, and playback properties so analytics stays stable across videos.",
-                lang=lang,
-            ),
-            "impact": _loc("Подготовка уменьшает технические сбои и шум.", "Дайындау техникалық ақаулар мен шуды азайтады.", "Normalization reduces technical errors and noise.", lang=lang),
-        },
-        {
-            "emoji": "🔎",
-            "title": _loc("Анализ сцен", "Сахналарды талдау", "Scene analysis", lang=lang),
-            "short": _loc("Клипы описываются и превращаются в последовательность событий.", "Клиптер сипатталып, оқиғалар тізбегіне айналады.", "Clip observations become a structured event sequence.", lang=lang),
-            "copy": _loc(
-                "Для каждого отрезка времени система формирует наблюдение, выделяет смысловой эпизод и готовит данные для просмотра и поиска.",
-                "Әр уақыт бөлігі үшін жүйе бақылау жасайды, мағыналы эпизодты бөліп, қарау мен іздеуге дерек дайындайды.",
-                "Each time slice becomes a grounded observation that can be reviewed, searched, and summarized later.",
-                lang=lang,
-            ),
-            "impact": _loc("Именно здесь кадры становятся понятными событиями.", "Дәл осы жерде кадрлар түсінікті оқиғаларға айналады.", "This is where frames turn into readable events.", lang=lang),
-        },
-        {
-            "emoji": "🌐",
-            "title": _loc("Языковые версии", "Тілдік нұсқалар", "Language views", lang=lang),
-            "short": _loc("Результаты становятся доступны на языках интерфейса.", "Нәтижелер интерфейс тілдерінде дайындалады.", "Results are prepared in the interface languages.", lang=lang),
-            "copy": _loc(
-                "Один и тот же набор эпизодов и сводок подаётся на выбранном языке, чтобы команда работала в привычной среде.",
-                "Бірдей эпизодтар мен қорытындылар таңдалған тілде беріледі, сондықтан команда өзіне ыңғайлы ортада жұмыс істейді.",
-                "The same evidence is shown in the selected language so the team can work in a familiar interface.",
-                lang=lang,
-            ),
-            "impact": _loc("Смысл и доказательства не теряются при смене языка.", "Тіл ауысқанда мағына мен дәлел жоғалмайды.", "Evidence stays consistent when the language changes.", lang=lang),
-        },
-        {
-            "emoji": "🗂️",
-            "title": _loc("Индексация", "Индекстеу", "Indexing", lang=lang),
-            "short": _loc("Структурированные данные уходят в поисковую основу.", "Құрылымдалған дерек іздеу қабатына жіберіледі.", "Structured outputs are written into the retrieval index.", lang=lang),
-            "copy": _loc(
-                "После структурирования сцены и события сохраняются так, чтобы поисковый запрос быстро находил нужный момент.",
-                "Құрылымданғаннан кейін сахналар мен оқиғалар іздеу сұрағы керекті сәтті тез табатындай сақталады.",
-                "Once structured, scenes and events are stored in a way that supports fast event retrieval.",
-                lang=lang,
-            ),
-            "impact": _loc("Это превращает результаты обработки в рабочий инструмент.", "Бұл өңдеу нәтижесін нақты жұмыс құралына айналдырады.", "This turns processed output into a usable search tool.", lang=lang),
-        },
-        {
-            "emoji": "🧾",
-            "title": _loc("Поиск и вывод", "Іздеу және қорытынды", "Retrieval and reporting", lang=lang),
-            "short": _loc("Оператор находит нужный эпизод и получает объяснение по найденным данным.", "Оператор керекті эпизодты тауып, табылған дерек бойынша түсіндірме алады.", "Operators retrieve the right episode and get a grounded explanation.", lang=lang),
-            "copy": _loc(
-                "Финальный шаг объединяет поиск, помощника и отчёты: результат остаётся связанным с конкретными фрагментами видео.",
-                "Соңғы қадам іздеуді, көмекшіні және есепті біріктіреді: нәтиже нақты бейне фрагменттерімен байланыста қалады.",
-                "The last step combines search, the assistant, and reporting while staying tied to concrete video evidence.",
-                lang=lang,
-            ),
-            "impact": _loc("Финальный интерфейс остаётся понятным и проверяемым.", "Соңғы интерфейс түсінікті және тексерілетін болып қалады.", "The final output remains clear and verifiable.", lang=lang),
-        },
-    ]
-
-
-def _render_overview_carousel(stages: List[Dict[str, str]], session_key: str, lang: str) -> None:
-    """Render the overview stage carousel with auto-rotation and manual switching."""
-
-    if not stages:
-        return
-
-    now = time.time()
-    idx = int(st.session_state.get(session_key) or 0)
-    auto_key = f"{session_key}_auto"
-    lock_key = f"{session_key}_lock"
-    last_auto = float(st.session_state.get(auto_key) or now)
-    manual_lock = float(st.session_state.get(lock_key) or 0.0)
-
-    if now - last_auto >= CAROUSEL_INTERVAL_SEC and now >= manual_lock:
-        idx = (idx + 1) % len(stages)
-        st.session_state[session_key] = idx
-        st.session_state[auto_key] = now
-
-    idx = max(0, min(idx, len(stages) - 1))
-    st.session_state[session_key] = idx
-    current = stages[idx]
-
-    components.html(
-        f"""
-        <script>
-        window.setTimeout(() => {{
-          window.parent.location.reload();
-        }}, {int(CAROUSEL_INTERVAL_SEC * 1000)});
-        </script>
-        """,
-        height=0,
-    )
-
-    progress = "".join(
-        f"<span class='stage-dot{' active' if i == idx else ''}'>{i + 1}</span>"
-        for i in range(len(stages))
-    )
-    st.markdown(f"<div class='stage-progress'>{progress}</div>", unsafe_allow_html=True)
-
-    main_col, side_col = st.columns([2.25, 1.0], gap="large")
-    with main_col:
-        st.markdown(
-            f"""
-            <div class="stage-card">
-                <div class="stage-card-head">
-                    <div class="stage-badge">{E(current['emoji'])}</div>
-                    <div>
-                        <div class="stage-kicker">{E(_loc('Этап', 'Кезең', 'Stage', lang=lang))} {idx + 1}</div>
-                        <div class="stage-title">{E(current['title'])}</div>
-                    </div>
-                </div>
-                <div class="stage-short">{E(current['short'])}</div>
-                <div class="stage-copy">{E(current['copy'])}</div>
-                <div class="stage-impact">{E(current['impact'])}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with side_col:
-        for offset, label, icon in (
-            (-1, _loc("Предыдущий этап", "Алдыңғы кезең", "Previous stage", lang=lang), ICON_PREV),
-            (1, _loc("Следующий этап", "Келесі кезең", "Next stage", lang=lang), ICON_NEXT),
-        ):
-            target_idx = idx + offset
-            if 0 <= target_idx < len(stages):
-                stage = stages[target_idx]
-                st.markdown(
-                    f"""
-                    <div class="stage-preview">
-                        <div class="stage-preview-head">
-                            <div class="stage-badge preview">{E(stage['emoji'])}</div>
-                            <div>
-                                <div class="stage-preview-label">{E(label)}</div>
-                                <div class="stage-preview-title">{E(stage['title'])}</div>
-                            </div>
-                        </div>
-                        <div class="stage-preview-copy">{E(clip_text(stage['short'], 120))}</div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-                if st.button(icon, key=f"{session_key}_{target_idx}", use_container_width=True, help=label):
-                    st.session_state[session_key] = target_idx
-                    st.session_state[auto_key] = now
-                    st.session_state[lock_key] = now + CAROUSEL_INTERVAL_SEC
-                    st.rerun()
-            else:
-                st.markdown(
-                    f"""
-                    <div class="stage-preview muted">
-                        <div class="stage-preview-head">
-                            <div class="stage-badge preview ghost">•</div>
-                            <div>
-                                <div class="stage-preview-label">{E(label)}</div>
-                                <div class="stage-preview-title">{E(_loc('Крайний этап', 'Шеткі кезең', 'Edge stage', lang=lang))}</div>
-                            </div>
-                        </div>
-                        <div class="stage-preview-copy">{E(_loc('С этой стороны соседнего этапа нет.', 'Бұл жақта көрші кезең жоқ.', 'There is no adjacent stage on this side.', lang=lang))}</div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-                st.button(icon, key=f"{session_key}_ghost_{offset}", use_container_width=True, disabled=True)
-
-
-def overview_tab(client: BackendClient, cfg: Any, ui_text: Dict[str, Dict[str, Any]]) -> None:
-    """Render the overview page."""
-
-    _ = client
-    _ = ui_text
-    lang = str(st.session_state.get("ui_lang") or getattr(cfg.ui, "default_lang", None) or "en")
-
-    st.markdown(
-        f"""
-        <div class="intro-card">
-            <div class="intro-title">{E(_loc('SmartCampus V2T для поиска событий и понятного анализа видео', 'SmartCampus V2T бейне оқиғаларын іздеуге және түсінікті талдауға арналған', 'SmartCampus V2T for event retrieval and clear video review', lang=lang))}</div>
-            <div class="intro-copy">{E(_loc('Демо-интерфейс показывает путь от загрузки видео до поиска нужного эпизода, проверки статуса обработки и подготовки итогового отчёта.', 'Демо-интерфейс бейнені жүктеуден бастап керекті эпизодты іздеуге, өңдеу күйін тексеруге және қорытынды есеп дайындауға дейінгі жолды көрсетеді.', 'This demo interface shows the path from video upload to event retrieval, processing review, and final reporting.', lang=lang))}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    _section(_loc("Основные функции системы", "Жүйенің негізгі функциялары", "Main system functions", lang=lang))
-    feature_rows = _overview_features(lang)
-    for start in range(0, len(feature_rows), 2):
-        columns = st.columns(2, gap="large")
-        for col, item in zip(columns, feature_rows[start : start + 2]):
-            with col:
-                st.markdown(
-                    f"""
-                    <div class="{E(item['tone'])}">
-                        <div class="feature-label">{E(item['label'])}</div>
-                        <div class="feature-title">{E(item['title'])}</div>
-                        <div class="feature-copy">{E(item['copy'])}</div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-
-    _section(_loc("Пайплайн обработки", "Өңдеу пайплайны", "Pipeline walkthrough", lang=lang))
-    _render_overview_carousel(_overview_stages(lang), "overview_stage_index", lang)
 
 
 def _bind_storage_state() -> None:
@@ -641,61 +416,6 @@ def _storage_filter_signature() -> str:
     )
 
 
-def _storage_upload_panel(client: BackendClient, lang: str) -> None:
-    """Render one-shot upload inside the storage side rail."""
-
-    st.markdown(f"<div class='subsection-title'>{E(_loc('Загрузка', 'Жүктеу', 'Upload', lang=lang))}</div>", unsafe_allow_html=True)
-    upload = st.file_uploader(
-        _loc("Выберите видео", "Бейне таңдаңыз", "Choose video", lang=lang),
-        type=["mp4", "mov", "mkv", "avi"],
-        key="storage_upload",
-        label_visibility="collapsed",
-    )
-    if upload is None:
-        st.session_state["storage_upload_sig"] = ""
-        return
-
-    payload = upload.getvalue()
-    upload_sig = f"{upload.name}:{len(payload)}"
-    if str(st.session_state.get("storage_upload_sig") or "") == upload_sig:
-        return
-
-    st.session_state["storage_upload_sig"] = upload_sig
-    try:
-        result = client.upload_video(upload.name, payload)
-        st.session_state["selected_video_id"] = str(result.get("video_id") or Path(upload.name).stem)
-        soft_note(_loc("Видео загружено", "Бейне жүктелді", "Video uploaded", lang=lang), kind="ok")
-        st.rerun()
-    except Exception as exc:
-        soft_note(f"{_error_prefix(lang)}: {exc}", kind="warn")
-
-
-def _queue_state_line(queue: Dict[str, Any], selected_video_id: str, lang: str) -> None:
-    """Render one compact queue status line."""
-
-    status = queue.get("status") if isinstance(queue, dict) else {}
-    running = queue.get("running") if isinstance(queue, dict) else {}
-    queued = queue.get("queued") if isinstance(queue, dict) else []
-    selected_text = str(selected_video_id or "").strip() or "-"
-
-    is_paused = bool((status or {}).get("paused"))
-    state_text = _loc("Пауза", "Аялда", "Paused", lang=lang) if is_paused else _loc("Активна", "Белсенді", "Active", lang=lang)
-    running_text = str((running or {}).get("video_id") or "").strip() or _loc("нет", "жоқ", "none", lang=lang)
-    detail = _loc("Выбрано", "Таңдалды", "Selected", lang=lang)
-    queue_label = _loc("В очереди", "Кезекте", "Queued", lang=lang)
-    current_label = _loc("Сейчас", "Қазір", "Now", lang=lang)
-
-    st.markdown(
-        f"""
-        <div class="queue-status">
-            <span class="status-chip">{E(state_text)}</span>
-            <span class="queue-copy">{E(f'{detail}: {selected_text} · {queue_label}: {len(queued)} · {current_label}: {running_text}')}</span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
 def _profile_label(profile: str, lang: str) -> str:
     """Return a localized processing profile label."""
 
@@ -729,205 +449,6 @@ def _variant_option_label(token: str, lang: str) -> str:
     return variant_label(token)
 
 
-def _render_queue_panel(client: BackendClient, cfg: Any, queue: Dict[str, Any], selected_video_id: str, lang: str) -> None:
-    """Render the storage queue controls."""
-
-    st.markdown(f"<div class='subsection-title'>{E(_loc('Очередь обработки', 'Өңдеу кезегі', 'Processing queue', lang=lang))}</div>", unsafe_allow_html=True)
-
-    profile_options = ["main", "experimental"]
-    if "run_profile" not in st.session_state:
-        st.session_state["run_profile"] = "main"
-    if st.session_state.get("run_profile") not in profile_options:
-        st.session_state["run_profile"] = "main"
-
-    st.radio(
-        _loc("Профиль", "Профиль", "Profile", lang=lang),
-        options=profile_options,
-        horizontal=True,
-        key="run_profile",
-        label_visibility="collapsed",
-        format_func=lambda value: _profile_label(str(value), lang),
-    )
-
-    variants = available_variant_ids(cfg)
-    variant_options = ["__base__"] if st.session_state.get("run_profile") == "main" else ["__fanout__"] + variants
-    default_variant = "__base__" if st.session_state.get("run_profile") == "main" else "__fanout__"
-    current_variant = str(st.session_state.get("run_variant") or default_variant)
-    if current_variant not in variant_options:
-        current_variant = default_variant
-        st.session_state["run_variant"] = current_variant
-
-    controls = st.columns([1.15, 0.85], gap="small")
-    with controls[0]:
-        st.selectbox(
-            _loc("Вариант", "Нұсқа", "Variant", lang=lang),
-            options=variant_options,
-            index=variant_options.index(current_variant),
-            key="run_variant",
-            format_func=lambda token: _variant_option_label(str(token), lang),
-        )
-    with controls[1]:
-        st.checkbox(_loc("Перезапись", "Қайта жазу", "Overwrite", lang=lang), key="run_force_overwrite")
-
-    action_row = st.columns(3, gap="small")
-    with action_row[0]:
-        if st.button(ICON_START, key="queue_start_btn", use_container_width=True, help=_loc("Запустить обработку", "Өңдеуді бастау", "Start processing", lang=lang), disabled=not bool(selected_video_id)):
-            try:
-                selected_variant = None
-                if st.session_state.get("run_profile") == "experimental" and st.session_state.get("run_variant") not in {"__fanout__", "__base__"}:
-                    selected_variant = variant_from_token(st.session_state.get("run_variant"))
-                payload = client.create_job(
-                    str(selected_video_id or ""),
-                    extra={"force_overwrite": bool(st.session_state.get("run_force_overwrite", False))},
-                    profile=str(st.session_state.get("run_profile") or "main"),
-                    variant=selected_variant,
-                )
-                soft_note(f"{_loc('Задача добавлена', 'Тапсырма қосылды', 'Job queued', lang=lang)}: {payload.get('job_id')}", kind="ok")
-            except Exception as exc:
-                soft_note(f"{_error_prefix(lang)}: {exc}", kind="warn")
-    with action_row[1]:
-        paused = bool((queue.get("status") or {}).get("paused")) if isinstance(queue, dict) else False
-        if paused:
-            if st.button(ICON_RESUME, key="queue_resume_btn", use_container_width=True, help=_loc("Продолжить", "Жалғастыру", "Resume", lang=lang)):
-                try:
-                    client.queue_resume()
-                    st.rerun()
-                except Exception as exc:
-                    soft_note(f"{_error_prefix(lang)}: {exc}", kind="warn")
-        else:
-            if st.button(ICON_PAUSE, key="queue_pause_btn", use_container_width=True, help=_loc("Пауза", "Аялда", "Pause", lang=lang)):
-                try:
-                    client.queue_pause()
-                    st.rerun()
-                except Exception as exc:
-                    soft_note(f"{_error_prefix(lang)}: {exc}", kind="warn")
-    with action_row[2]:
-        if st.button(ICON_REFRESH, key="queue_refresh_btn", use_container_width=True, help=_loc("Обновить", "Жаңарту", "Refresh", lang=lang)):
-            st.rerun()
-
-    _queue_state_line(queue, selected_video_id, lang)
-
-    queued = queue.get("queued") if isinstance(queue, dict) else []
-    if not isinstance(queued, list) or not queued:
-        _caption(_loc("Очередь пока пуста.", "Кезек әзірге бос.", "Queue is empty.", lang=lang))
-        return
-
-    for idx, item in enumerate(queued[:12]):
-        if not isinstance(item, dict):
-            continue
-        job_id = str(item.get("job_id") or "")
-        variant_token = "__base__" if not item.get("variant") else str(item.get("variant"))
-        with st.container():
-            _mark("row-marker")
-            head, status_col = st.columns([3.1, 1.0], gap="small")
-            with head:
-                title = f"{idx + 1}. {str(item.get('video_id') or '-')}"
-                meta = " · ".join(
-                    [
-                        _profile_label(str(item.get("profile") or "main"), lang),
-                        _variant_option_label(variant_token, lang),
-                        humanize_token(str(item.get("job_type") or "process")),
-                    ]
-                )
-                st.markdown(f"<div class='row-title'>{E(title)}</div>", unsafe_allow_html=True)
-                st.markdown(f"<div class='row-meta'>{E(meta)}</div>", unsafe_allow_html=True)
-            with status_col:
-                st.markdown(f"<div class='row-status'>{E(_queue_job_status(item, lang))}</div>", unsafe_allow_html=True)
-
-            actions = st.columns(3, gap="small")
-            with actions[0]:
-                if st.button(ICON_UP, key=f"queue_up_{job_id}_{idx}", use_container_width=True, help=_loc("Выше", "Жоғары", "Move up", lang=lang)):
-                    try:
-                        client.queue_move(job_id, "up")
-                        st.rerun()
-                    except Exception as exc:
-                        soft_note(f"{_error_prefix(lang)}: {exc}", kind="warn")
-            with actions[1]:
-                if st.button(ICON_DOWN, key=f"queue_down_{job_id}_{idx}", use_container_width=True, help=_loc("Ниже", "Төмен", "Move down", lang=lang)):
-                    try:
-                        client.queue_move(job_id, "down")
-                        st.rerun()
-                    except Exception as exc:
-                        soft_note(f"{_error_prefix(lang)}: {exc}", kind="warn")
-            with actions[2]:
-                if st.button(ICON_DELETE, key=f"queue_delete_{job_id}_{idx}", use_container_width=True, help=_loc("Убрать", "Алып тастау", "Remove", lang=lang)):
-                    try:
-                        client.queue_remove(job_id)
-                        st.rerun()
-                    except Exception as exc:
-                        soft_note(f"{_error_prefix(lang)}: {exc}", kind="warn")
-
-
-def _render_storage_card(client: BackendClient, item: Dict[str, Any], thumbs_dir: Path, selected_video_id: str, lang: str) -> None:
-    """Render one storage video row."""
-
-    video_id = str(item.get("video_id") or "")
-    summary = clip_text(first_sentence(str(item.get("summary") or "")), 150)
-    selected = video_id == selected_video_id
-    meta = item.get("_ui_meta") if isinstance(item.get("_ui_meta"), dict) else {}
-    languages = [str(code).upper() for code in (item.get("languages") or []) if str(code).strip()]
-    tags = [_storage_tag_label(tag, lang) for tag in list(item.get("_ui_tags") or [])[:2]]
-    facts = [
-        fmt_bytes(meta.get("size_bytes")),
-        hms(float(meta.get("duration_sec") or 0.0)) if meta.get("duration_sec") else "-",
-        _loc("Готово", "Дайын", "Ready", lang=lang) if str(item.get("_ui_status")) == "ready" else _loc("Сырой файл", "Шикі файл", "Raw file", lang=lang),
-        _format_time(float(item.get("_ui_created_ts") or 0.0)),
-    ]
-    meta_line = " · ".join(part for part in facts if part and part != "-") or "-"
-    extra_line = " · ".join(languages + tags)
-    thumb_path = thumbs_dir / f"{video_id}.jpg"
-
-    with st.container():
-        _mark("row-marker", "row-marker--selected" if selected else "")
-        preview_col, copy_col, actions_col = st.columns([1.05, 3.4, 0.92], gap="medium")
-        with preview_col:
-            if thumb_path.exists():
-                st.image(str(thumb_path), use_container_width=True)
-            else:
-                st.markdown(f"<div class='thumb-fallback'>{E(video_id)}</div>", unsafe_allow_html=True)
-        with copy_col:
-            st.markdown(f"<div class='row-title'>{E(video_id)}</div>", unsafe_allow_html=True)
-            st.markdown(f"<div class='row-meta'>{E(meta_line)}</div>", unsafe_allow_html=True)
-            if extra_line:
-                st.markdown(f"<div class='row-meta subtle'>{E(extra_line)}</div>", unsafe_allow_html=True)
-            if summary:
-                st.markdown(f"<div class='row-copy'>{E(summary)}</div>", unsafe_allow_html=True)
-        with actions_col:
-            if st.button(ICON_SELECT, key=f"select_video_{video_id}", use_container_width=True, help=_loc("Выбрать", "Таңдау", "Select", lang=lang)):
-                st.session_state["selected_video_id"] = video_id
-                st.rerun()
-            if st.button(ICON_OPEN, key=f"open_video_{video_id}", use_container_width=True, help=_loc("Открыть аналитику", "Аналитиканы ашу", "Open analytics", lang=lang)):
-                st.session_state["selected_video_id"] = video_id
-                st.session_state["video_seek_sec"] = 0
-                st.query_params["tab"] = "video"
-                st.rerun()
-            if st.button(ICON_DELETE, key=f"delete_video_{video_id}", use_container_width=True, help=_loc("Удалить", "Жою", "Delete", lang=lang)):
-                st.session_state["confirm_delete_video_id"] = video_id
-
-    if st.session_state.get("confirm_delete_video_id") == video_id:
-        confirm_cols = st.columns([2.7, 0.8, 0.8], gap="small")
-        with confirm_cols[0]:
-            st.markdown(
-                f"<div class='confirm-copy'>{E(_loc('Удалить выбранное видео из библиотеки?', 'Таңдалған бейнені кітапханадан өшіру керек пе?', 'Delete the selected video from the library?', lang=lang))}</div>",
-                unsafe_allow_html=True,
-            )
-        with confirm_cols[1]:
-            if st.button(ICON_CONFIRM, key=f"confirm_delete_{video_id}", use_container_width=True, help=_loc("Подтвердить", "Растау", "Confirm", lang=lang)):
-                try:
-                    client.delete_video(video_id)
-                    if st.session_state.get("selected_video_id") == video_id:
-                        st.session_state["selected_video_id"] = ""
-                    st.session_state["confirm_delete_video_id"] = ""
-                    soft_note(_loc("Видео удалено", "Бейне жойылды", "Video deleted", lang=lang), kind="ok")
-                    st.rerun()
-                except Exception as exc:
-                    soft_note(f"{_error_prefix(lang)}: {exc}", kind="warn")
-        with confirm_cols[2]:
-            if st.button(ICON_DELETE, key=f"cancel_delete_{video_id}", use_container_width=True, help=_loc("Отмена", "Болдырмау", "Cancel", lang=lang)):
-                st.session_state["confirm_delete_video_id"] = ""
-                st.rerun()
-
-
 def _storage_pagination(total_items: int, lang: str) -> None:
     """Render compact storage pagination."""
 
@@ -955,109 +476,6 @@ def _storage_pagination(total_items: int, lang: str) -> None:
         if st.button(ICON_NEXT, key="storage_next_page", use_container_width=True, help=_loc("Далее", "Келесі", "Next", lang=lang), disabled=page >= total_pages):
             st.session_state["storage_page"] = page + 1
             st.rerun()
-
-
-def storage_tab(client: BackendClient, cfg: Any, ui_text: Dict[str, Dict[str, Any]]) -> None:
-    """Render the storage page."""
-
-    _ = ui_text
-    _bind_storage_state()
-    lang = str(st.session_state.get("ui_lang") or getattr(cfg.ui, "default_lang", None) or "en")
-
-    videos = [item for item in client.list_videos() if isinstance(item, dict)]
-    prepared = [_prepare_storage_item(item) for item in videos]
-    video_ids = [str(item.get("video_id") or "") for item in prepared if str(item.get("video_id") or "").strip()]
-    selected = str(st.session_state.get("selected_video_id") or (video_ids[0] if video_ids else ""))
-    if selected not in video_ids and video_ids:
-        selected = video_ids[0]
-    st.session_state["selected_video_id"] = selected
-
-    try:
-        queue = client.queue_list()
-    except Exception:
-        queue = {}
-
-    filter_sig = _storage_filter_signature()
-    if filter_sig != str(st.session_state.get("storage_filter_sig") or ""):
-        st.session_state["storage_filter_sig"] = filter_sig
-        st.session_state["storage_page"] = 1
-
-    st.markdown(f"<div class='page-title'>{E(_loc('Хранилище', 'Қойма', 'Storage', lang=lang))}</div>", unsafe_allow_html=True)
-
-    layout = st.columns([1.9, 0.96], gap="large")
-    with layout[0]:
-        _section(_loc("Видеотека", "Бейне кітапханасы", "Video library", lang=lang))
-        with st.container():
-            _mark("panel-marker")
-            tag_options = ["all"] + sorted({tag for item in prepared for tag in list(item.get("_ui_tags") or [])}, key=lambda value: _storage_tag_label(value, lang))
-            filters = st.columns([2.25, 1.0, 1.0, 1.05, 0.75], gap="small")
-            with filters[0]:
-                st.text_input(
-                    _loc("Поиск", "Іздеу", "Search", lang=lang),
-                    key="storage_query",
-                    placeholder=_loc("ID, путь, сводка, язык", "ID, жол, қысқаша мазмұн, тіл", "ID, path, summary, language", lang=lang),
-                )
-            with filters[1]:
-                st.selectbox(
-                    _loc("Сортировка", "Сұрыптау", "Sort", lang=lang),
-                    options=["newest", "oldest", "name"],
-                    key="storage_sort",
-                    format_func=lambda value: {
-                        "newest": _loc("Новые", "Жаңалары", "Newest", lang=lang),
-                        "oldest": _loc("Старые", "Ескілері", "Oldest", lang=lang),
-                        "name": _loc("Имя / ID", "Аты / ID", "Name / ID", lang=lang),
-                    }.get(value, value),
-                )
-            with filters[2]:
-                st.selectbox(
-                    _loc("Статус", "Күйі", "Status", lang=lang),
-                    options=["all", "ready", "raw"],
-                    key="storage_status",
-                    format_func=lambda value: {
-                        "all": _loc("Все", "Барлығы", "All", lang=lang),
-                        "ready": _loc("Готово", "Дайын", "Ready", lang=lang),
-                        "raw": _loc("Сырой файл", "Шикі файл", "Raw file", lang=lang),
-                    }.get(value, value),
-                )
-            with filters[3]:
-                st.selectbox(
-                    _loc("Тег", "Тег", "Tag", lang=lang),
-                    options=tag_options,
-                    key="storage_tag",
-                    format_func=lambda value: _loc("Любой", "Кез келген", "Any", lang=lang) if value == "all" else _storage_tag_label(str(value), lang),
-                )
-            with filters[4]:
-                if st.button(ICON_CLEAR, key="storage_clear_filters", use_container_width=True, help=_loc("Сбросить фильтры", "Сүзгілерді тазарту", "Clear filters", lang=lang)):
-                    st.session_state["storage_query"] = ""
-                    st.session_state["storage_sort"] = "newest"
-                    st.session_state["storage_status"] = "all"
-                    st.session_state["storage_tag"] = "all"
-                    st.rerun()
-
-            filtered = _filter_storage_items(prepared)
-            if not filtered and prepared:
-                _caption(_loc("По текущим фильтрам ничего не найдено.", "Ағымдағы сүзгілер бойынша ештеңе табылмады.", "No videos matched the current filters.", lang=lang))
-            elif not filtered:
-                _caption(_loc("Библиотека пуста. Загрузите первое видео.", "Қойма бос. Алғашқы бейнені жүктеңіз.", "The library is empty. Upload the first video.", lang=lang))
-            else:
-                page = max(1, int(st.session_state.get("storage_page") or 1))
-                total_pages = max(1, math.ceil(len(filtered) / PAGE_SIZE))
-                page = min(page, total_pages)
-                st.session_state["storage_page"] = page
-                start = (page - 1) * PAGE_SIZE
-                end = start + PAGE_SIZE
-                thumbs_dir = Path(cfg.paths.thumbs_dir)
-                for item in filtered[start:end]:
-                    _render_storage_card(client, item, thumbs_dir, selected, lang)
-                _storage_pagination(len(filtered), lang)
-
-    with layout[1]:
-        with st.container():
-            _mark("panel-marker")
-            _storage_upload_panel(client, lang)
-        with st.container():
-            _mark("panel-marker")
-            _render_queue_panel(client, cfg, queue, selected, lang)
 
 
 def _analytics_status_items(outputs: Dict[str, Any], raw_exists: bool, lang: str) -> List[tuple[str, bool]]:
@@ -1165,100 +583,6 @@ def _render_timeline(annotations: List[Dict[str, Any]], lang: str) -> None:
             st.markdown("<div class='timeline-divider'></div>", unsafe_allow_html=True)
 
 
-def video_analytics_tab(client: BackendClient, cfg: Any, ui_text: Dict[str, Dict[str, Any]]) -> None:
-    """Render the analytics page."""
-
-    _ = ui_text
-    lang = str(st.session_state.get("ui_lang") or getattr(cfg.ui, "default_lang", None) or "en")
-    videos = [item for item in client.list_videos() if isinstance(item, dict)]
-    if not videos:
-        soft_note(_loc("Библиотека пуста. Загрузите видео, чтобы начать.", "Қойма бос. Бастау үшін бейне жүктеңіз.", "The library is empty. Upload a video to begin.", lang=lang))
-        return
-
-    video_ids = [str(item.get("video_id") or "") for item in videos if str(item.get("video_id") or "").strip()]
-    selected = str(st.session_state.get("selected_video_id") or video_ids[0])
-    if selected not in video_ids:
-        selected = video_ids[0]
-    st.session_state["selected_video_id"] = selected
-
-    selected_video = next((item for item in videos if str(item.get("video_id") or "") == selected), None) or {}
-    variant_tokens = video_variant_tokens(selected_video)
-    current_variant = str(st.session_state.get("library_variant") or variant_tokens[0])
-    if current_variant not in variant_tokens:
-        current_variant = variant_tokens[0]
-    st.session_state["library_variant"] = current_variant
-
-    available_languages = collect_available_languages(selected_video, variant_from_token(current_variant))
-    current_lang = str(st.session_state.get("library_lang") or available_languages[0])
-    if current_lang not in available_languages:
-        current_lang = available_languages[0]
-    st.session_state["library_lang"] = current_lang
-
-    st.markdown(f"<div class='page-title'>{E(_loc('Видеоаналитика', 'Бейне аналитикасы', 'Video Analytics', lang=lang))}</div>", unsafe_allow_html=True)
-
-    controls = st.columns([2.2, 1.0, 1.0], gap="small")
-    with controls[0]:
-        st.selectbox(_loc("Видео", "Бейне", "Video", lang=lang), options=video_ids, key="selected_video_id")
-    with controls[1]:
-        st.selectbox(_loc("Вариант", "Нұсқа", "Variant", lang=lang), options=variant_tokens, key="library_variant", format_func=variant_label)
-    with controls[2]:
-        st.selectbox(_loc("Язык", "Тіл", "Language", lang=lang), options=available_languages, key="library_lang")
-
-    selected_video = next((item for item in videos if str(item.get("video_id") or "") == st.session_state.get("selected_video_id")), None) or {}
-    raw_path = Path(str(selected_video.get("path") or ""))
-    playable_path = ensure_browser_video(raw_path) if raw_path.exists() else raw_path
-    raw_exists = raw_path.exists()
-    meta = get_video_meta(str(playable_path), mtime(playable_path)) if playable_path.exists() else {}
-
-    try:
-        outputs = client.get_video_outputs(
-            str(st.session_state.get("selected_video_id") or ""),
-            str(st.session_state.get("library_lang") or "en"),
-            variant=variant_from_token(st.session_state.get("library_variant")),
-        )
-    except Exception as exc:
-        outputs = {}
-        soft_note(f"{_error_prefix(lang)}: {exc}", kind="warn")
-
-    top = st.columns([1.72, 0.96], gap="large")
-    with top[0]:
-        with st.container():
-            _mark("media-panel-marker")
-            if playable_path.exists():
-                try:
-                    st.video(str(playable_path), start_time=int(st.session_state.get("video_seek_sec") or 0))
-                except TypeError:
-                    st.video(str(playable_path))
-            else:
-                soft_note(_loc("Исходное видео не найдено.", "Бастапқы бейне табылмады.", "Source video not found.", lang=lang), kind="warn")
-
-    with top[1]:
-        with st.container():
-            _mark("panel-marker")
-            summary_text = str(outputs.get("global_summary") or "").strip()
-            headline = first_sentence(summary_text) or _loc("Сводка появится после обработки.", "Қысқаша мазмұн өңдеуден кейін пайда болады.", "The summary appears after processing.", lang=lang)
-            _section(_loc("Описание видео", "Бейне сипаттамасы", "Video description", lang=lang))
-            st.markdown(f"<div class='analytics-summary'>{E(headline)}</div>", unsafe_allow_html=True)
-            if summary_text and summary_text.strip() != headline.strip():
-                st.markdown(f"<div class='analytics-copy'>{E(clip_text(summary_text, 320))}</div>", unsafe_allow_html=True)
-
-            _section(_loc("Статус", "Күйі", "Status", lang=lang))
-            _render_status_rows(_analytics_status_items(outputs, raw_exists, lang), lang)
-
-            _section(_loc("Метрики", "Метрикалар", "Metrics", lang=lang))
-            _render_info_rows(
-                [
-                    (_loc("Общее время обработки", "Жалпы өңдеу уақыты", "Total processing time", lang=lang), f"{float(((outputs.get('metrics') or {}).get('total_time_sec') or 0.0)):.1f}s" if ((outputs.get("metrics") or {}).get("total_time_sec") is not None) else "-"),
-                    (_loc("Время по этапам", "Кезеңдер уақыты", "Stage processing time", lang=lang), _stage_timing_line(outputs)),
-                    (_loc("Длительность видео", "Бейне ұзақтығы", "Video duration", lang=lang), hms(float(meta.get("duration_sec") or 0.0)) if meta.get("duration_sec") else "-"),
-                    (_loc("Разрешение", "Ажыратымдылығы", "Video resolution", lang=lang), f"{int(meta.get('width'))}x{int(meta.get('height'))}" if meta.get("width") and meta.get("height") else "-"),
-                ]
-            )
-
-    annotations = outputs.get("annotations") if isinstance(outputs.get("annotations"), list) else []
-    _render_timeline(annotations, lang)
-
-
 def _bind_search_state() -> None:
     """Initialize search page state."""
 
@@ -1307,40 +631,6 @@ def _search_status_line(lang: str, *, hits_count: Optional[int] = None, rebuild_
     if not parts:
         return
     st.markdown(f"<div class='status-line'>{E(' · '.join(parts))}</div>", unsafe_allow_html=True)
-
-
-def _render_search_results(hits: List[Dict[str, Any]], lang: str) -> None:
-    """Render search results as compact rows."""
-
-    _section(_loc("Результаты", "Нәтижелер", "Results", lang=lang))
-    if not hits:
-        _caption(_loc("Результаты появятся после запуска поиска.", "Нәтижелер іздеуден кейін көрінеді.", "Results appear after search.", lang=lang))
-        return
-
-    for idx, hit in enumerate(hits[:20]):
-        if not isinstance(hit, dict):
-            continue
-        anomaly = bool(hit.get("anomaly_flag"))
-        with st.container():
-            _mark("row-marker", "row-marker--selected" if idx == 0 else "")
-            info_col, action_col = st.columns([4.8, 0.8], gap="small")
-            with info_col:
-                headline = f"{str(hit.get('video_id') or '-')} · {mmss(float(hit.get('start_sec', 0.0) or 0.0))} - {mmss(float(hit.get('end_sec', 0.0) or 0.0))}"
-                st.markdown(f"<div class='row-title'>{E(headline)}</div>", unsafe_allow_html=True)
-                st.markdown(f"<div class='row-copy{' alert' if anomaly else ''}'>{E(clip_text(str(hit.get('description') or ''), 220))}</div>", unsafe_allow_html=True)
-                metrics_line = f"{_loc('Оценка', 'Баға', 'Score', lang=lang)}: {float(hit.get('score', 0.0) or 0.0):.3f}"
-                meta_bits = [metrics_line]
-                for key in ("event_type", "risk_level", "motion_type", "people_count_bucket"):
-                    value = str(hit.get(key) or "").strip()
-                    if value:
-                        meta_bits.append(humanize_token(value))
-                st.markdown(f"<div class='row-meta'>{E(' · '.join(meta_bits))}</div>", unsafe_allow_html=True)
-            with action_col:
-                if st.button(ICON_OPEN, key=f"search_open_{idx}", use_container_width=True, help=_loc("Открыть в аналитике", "Аналитикада ашу", "Open in analytics", lang=lang)):
-                    st.session_state["selected_video_id"] = str(hit.get("video_id") or "")
-                    st.session_state["video_seek_sec"] = int(float(hit.get("start_sec", 0.0) or 0.0))
-                    st.query_params["tab"] = "video"
-                    st.rerun()
 
 
 def _chat_message(role: str, content: str, *, evidence: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
@@ -1486,154 +776,6 @@ def _process_chat_prompt(client: BackendClient, lang: str, base_lang: str, histo
     st.rerun()
 
 
-def search_tab(client: BackendClient, cfg: Any, ui_text: Dict[str, Dict[str, Any]]) -> None:
-    """Render the search page."""
-
-    _ = ui_text
-    _bind_search_state()
-    lang = str(st.session_state.get("ui_lang") or getattr(cfg.ui, "default_lang", None) or "en")
-    videos = [item for item in client.list_videos() if isinstance(item, dict)]
-    if not videos:
-        soft_note(_loc("Библиотека пуста. Сначала загрузите видео.", "Қойма бос. Алдымен бейне жүктеңіз.", "The library is empty. Upload a video to begin.", lang=lang))
-        return
-
-    video_ids = [""] + [str(item.get("video_id") or "") for item in videos if str(item.get("video_id") or "").strip()]
-    current_video = str(st.session_state.get("search_video_id") or "")
-    if current_video not in video_ids:
-        current_video = ""
-        st.session_state["search_video_id"] = ""
-
-    selected_item = next((item for item in videos if str(item.get("video_id") or "") == current_video), None) or {}
-    variant_tokens = video_variant_tokens(selected_item)
-    current_variant = str(st.session_state.get("search_variant") or variant_tokens[0])
-    if current_variant not in variant_tokens:
-        current_variant = variant_tokens[0]
-    st.session_state["search_variant"] = current_variant
-
-    available_languages = collect_available_languages(selected_item or {}, variant_from_token(current_variant))
-    current_lang = str(st.session_state.get("search_lang") or (available_languages[0] if available_languages else lang))
-    if current_lang not in (available_languages or [lang]):
-        current_lang = available_languages[0] if available_languages else lang
-    st.session_state["search_lang"] = current_lang
-
-    st.markdown(f"<div class='page-title'>{E(_loc('Поиск', 'Іздеу', 'Search', lang=lang))}</div>", unsafe_allow_html=True)
-
-    left, right = st.columns([1.62, 1.0], gap="large")
-    with left:
-        with st.container():
-            _mark("panel-marker")
-            _section(_loc("Запрос и фильтры", "Сұрау және сүзгілер", "Query and filters", lang=lang))
-            st.text_input(
-                _loc("Запрос", "Сұрау", "Query", lang=lang),
-                key="search_query_box",
-                placeholder=_loc("Например: человек у входа, падение, толпа", "Мысалы: кіреберістегі адам, құлау, топ", "For example: person near the entrance, fall, crowd", lang=lang),
-            )
-
-            row1 = st.columns([1.55, 0.85, 0.9, 0.7], gap="small")
-            with row1[0]:
-                st.selectbox(
-                    _loc("Видео", "Бейне", "Video", lang=lang),
-                    options=video_ids,
-                    key="search_video_id",
-                    format_func=lambda value: value or _loc("Все видео", "Барлық бейне", "All videos", lang=lang),
-                )
-            with row1[1]:
-                st.selectbox(_loc("Язык", "Тіл", "Language", lang=lang), options=available_languages or [lang], key="search_lang")
-            with row1[2]:
-                st.selectbox(_loc("Вариант", "Нұсқа", "Variant", lang=lang), options=variant_tokens, key="search_variant", format_func=variant_label)
-            with row1[3]:
-                st.number_input(_loc("Top", "Top", "Top", lang=lang), min_value=1, max_value=20, key="search_topk")
-
-            row2 = st.columns([1.15, 1.0, 1.0, 1.05], gap="small")
-            with row2[0]:
-                st.text_input(
-                    _loc("Тип события", "Оқиға түрі", "Event type", lang=lang),
-                    key="search_event_type",
-                    placeholder=_loc("вход, падение, бег", "кіру, құлау, жүгіру", "entry, fall, running", lang=lang),
-                )
-            with row2[1]:
-                st.selectbox(
-                    _loc("Риск", "Тәуекел", "Risk", lang=lang),
-                    options=["", "normal", "attention", "warning", "critical"],
-                    key="search_risk_level",
-                    format_func=lambda value: _risk_label(str(value), lang),
-                )
-            with row2[2]:
-                st.text_input(
-                    _loc("Движение", "Қозғалыс", "Motion", lang=lang),
-                    key="search_motion_type",
-                    placeholder=_loc("стоит, идёт, бежит", "тұр, жүр, жүгіріп келеді", "standing, walking, running", lang=lang),
-                )
-            with row2[3]:
-                st.text_input(
-                    _loc("Люди в кадре", "Кадрдағы адамдар", "People count", lang=lang),
-                    key="search_people_count_bucket",
-                    placeholder=_loc("1, 2-3, группа", "1, 2-3, топ", "1, 2-3, group", lang=lang),
-                )
-
-            st.checkbox(_loc("Только аномалии", "Тек ауытқулар", "Anomalies only", lang=lang), key="search_anomaly_only")
-            st.checkbox(_loc("Скрывать повторы", "Қайталануды жасыру", "Hide duplicates", lang=lang), key="search_dedupe")
-
-            action_row = st.columns([0.9, 0.9, 0.9], gap="small")
-            with action_row[0]:
-                if st.button(ICON_SEARCH, key="search_run_btn", use_container_width=True, help=_loc("Запустить поиск", "Іздеуді бастау", "Run search", lang=lang)):
-                    try:
-                        _run_search(client, lang)
-                    except Exception as exc:
-                        st.session_state["search_hits"] = []
-                        soft_note(f"{_error_prefix(lang)}: {exc}", kind="warn")
-            with action_row[1]:
-                if st.button(ICON_CLEAR, key="search_clear_btn", use_container_width=True, help=_loc("Очистить фильтры", "Сүзгілерді тазарту", "Clear filters", lang=lang)):
-                    _clear_search_state()
-                    st.rerun()
-            with action_row[2]:
-                if st.button(ICON_REFRESH, key="search_rebuild_btn", use_container_width=True, help=_loc("Пересобрать индекс", "Индексті жаңарту", "Rebuild index", lang=lang)):
-                    try:
-                        result = client.index_rebuild()
-                        message = str(result.get("message") or _loc("Индекс обновлён.", "Индекс жаңартылды.", "Index rebuilt.", lang=lang))
-                        st.session_state["search_rebuild_status"] = message
-                    except Exception as exc:
-                        soft_note(f"{_error_prefix(lang)}: {exc}", kind="warn")
-
-            _search_status_line(lang, rebuild_status=str(st.session_state.get("search_rebuild_status") or ""))
-            _search_status_line(lang, hits_count=len(list(st.session_state.get("search_hits") or [])))
-            _render_search_results(list(st.session_state.get("search_hits") or []), lang)
-
-    with right:
-        with st.container():
-            _mark("chat-panel-marker")
-            _section(_loc("RAG-ассистент", "RAG-көмекші", "RAG assistant", lang=lang))
-            history_placeholder = st.empty()
-            with history_placeholder.container():
-                _render_chat(list(st.session_state.get("search_rag_messages") or []), lang)
-
-            input_row = st.columns([3.2, 0.9], gap="small")
-            with input_row[0]:
-                st.text_input(
-                    _loc("Сообщение", "Хабарлама", "Message", lang=lang),
-                    key="search_rag_input",
-                    placeholder=_loc("Что произошло у входа после 18:00?", "18:00-ден кейін кіреберісте не болды?", "What happened near the entrance after 18:00?", lang=lang),
-                    label_visibility="collapsed",
-                )
-            with input_row[1]:
-                send = st.button(ICON_SEND, key="search_send_btn", use_container_width=True, help=_loc("Отправить", "Жіберу", "Send", lang=lang))
-
-            helper_row = st.columns([0.9, 3.1], gap="small")
-            with helper_row[0]:
-                if st.button(ICON_CLEAR, key="search_clear_chat_btn", use_container_width=True, help=_loc("Очистить чат", "Чатты тазарту", "Clear chat", lang=lang)):
-                    st.session_state["search_rag_messages"] = []
-                    st.session_state["search_rag_input"] = ""
-                    st.rerun()
-            with helper_row[1]:
-                st.markdown(
-                    f"<div class='status-line'>{E(_loc('Ассистент использует текущие фильтры и найденные эпизоды.', 'Көмекші ағымдағы сүзгілер мен табылған эпизодтарды пайдаланады.', 'The assistant uses the current filters and retrieved episodes.', lang=lang))}</div>",
-                    unsafe_allow_html=True,
-                )
-
-            if send:
-                _process_chat_prompt(client, lang, current_lang, history_placeholder)
-
-
 def _bind_reports_state() -> None:
     """Initialize reports page state."""
 
@@ -1662,336 +804,6 @@ def _report_overview_rows(video_id: str, lang_code: str, variant_token: str, out
         (_loc("Общее время", "Жалпы уақыт", "Total time", lang=lang), f"{float(metrics.get('total_time_sec') or 0.0):.1f}s" if metrics.get("total_time_sec") is not None else "-"),
     ]
 
-
-def _render_supporting_evidence(hits: List[Dict[str, Any]], lang: str) -> None:
-    """Render supporting evidence rows for reports."""
-
-    _section(_loc("Опорные эпизоды", "Тірек эпизодтар", "Supporting evidence", lang=lang))
-    if not hits:
-        _caption(_loc("Эпизоды появятся после построения отчёта.", "Эпизодтар есеп құрылғаннан кейін көрінеді.", "Supporting evidence appears after the report is built.", lang=lang))
-        return
-
-    for idx, hit in enumerate(hits[:8]):
-        if not isinstance(hit, dict):
-            continue
-        with st.container():
-            _mark("row-marker", "row-marker--selected" if idx == 0 else "")
-            headline = f"{str(hit.get('video_id') or '-')} · {mmss(float(hit.get('start_sec', 0.0) or 0.0))} - {mmss(float(hit.get('end_sec', 0.0) or 0.0))}"
-            st.markdown(f"<div class='row-title'>{E(headline)}</div>", unsafe_allow_html=True)
-            st.markdown(f"<div class='row-copy'>{E(clip_text(str(hit.get('description') or ''), 220))}</div>", unsafe_allow_html=True)
-
-
-def reports_metrics_tab(client: BackendClient, cfg: Any, ui_text: Dict[str, Dict[str, Any]]) -> None:
-    """Render the reports page."""
-
-    _ = ui_text
-    _bind_reports_state()
-    lang = str(st.session_state.get("ui_lang") or getattr(cfg.ui, "default_lang", None) or "en")
-    videos = [item for item in client.list_videos() if isinstance(item, dict)]
-    if not videos:
-        soft_note(_loc("Библиотека пуста. Сначала загрузите видео.", "Қойма бос. Алдымен бейне жүктеңіз.", "The library is empty. Upload a video to begin.", lang=lang))
-        return
-
-    video_ids = [str(item.get("video_id") or "") for item in videos if str(item.get("video_id") or "").strip()]
-    selected_video_id = str(st.session_state.get("reports_video_id") or video_ids[0])
-    if selected_video_id not in video_ids:
-        selected_video_id = video_ids[0]
-    st.session_state["reports_video_id"] = selected_video_id
-
-    selected_item = next((item for item in videos if str(item.get("video_id") or "") == selected_video_id), None) or {}
-    variant_tokens = video_variant_tokens(selected_item)
-    current_variant = str(st.session_state.get("reports_variant") or variant_tokens[0])
-    if current_variant not in variant_tokens:
-        current_variant = variant_tokens[0]
-    st.session_state["reports_variant"] = current_variant
-
-    available_languages = collect_available_languages(selected_item, variant_from_token(current_variant))
-    current_lang = str(st.session_state.get("reports_lang") or (available_languages[0] if available_languages else lang))
-    if current_lang not in (available_languages or [lang]):
-        current_lang = available_languages[0] if available_languages else lang
-    st.session_state["reports_lang"] = current_lang
-
-    try:
-        outputs = client.get_video_outputs(
-            selected_video_id,
-            str(st.session_state.get("reports_lang") or lang),
-            variant=variant_from_token(st.session_state.get("reports_variant")),
-        )
-    except Exception:
-        outputs = {}
-
-    st.markdown(f"<div class='page-title'>{E(_loc('Отчёты / метрики', 'Есептер / метрикалар', 'Reports / Metrics', lang=lang))}</div>", unsafe_allow_html=True)
-
-    controls = st.columns([1.8, 0.95, 0.95], gap="small")
-    with controls[0]:
-        st.selectbox(_loc("Видео", "Бейне", "Video", lang=lang), options=video_ids, key="reports_video_id")
-    with controls[1]:
-        st.selectbox(_loc("Вариант", "Нұсқа", "Variant", lang=lang), options=variant_tokens, key="reports_variant", format_func=variant_label)
-    with controls[2]:
-        st.selectbox(_loc("Язык", "Тіл", "Language", lang=lang), options=available_languages or [lang], key="reports_lang")
-
-    top = st.columns([1.45, 1.0], gap="large")
-    with top[0]:
-        with st.container():
-            _mark("panel-marker")
-            _section(_loc("Демо-отчёт", "Демо-есеп", "Demo report", lang=lang))
-            st.text_area(
-                _loc("Фокус отчёта", "Есеп бағыты", "Report focus", lang=lang),
-                key="reports_focus",
-                height=120,
-                placeholder=_loc("Например: что происходило у входа и были ли сигналы риска?", "Мысалы: кіреберісте не болды және тәуекел белгілері болды ма?", "For example: what happened near the entrance and were there risk signals?", lang=lang),
-            )
-            action_cols = st.columns([0.85, 3.15], gap="small")
-            with action_cols[0]:
-                if st.button(ICON_START, key="reports_build_btn", use_container_width=True, help=_loc("Построить отчёт", "Есеп құрастыру", "Build report", lang=lang)):
-                    try:
-                        st.session_state["reports_payload"] = client.build_report(
-                            video_id=selected_video_id or None,
-                            language=str(st.session_state.get("reports_lang") or lang),
-                            variant=variant_from_token(st.session_state.get("reports_variant")),
-                            query=str(st.session_state.get("reports_focus") or "").strip() or None,
-                            top_k=8,
-                        )
-                    except Exception as exc:
-                        soft_note(f"{_error_prefix(lang)}: {exc}", kind="warn")
-            with action_cols[1]:
-                st.markdown(
-                    f"<div class='status-line'>{E(_loc('Страница подготовлена как компактный демо-отчёт с опорой на найденные эпизоды.', 'Бет табылған эпизодтарға сүйенген ықшам демо-есеп ретінде жасалған.', 'This page is designed as a compact demo report grounded in retrieved evidence.', lang=lang))}</div>",
-                    unsafe_allow_html=True,
-                )
-
-            report_payload = st.session_state.get("reports_payload") or {}
-            report_text = str(report_payload.get("report") or "").strip()
-            if report_text:
-                st.markdown(f"<div class='report-body'>{E(report_text)}</div>", unsafe_allow_html=True)
-            else:
-                st.markdown(
-                    f"<div class='report-placeholder'>{E(_loc('Сформируйте отчёт, чтобы получить краткий аналитический вывод по выбранному видео.', 'Таңдалған бейне бойынша қысқа аналитикалық қорытынды алу үшін есеп құрастырыңыз.', 'Build a report to generate a short analytical summary for the selected video.', lang=lang))}</div>",
-                    unsafe_allow_html=True,
-                )
-
-    with top[1]:
-        with st.container():
-            _mark("panel-marker")
-            _section(_loc("Снимок запуска", "Іске қосу көрінісі", "Run snapshot", lang=lang))
-            _render_info_rows(_report_overview_rows(selected_video_id, current_lang, current_variant, outputs, lang))
-            if outputs:
-                summary_text = str(outputs.get("global_summary") or "").strip()
-                if summary_text:
-                    st.markdown(f"<div class='analytics-copy'>{E(clip_text(summary_text, 260))}</div>", unsafe_allow_html=True)
-            else:
-                _caption(_loc("Готовые результаты для выбранного видео пока недоступны.", "Таңдалған бейне үшін дайын нәтижелер әзірге жоқ.", "Processed outputs for the selected video are not available yet.", lang=lang))
-
-    _render_supporting_evidence(list((st.session_state.get("reports_payload") or {}).get("supporting_hits") or []), lang)
-
-def _queue_state_line(queue: Dict[str, Any], selected_video_id: str, lang: str) -> None:
-    """Render one compact queue status line."""
-
-    _ = selected_video_id
-    status = queue.get("status") if isinstance(queue, dict) else {}
-    running = queue.get("running") if isinstance(queue, dict) else {}
-    queued = queue.get("queued") if isinstance(queue, dict) else []
-
-    is_paused = bool((status or {}).get("paused"))
-    state_text = _loc("Пауза", "Аялда", "Paused", lang=lang) if is_paused else _loc("Активна", "Белсенді", "Active", lang=lang)
-    running_text = str((running or {}).get("video_id") or "").strip() or _loc("нет", "жоқ", "none", lang=lang)
-    queue_label = _loc("В очереди", "Кезекте", "Queued", lang=lang)
-    current_label = _loc("Сейчас", "Қазір", "Now", lang=lang)
-
-    st.markdown(
-        f"""
-        <div class="queue-status">
-            <span class="status-chip">{E(state_text)}</span>
-            <span class="queue-copy">{E(f'{queue_label}: {len(queued)} · {current_label}: {running_text}')}</span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def _render_queue_panel(client: BackendClient, cfg: Any, queue: Dict[str, Any], selected_video_id: str, lang: str) -> None:
-    """Render the storage queue controls."""
-
-    st.markdown(
-        f"<div class='subsection-title'>{E(_loc('Очередь обработки', 'Өңдеу кезегі', 'Processing queue', lang=lang))}</div>",
-        unsafe_allow_html=True,
-    )
-
-    profile_options = ["main", "experimental"]
-    if "run_profile" not in st.session_state:
-        st.session_state["run_profile"] = "main"
-    if st.session_state.get("run_profile") not in profile_options:
-        st.session_state["run_profile"] = "main"
-
-    variants = available_variant_ids(cfg)
-    variant_options = ["__base__"] if st.session_state.get("run_profile") == "main" else ["__fanout__"] + variants
-    default_variant = "__base__" if st.session_state.get("run_profile") == "main" else "__fanout__"
-    current_variant = str(st.session_state.get("run_variant") or default_variant)
-    if current_variant not in variant_options:
-        current_variant = default_variant
-        st.session_state["run_variant"] = current_variant
-
-    profile_row = st.columns([1.22, 0.92], gap="medium")
-    with profile_row[0]:
-        st.radio(
-            _loc("Профиль", "Профиль", "Profile", lang=lang),
-            options=profile_options,
-            horizontal=True,
-            key="run_profile",
-            label_visibility="collapsed",
-            format_func=lambda value: _profile_label(str(value), lang),
-        )
-    with profile_row[1]:
-        st.markdown("<div class='queue-overwrite-offset'></div>", unsafe_allow_html=True)
-        checkbox_cols = st.columns([0.16, 0.84], gap="small")
-        with checkbox_cols[1]:
-            st.checkbox(_loc("Перезапись", "Қайта жазу", "Overwrite", lang=lang), key="run_force_overwrite")
-
-    st.selectbox(
-        _loc("Вариант", "Нұсқа", "Variant", lang=lang),
-        options=variant_options,
-        index=variant_options.index(current_variant),
-        key="run_variant",
-        format_func=lambda token: _variant_option_label(str(token), lang),
-    )
-
-    action_row = st.columns(3, gap="small")
-    with action_row[0]:
-        if st.button(ICON_START, key="queue_start_btn", use_container_width=True, help=_loc("Запустить обработку", "Өңдеуді бастау", "Start processing", lang=lang), disabled=not bool(selected_video_id)):
-            try:
-                selected_variant = None
-                if st.session_state.get("run_profile") == "experimental" and st.session_state.get("run_variant") not in {"__fanout__", "__base__"}:
-                    selected_variant = variant_from_token(st.session_state.get("run_variant"))
-                payload = client.create_job(
-                    str(selected_video_id or ""),
-                    extra={"force_overwrite": bool(st.session_state.get("run_force_overwrite", False))},
-                    profile=str(st.session_state.get("run_profile") or "main"),
-                    variant=selected_variant,
-                )
-                soft_note(f"{_loc('Задача добавлена', 'Тапсырма қосылды', 'Job queued', lang=lang)}: {payload.get('job_id')}", kind="ok")
-            except Exception as exc:
-                soft_note(f"{_error_prefix(lang)}: {exc}", kind="warn")
-    with action_row[1]:
-        paused = bool((queue.get("status") or {}).get("paused")) if isinstance(queue, dict) else False
-        if paused:
-            if st.button(ICON_RESUME, key="queue_resume_btn", use_container_width=True, help=_loc("Продолжить", "Жалғастыру", "Resume", lang=lang)):
-                try:
-                    client.queue_resume()
-                    st.rerun()
-                except Exception as exc:
-                    soft_note(f"{_error_prefix(lang)}: {exc}", kind="warn")
-        else:
-            if st.button(ICON_PAUSE, key="queue_pause_btn", use_container_width=True, help=_loc("Пауза", "Аялда", "Pause", lang=lang)):
-                try:
-                    client.queue_pause()
-                    st.rerun()
-                except Exception as exc:
-                    soft_note(f"{_error_prefix(lang)}: {exc}", kind="warn")
-    with action_row[2]:
-        if st.button(ICON_REFRESH, key="queue_refresh_btn", use_container_width=True, help=_loc("Обновить", "Жаңарту", "Refresh", lang=lang)):
-            st.rerun()
-
-    _queue_state_line(queue, selected_video_id, lang)
-
-    queued = queue.get("queued") if isinstance(queue, dict) else []
-    if not isinstance(queued, list) or not queued:
-        _caption(_loc("Очередь пока пуста.", "Кезек әзірге бос.", "Queue is empty.", lang=lang))
-        return
-
-    for idx, item in enumerate(queued[:12]):
-        if not isinstance(item, dict):
-            continue
-        job_id = str(item.get("job_id") or "")
-        variant_token = "__base__" if not item.get("variant") else str(item.get("variant"))
-        with st.container():
-            _mark("row-marker")
-            head, status_col = st.columns([3.1, 1.0], gap="small")
-            with head:
-                title = f"{idx + 1}. {str(item.get('video_id') or '-')}"
-                meta = " · ".join(
-                    [
-                        _profile_label(str(item.get("profile") or "main"), lang),
-                        _variant_option_label(variant_token, lang),
-                        humanize_token(str(item.get("job_type") or "process")),
-                    ]
-                )
-                st.markdown(f"<div class='row-title'>{E(title)}</div>", unsafe_allow_html=True)
-                st.markdown(f"<div class='row-meta'>{E(meta)}</div>", unsafe_allow_html=True)
-            with status_col:
-                st.markdown(f"<div class='row-status'>{E(_queue_job_status(item, lang))}</div>", unsafe_allow_html=True)
-
-            actions = st.columns(3, gap="small")
-            with actions[0]:
-                if st.button(ICON_UP, key=f"queue_up_{job_id}_{idx}", use_container_width=True, help=_loc("Выше", "Жоғары", "Move up", lang=lang)):
-                    try:
-                        client.queue_move(job_id, "up")
-                        st.rerun()
-                    except Exception as exc:
-                        soft_note(f"{_error_prefix(lang)}: {exc}", kind="warn")
-            with actions[1]:
-                if st.button(ICON_DOWN, key=f"queue_down_{job_id}_{idx}", use_container_width=True, help=_loc("Ниже", "Төмен", "Move down", lang=lang)):
-                    try:
-                        client.queue_move(job_id, "down")
-                        st.rerun()
-                    except Exception as exc:
-                        soft_note(f"{_error_prefix(lang)}: {exc}", kind="warn")
-            with actions[2]:
-                if st.button(ICON_DELETE, key=f"queue_delete_{job_id}_{idx}", use_container_width=True, help=_loc("Убрать", "Алып тастау", "Remove", lang=lang)):
-                    try:
-                        client.queue_remove(job_id)
-                        st.rerun()
-                    except Exception as exc:
-                        soft_note(f"{_error_prefix(lang)}: {exc}", kind="warn")
-
-
-def _render_search_results(hits: List[Dict[str, Any]], lang: str) -> None:
-    """Render search results as flat rows inside the search panel."""
-
-    _section(_loc("Результаты", "Нәтижелер", "Results", lang=lang))
-    if not hits:
-        _caption(_loc("Результаты появятся после запуска поиска.", "Нәтижелер іздеуден кейін көрінеді.", "Results appear after search.", lang=lang))
-        return
-
-    visible_hits = [hit for hit in hits[:20] if isinstance(hit, dict)]
-    for idx, hit in enumerate(visible_hits):
-        anomaly = bool(hit.get("anomaly_flag"))
-        info_col, action_col = st.columns([4.8, 0.8], gap="small")
-        with info_col:
-            headline = f"{str(hit.get('video_id') or '-')} · {mmss(float(hit.get('start_sec', 0.0) or 0.0))} - {mmss(float(hit.get('end_sec', 0.0) or 0.0))}"
-            st.markdown(f"<div class='row-title'>{E(headline)}</div>", unsafe_allow_html=True)
-            st.markdown(f"<div class='row-copy{' alert' if anomaly else ''}'>{E(clip_text(str(hit.get('description') or ''), 220))}</div>", unsafe_allow_html=True)
-            metrics_line = f"{_loc('Оценка', 'Баға', 'Score', lang=lang)}: {float(hit.get('score', 0.0) or 0.0):.3f}"
-            meta_bits = [metrics_line]
-            for key in ("event_type", "risk_level", "motion_type", "people_count_bucket"):
-                value = str(hit.get(key) or "").strip()
-                if value:
-                    meta_bits.append(humanize_token(value))
-            st.markdown(f"<div class='row-meta'>{E(' · '.join(meta_bits))}</div>", unsafe_allow_html=True)
-        with action_col:
-            if st.button(ICON_OPEN, key=f"search_open_{idx}", use_container_width=True, help=_loc("Открыть в аналитике", "Аналитикада ашу", "Open in analytics", lang=lang)):
-                st.session_state["selected_video_id"] = str(hit.get("video_id") or "")
-                st.session_state["video_seek_sec"] = int(float(hit.get("start_sec", 0.0) or 0.0))
-                st.query_params["tab"] = "video"
-                st.rerun()
-        if idx < len(visible_hits) - 1:
-            st.markdown("<div class='timeline-divider'></div>", unsafe_allow_html=True)
-
-
-def _render_supporting_evidence(hits: List[Dict[str, Any]], lang: str) -> None:
-    """Render supporting evidence as clean divider rows."""
-
-    _section(_loc("Опорные эпизоды", "Тірек эпизодтар", "Supporting evidence", lang=lang))
-    if not hits:
-        _caption(_loc("Эпизоды появятся после построения отчёта.", "Эпизодтар есеп құрылғаннан кейін көрінеді.", "Supporting evidence appears after the report is built.", lang=lang))
-        return
-
-    visible_hits = [hit for hit in hits[:8] if isinstance(hit, dict)]
-    for idx, hit in enumerate(visible_hits):
-        headline = f"{str(hit.get('video_id') or '-')} · {mmss(float(hit.get('start_sec', 0.0) or 0.0))} - {mmss(float(hit.get('end_sec', 0.0) or 0.0))}"
-        st.markdown(f"<div class='row-title'>{E(headline)}</div>", unsafe_allow_html=True)
-        st.markdown(f"<div class='row-copy'>{E(clip_text(str(hit.get('description') or ''), 220))}</div>", unsafe_allow_html=True)
-        if idx < len(visible_hits) - 1:
-            st.markdown("<div class='timeline-divider'></div>", unsafe_allow_html=True)
 
 def _storage_upload_panel(client: BackendClient, lang: str) -> None:
     """Render one-shot upload inside the storage side rail."""
@@ -2171,142 +983,28 @@ def _render_queue_panel(client: BackendClient, cfg: Any, queue: Dict[str, Any], 
                         soft_note(f"{_error_prefix(lang)}: {exc}", kind="warn")
 
 
-def _render_overview_carousel(stages: List[Dict[str, str]], session_key: str, lang: str) -> None:
-    """Render the overview stage carousel with manual switching only."""
-
-    if not stages:
-        return
-
-    idx = int(st.session_state.get(session_key) or 0)
-    idx = max(0, min(idx, len(stages) - 1))
-    st.session_state[session_key] = idx
-    current = stages[idx]
-
-    progress = "".join(
-        f"<span class='stage-dot{' active' if i == idx else ''}'>{i + 1}</span>"
-        for i in range(len(stages))
-    )
-    st.markdown(f"<div class='stage-progress'>{progress}</div>", unsafe_allow_html=True)
-
-    adjacent: List[tuple[int, str, str]] = []
-    if idx > 0:
-        adjacent.append((-1, _loc("Предыдущий этап", "Алдыңғы кезең", "Previous stage", lang=lang), ICON_PREV))
-    if idx + 1 < len(stages):
-        adjacent.append((1, _loc("Следующий этап", "Келесі кезең", "Next stage", lang=lang), ICON_NEXT))
-
-    main_col, side_col = st.columns([2.3, 1.0], gap="large")
-    with main_col:
-        st.markdown(
-            f"""
-            <div class="stage-card">
-                <div class="stage-card-head">
-                    <div class="stage-badge">{E(current['emoji'])}</div>
-                    <div>
-                        <div class="stage-kicker">{E(_loc('Этап', 'Кезең', 'Stage', lang=lang))} {idx + 1}</div>
-                        <div class="stage-title">{E(current['title'])}</div>
-                    </div>
-                </div>
-                <div class="stage-short">{E(current['short'])}</div>
-                <div class="stage-copy">{E(current['copy'])}</div>
-                <div class="stage-impact">{E(current['impact'])}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with side_col:
-        for offset, label, icon in adjacent:
-            target_idx = idx + offset
-            stage = stages[target_idx]
-            st.markdown(
-                f"""
-                <div class="stage-preview">
-                    <div class="stage-preview-head">
-                        <div class="stage-badge preview">{E(stage['emoji'])}</div>
-                        <div>
-                            <div class="stage-preview-label">{E(label)}</div>
-                            <div class="stage-preview-title">{E(stage['title'])}</div>
-                        </div>
-                    </div>
-                    <div class="stage-preview-copy">{E(clip_text(stage['short'], 120))}</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            if st.button(icon, key=f"{session_key}_{target_idx}", use_container_width=True, help=label):
-                st.session_state[session_key] = target_idx
-                st.rerun()
-
-
-def overview_tab(client: BackendClient, cfg: Any, ui_text: Dict[str, Dict[str, Any]]) -> None:
-    """Render the overview page."""
-
-    _ = client
-    _ = ui_text
-    lang = str(st.session_state.get("ui_lang") or getattr(cfg.ui, "default_lang", None) or "en")
-
-    st.markdown(
-        f"""
-        <div class="intro-card">
-            <div class="intro-title">{E(_loc('SmartCampus V2T для поиска событий и понятного анализа видео', 'SmartCampus V2T бейне оқиғаларын іздеуге және түсінікті талдауға арналған', 'SmartCampus V2T for event retrieval and clear video review', lang=lang))}</div>
-            <div class="intro-copy">{E(_loc('Демо-интерфейс показывает путь от загрузки видео до поиска нужного эпизода, проверки статуса обработки и подготовки итогового отчёта.', 'Демо-интерфейс бейнені жүктеуден бастап керекті эпизодты іздеуге, өңдеу күйін тексеруге және қорытынды есеп дайындауға дейінгі жолды көрсетеді.', 'This demo interface shows the path from video upload to event retrieval, processing review, and final reporting.', lang=lang))}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    st.markdown("<div class='overview-section-gap'></div>", unsafe_allow_html=True)
-    _section(_loc("Основные функции системы", "Жүйенің негізгі функциялары", "Main system functions", lang=lang))
-    feature_rows = _overview_features(lang)
-    for start in range(0, len(feature_rows), 2):
-        columns = st.columns(2, gap="large")
-        for col, item in zip(columns, feature_rows[start : start + 2]):
-            with col:
-                st.markdown(
-                    f"""
-                    <div class="{E(item['tone'])}">
-                        <div class="feature-label">{E(item['label'])}</div>
-                        <div class="feature-title">{E(item['title'])}</div>
-                        <div class="feature-copy">{E(item['copy'])}</div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-
-    st.markdown("<div class='overview-section-gap'></div>", unsafe_allow_html=True)
-    _section(_loc("Этапы работы системы", "Жүйе жұмысының кезеңдері", "System stages", lang=lang))
-    _render_overview_carousel(_overview_stages(lang), "overview_stage_index", lang)
-
 def video_analytics_tab(client: BackendClient, cfg: Any, ui_text: Dict[str, Dict[str, Any]]) -> None:
     """Render the analytics page without nested panel wrappers."""
 
     _ = ui_text
-    lang = str(st.session_state.get("ui_lang") or getattr(cfg.ui, "default_lang", None) or "en")
-    videos = [item for item in client.list_videos() if isinstance(item, dict)]
+    lang = _ui_lang(cfg)
+    videos = _video_items(client)
     if not videos:
         soft_note(_loc("Библиотека пуста. Загрузите видео, чтобы начать.", "Қойма бос. Бастау үшін бейне жүктеңіз.", "The library is empty. Upload a video to begin.", lang=lang))
         return
 
-    video_ids = [str(item.get("video_id") or "") for item in videos if str(item.get("video_id") or "").strip()]
-    selected = str(st.session_state.get("selected_video_id") or video_ids[0])
-    if selected not in video_ids:
-        selected = video_ids[0]
-    st.session_state["selected_video_id"] = selected
+    context = _resolve_video_context(
+        videos,
+        video_key="selected_video_id",
+        variant_key="library_variant",
+        lang_key="library_lang",
+        base_lang=lang,
+    )
+    video_ids = context["video_ids"]
+    variant_tokens = context["variant_tokens"]
+    available_languages = context["available_languages"]
 
-    selected_video = next((item for item in videos if str(item.get("video_id") or "") == selected), None) or {}
-    variant_tokens = video_variant_tokens(selected_video)
-    current_variant = str(st.session_state.get("library_variant") or variant_tokens[0])
-    if current_variant not in variant_tokens:
-        current_variant = variant_tokens[0]
-    st.session_state["library_variant"] = current_variant
-
-    available_languages = collect_available_languages(selected_video, variant_from_token(current_variant))
-    current_lang = str(st.session_state.get("library_lang") or available_languages[0])
-    if current_lang not in available_languages:
-        current_lang = available_languages[0]
-    st.session_state["library_lang"] = current_lang
-
-    st.markdown(f"<div class='page-title'>{E(_loc('Видеоаналитика', 'Бейне аналитикасы', 'Video Analytics', lang=lang))}</div>", unsafe_allow_html=True)
+    _page_title(_loc("Видеоаналитика", "Бейне аналитикасы", "Video Analytics", lang=lang))
 
     controls = st.columns([2.2, 1.0, 1.0], gap="small")
     with controls[0]:
@@ -2367,183 +1065,6 @@ def video_analytics_tab(client: BackendClient, cfg: Any, ui_text: Dict[str, Dict
     _render_timeline(annotations, lang)
 
 
-def _render_search_results(hits: List[Dict[str, Any]], lang: str) -> None:
-    """Render search results as flat rows inside the search page."""
-
-    _section(_loc("Результаты", "Нәтижелер", "Results", lang=lang))
-    if not hits:
-        _caption(_loc("Результаты появятся после запуска поиска.", "Нәтижелер іздеуден кейін көрінеді.", "Results appear after search.", lang=lang))
-        return
-
-    visible_hits = [hit for hit in hits[:20] if isinstance(hit, dict)]
-    for idx, hit in enumerate(visible_hits):
-        anomaly = bool(hit.get("anomaly_flag"))
-        info_col, action_col = st.columns([4.8, 0.8], gap="small")
-        with info_col:
-            headline = f"{str(hit.get('video_id') or '-')} · {mmss(float(hit.get('start_sec', 0.0) or 0.0))} - {mmss(float(hit.get('end_sec', 0.0) or 0.0))}"
-            st.markdown(f"<div class='row-title'>{E(headline)}</div>", unsafe_allow_html=True)
-            st.markdown(f"<div class='row-copy{' alert' if anomaly else ''}'>{E(clip_text(str(hit.get('description') or ''), 220))}</div>", unsafe_allow_html=True)
-            metrics_line = f"{_loc('Оценка', 'Баға', 'Score', lang=lang)}: {float(hit.get('score', 0.0) or 0.0):.3f}"
-            meta_bits = [metrics_line]
-            for key in ("event_type", "risk_level", "motion_type", "people_count_bucket"):
-                value = str(hit.get(key) or "").strip()
-                if value:
-                    meta_bits.append(humanize_token(value))
-            st.markdown(f"<div class='row-meta'>{E(' · '.join(meta_bits))}</div>", unsafe_allow_html=True)
-        with action_col:
-            if st.button(ICON_OPEN, key=f"search_open_{idx}", use_container_width=True, help=_loc("Открыть в аналитике", "Аналитикада ашу", "Open in analytics", lang=lang)):
-                st.session_state["selected_video_id"] = str(hit.get("video_id") or "")
-                st.session_state["video_seek_sec"] = int(float(hit.get("start_sec", 0.0) or 0.0))
-                st.query_params["tab"] = "video"
-                st.rerun()
-        if idx < len(visible_hits) - 1:
-            st.markdown("<div class='timeline-divider'></div>", unsafe_allow_html=True)
-
-
-def search_tab(client: BackendClient, cfg: Any, ui_text: Dict[str, Dict[str, Any]]) -> None:
-    """Render the search page without nested panel wrappers."""
-
-    _ = ui_text
-    _bind_search_state()
-    lang = str(st.session_state.get("ui_lang") or getattr(cfg.ui, "default_lang", None) or "en")
-    videos = [item for item in client.list_videos() if isinstance(item, dict)]
-    if not videos:
-        soft_note(_loc("Библиотека пуста. Сначала загрузите видео.", "Қойма бос. Алдымен бейне жүктеңіз.", "The library is empty. Upload a video to begin.", lang=lang))
-        return
-
-    video_ids = [""] + [str(item.get("video_id") or "") for item in videos if str(item.get("video_id") or "").strip()]
-    current_video = str(st.session_state.get("search_video_id") or "")
-    if current_video not in video_ids:
-        current_video = ""
-        st.session_state["search_video_id"] = ""
-
-    selected_item = next((item for item in videos if str(item.get("video_id") or "") == current_video), None) or {}
-    variant_tokens = video_variant_tokens(selected_item)
-    current_variant = str(st.session_state.get("search_variant") or variant_tokens[0])
-    if current_variant not in variant_tokens:
-        current_variant = variant_tokens[0]
-    st.session_state["search_variant"] = current_variant
-
-    available_languages = collect_available_languages(selected_item or {}, variant_from_token(current_variant))
-    current_lang = str(st.session_state.get("search_lang") or (available_languages[0] if available_languages else lang))
-    if current_lang not in (available_languages or [lang]):
-        current_lang = available_languages[0] if available_languages else lang
-    st.session_state["search_lang"] = current_lang
-
-    st.markdown(f"<div class='page-title'>{E(_loc('Поиск', 'Іздеу', 'Search', lang=lang))}</div>", unsafe_allow_html=True)
-
-    left, right = st.columns([1.68, 1.08], gap="large")
-    with left:
-        _section(_loc("Запрос и фильтры", "Сұрау және сүзгілер", "Query and filters", lang=lang))
-        st.text_input(
-            _loc("Запрос", "Сұрау", "Query", lang=lang),
-            key="search_query_box",
-            placeholder=_loc("Например: человек у входа, падение, толпа", "Мысалы: кіреберістегі адам, құлау, топ", "For example: person near the entrance, fall, crowd", lang=lang),
-        )
-
-        row1 = st.columns([1.55, 0.85, 0.9, 0.7], gap="small")
-        with row1[0]:
-            st.selectbox(
-                _loc("Видео", "Бейне", "Video", lang=lang),
-                options=video_ids,
-                key="search_video_id",
-                format_func=lambda value: value or _loc("Все видео", "Барлық бейне", "All videos", lang=lang),
-            )
-        with row1[1]:
-            st.selectbox(_loc("Язык", "Тіл", "Language", lang=lang), options=available_languages or [lang], key="search_lang")
-        with row1[2]:
-            st.selectbox(_loc("Вариант", "Нұсқа", "Variant", lang=lang), options=variant_tokens, key="search_variant", format_func=variant_label)
-        with row1[3]:
-            st.number_input(_loc("Top", "Top", "Top", lang=lang), min_value=1, max_value=20, key="search_topk")
-
-        row2 = st.columns([1.15, 1.0, 1.0, 1.05], gap="small")
-        with row2[0]:
-            st.text_input(
-                _loc("Тип события", "Оқиға түрі", "Event type", lang=lang),
-                key="search_event_type",
-                placeholder=_loc("вход, падение, бег", "кіру, құлау, жүгіру", "entry, fall, running", lang=lang),
-            )
-        with row2[1]:
-            st.selectbox(
-                _loc("Риск", "Тәуекел", "Risk", lang=lang),
-                options=["", "normal", "attention", "warning", "critical"],
-                key="search_risk_level",
-                format_func=lambda value: _risk_label(str(value), lang),
-            )
-        with row2[2]:
-            st.text_input(
-                _loc("Движение", "Қозғалыс", "Motion", lang=lang),
-                key="search_motion_type",
-                placeholder=_loc("стоит, идёт, бежит", "тұр, жүр, жүгіріп келеді", "standing, walking, running", lang=lang),
-            )
-        with row2[3]:
-            st.text_input(
-                _loc("Люди в кадре", "Кадрдағы адамдар", "People count", lang=lang),
-                key="search_people_count_bucket",
-                placeholder=_loc("1, 2-3, группа", "1, 2-3, топ", "1, 2-3, group", lang=lang),
-            )
-
-        st.checkbox(_loc("Только аномалии", "Тек ауытқулар", "Anomalies only", lang=lang), key="search_anomaly_only")
-        st.checkbox(_loc("Скрывать повторы", "Қайталануды жасыру", "Hide duplicates", lang=lang), key="search_dedupe")
-
-        action_row = st.columns([0.9, 0.9, 0.9], gap="small")
-        with action_row[0]:
-            if st.button(ICON_SEARCH, key="search_run_btn", use_container_width=True, help=_loc("Запустить поиск", "Іздеуді бастау", "Run search", lang=lang)):
-                try:
-                    _run_search(client, lang)
-                except Exception as exc:
-                    st.session_state["search_hits"] = []
-                    soft_note(f"{_error_prefix(lang)}: {exc}", kind="warn")
-        with action_row[1]:
-            if st.button(ICON_CLEAR, key="search_clear_btn", use_container_width=True, help=_loc("Очистить фильтры", "Сүзгілерді тазарту", "Clear filters", lang=lang)):
-                _clear_search_state()
-                st.rerun()
-        with action_row[2]:
-            if st.button(ICON_REFRESH, key="search_rebuild_btn", use_container_width=True, help=_loc("Пересобрать индекс", "Индексті жаңарту", "Rebuild index", lang=lang)):
-                try:
-                    result = client.index_rebuild()
-                    message = str(result.get("message") or _loc("Индекс обновлён.", "Индекс жаңартылды.", "Index rebuilt.", lang=lang))
-                    st.session_state["search_rebuild_status"] = message
-                except Exception as exc:
-                    soft_note(f"{_error_prefix(lang)}: {exc}", kind="warn")
-
-        _search_status_line(lang, rebuild_status=str(st.session_state.get("search_rebuild_status") or ""))
-        _search_status_line(lang, hits_count=len(list(st.session_state.get("search_hits") or [])))
-        _render_search_results(list(st.session_state.get("search_hits") or []), lang)
-
-    with right:
-        _section(_loc("RAG-ассистент", "RAG-көмекші", "RAG assistant", lang=lang))
-        history_placeholder = st.empty()
-        with history_placeholder.container():
-            _render_chat(list(st.session_state.get("search_rag_messages") or []), lang)
-
-        input_row = st.columns([3.2, 0.9], gap="small")
-        with input_row[0]:
-            st.text_input(
-                _loc("Сообщение", "Хабарлама", "Message", lang=lang),
-                key="search_rag_input",
-                placeholder=_loc("Что произошло у входа после 18:00?", "18:00-ден кейін кіреберісте не болды?", "What happened near the entrance after 18:00?", lang=lang),
-                label_visibility="collapsed",
-            )
-        with input_row[1]:
-            send = st.button(ICON_SEND, key="search_send_btn", use_container_width=True, help=_loc("Отправить", "Жіберу", "Send", lang=lang))
-
-        helper_row = st.columns([0.9, 3.1], gap="small")
-        with helper_row[0]:
-            if st.button(ICON_CLEAR, key="search_clear_chat_btn", use_container_width=True, help=_loc("Очистить чат", "Чатты тазарту", "Clear chat", lang=lang)):
-                st.session_state["search_rag_messages"] = []
-                st.session_state["search_rag_input"] = ""
-                st.rerun()
-        with helper_row[1]:
-            st.markdown(
-                f"<div class='status-line'>{E(_loc('Ассистент использует текущие фильтры и найденные эпизоды.', 'Көмекші ағымдағы сүзгілер мен табылған эпизодтарды пайдаланады.', 'The assistant uses the current filters and retrieved episodes.', lang=lang))}</div>",
-                unsafe_allow_html=True,
-            )
-
-        if send:
-            _process_chat_prompt(client, lang, current_lang, history_placeholder)
-
-
 def _render_supporting_evidence(hits: List[Dict[str, Any]], lang: str) -> None:
     """Render supporting evidence as clean divider rows."""
 
@@ -2559,209 +1080,6 @@ def _render_supporting_evidence(hits: List[Dict[str, Any]], lang: str) -> None:
         st.markdown(f"<div class='row-copy'>{E(clip_text(str(hit.get('description') or ''), 220))}</div>", unsafe_allow_html=True)
         if idx < len(visible_hits) - 1:
             st.markdown("<div class='timeline-divider'></div>", unsafe_allow_html=True)
-
-
-def reports_metrics_tab(client: BackendClient, cfg: Any, ui_text: Dict[str, Dict[str, Any]]) -> None:
-    """Render the reports page without nested panel wrappers."""
-
-    _ = ui_text
-    _bind_reports_state()
-    lang = str(st.session_state.get("ui_lang") or getattr(cfg.ui, "default_lang", None) or "en")
-    videos = [item for item in client.list_videos() if isinstance(item, dict)]
-    if not videos:
-        soft_note(_loc("Библиотека пуста. Сначала загрузите видео.", "Қойма бос. Алдымен бейне жүктеңіз.", "The library is empty. Upload a video to begin.", lang=lang))
-        return
-
-    video_ids = [str(item.get("video_id") or "") for item in videos if str(item.get("video_id") or "").strip()]
-    selected_video_id = str(st.session_state.get("reports_video_id") or video_ids[0])
-    if selected_video_id not in video_ids:
-        selected_video_id = video_ids[0]
-    st.session_state["reports_video_id"] = selected_video_id
-
-    selected_item = next((item for item in videos if str(item.get("video_id") or "") == selected_video_id), None) or {}
-    variant_tokens = video_variant_tokens(selected_item)
-    current_variant = str(st.session_state.get("reports_variant") or variant_tokens[0])
-    if current_variant not in variant_tokens:
-        current_variant = variant_tokens[0]
-    st.session_state["reports_variant"] = current_variant
-
-    available_languages = collect_available_languages(selected_item, variant_from_token(current_variant))
-    current_lang = str(st.session_state.get("reports_lang") or (available_languages[0] if available_languages else lang))
-    if current_lang not in (available_languages or [lang]):
-        current_lang = available_languages[0] if available_languages else lang
-    st.session_state["reports_lang"] = current_lang
-
-    try:
-        outputs = client.get_video_outputs(
-            selected_video_id,
-            str(st.session_state.get("reports_lang") or lang),
-            variant=variant_from_token(st.session_state.get("reports_variant")),
-        )
-    except Exception:
-        outputs = {}
-
-    st.markdown(f"<div class='page-title'>{E(_loc('Отчеты / метрики', 'Есептер / метрикалар', 'Reports / Metrics', lang=lang))}</div>", unsafe_allow_html=True)
-
-    controls = st.columns([1.8, 0.95, 0.95], gap="small")
-    with controls[0]:
-        st.selectbox(_loc("Видео", "Бейне", "Video", lang=lang), options=video_ids, key="reports_video_id")
-    with controls[1]:
-        st.selectbox(_loc("Вариант", "Нұсқа", "Variant", lang=lang), options=variant_tokens, key="reports_variant", format_func=variant_label)
-    with controls[2]:
-        st.selectbox(_loc("Язык", "Тіл", "Language", lang=lang), options=available_languages or [lang], key="reports_lang")
-
-    top = st.columns([1.52, 1.08], gap="large")
-    with top[0]:
-        _section(_loc("Демо-отчёт", "Демо-есеп", "Demo report", lang=lang))
-        st.text_area(
-            _loc("Фокус отчёта", "Есеп бағыты", "Report focus", lang=lang),
-            key="reports_focus",
-            height=120,
-            placeholder=_loc("Например: что происходило у входа и были ли сигналы риска?", "Мысалы: кіреберісте не болды және тәуекел белгілері болды ма?", "For example: what happened near the entrance and were there risk signals?", lang=lang),
-        )
-        action_cols = st.columns([0.85, 3.15], gap="small")
-        with action_cols[0]:
-            if st.button(ICON_START, key="reports_build_btn", use_container_width=True, help=_loc("Построить отчёт", "Есеп құрастыру", "Build report", lang=lang)):
-                try:
-                    st.session_state["reports_payload"] = client.build_report(
-                        video_id=selected_video_id or None,
-                        language=str(st.session_state.get("reports_lang") or lang),
-                        variant=variant_from_token(st.session_state.get("reports_variant")),
-                        query=str(st.session_state.get("reports_focus") or "").strip() or None,
-                        top_k=8,
-                    )
-                except Exception as exc:
-                    soft_note(f"{_error_prefix(lang)}: {exc}", kind="warn")
-        with action_cols[1]:
-            st.markdown(
-                f"<div class='status-line'>{E(_loc('Страница подготовлена как компактный демо-отчёт с опорой на найденные эпизоды.', 'Бет табылған эпизодтарға сүйенген ықшам демо-есеп ретінде жасалған.', 'This page is designed as a compact demo report grounded in retrieved evidence.', lang=lang))}</div>",
-                unsafe_allow_html=True,
-            )
-
-        report_payload = st.session_state.get("reports_payload") or {}
-        report_text = str(report_payload.get("report") or "").strip()
-        if report_text:
-            st.markdown(f"<div class='report-body'>{E(report_text)}</div>", unsafe_allow_html=True)
-        else:
-            st.markdown(
-                f"<div class='report-placeholder'>{E(_loc('Сформируйте отчёт, чтобы получить краткий аналитический вывод по выбранному видео.', 'Таңдалған бейне бойынша қысқа аналитикалық қорытынды алу үшін есеп құрастырыңыз.', 'Build a report to generate a short analytical summary for the selected video.', lang=lang))}</div>",
-                unsafe_allow_html=True,
-            )
-
-    with top[1]:
-        _section(_loc("Снимок запуска", "Іске қосу көрінісі", "Run snapshot", lang=lang))
-        _render_info_rows(_report_overview_rows(selected_video_id, current_lang, current_variant, outputs, lang))
-        if outputs:
-            summary_text = str(outputs.get("global_summary") or "").strip()
-            if summary_text:
-                st.markdown(f"<div class='analytics-copy'>{E(clip_text(summary_text, 260))}</div>", unsafe_allow_html=True)
-        else:
-            _caption(_loc("Готовые результаты для выбранного видео пока недоступны.", "Таңдалған бейне үшін дайын нәтижелер әзірге жоқ.", "Processed outputs for the selected video are not available yet.", lang=lang))
-
-    _render_supporting_evidence(list((st.session_state.get("reports_payload") or {}).get("supporting_hits") or []), lang)
-
-
-def storage_tab(client: BackendClient, cfg: Any, ui_text: Dict[str, Dict[str, Any]]) -> None:
-    """Render the storage page with a flatter library section."""
-
-    _ = ui_text
-    _bind_storage_state()
-    lang = str(st.session_state.get("ui_lang") or getattr(cfg.ui, "default_lang", None) or "en")
-
-    videos = [item for item in client.list_videos() if isinstance(item, dict)]
-    prepared = [_prepare_storage_item(item) for item in videos]
-    video_ids = [str(item.get("video_id") or "") for item in prepared if str(item.get("video_id") or "").strip()]
-    selected = str(st.session_state.get("selected_video_id") or (video_ids[0] if video_ids else ""))
-    if selected not in video_ids and video_ids:
-        selected = video_ids[0]
-    st.session_state["selected_video_id"] = selected
-
-    try:
-        queue = client.queue_list()
-    except Exception:
-        queue = {}
-
-    filter_sig = _storage_filter_signature()
-    if filter_sig != str(st.session_state.get("storage_filter_sig") or ""):
-        st.session_state["storage_filter_sig"] = filter_sig
-        st.session_state["storage_page"] = 1
-
-    st.markdown(f"<div class='page-title'>{E(_loc('Хранилище', 'Қойма', 'Storage', lang=lang))}</div>", unsafe_allow_html=True)
-
-    layout = st.columns([1.9, 0.96], gap="large")
-    with layout[0]:
-        _section(_loc("Видеотека", "Бейне кітапханасы", "Video library", lang=lang))
-        tag_options = ["all"] + sorted({tag for item in prepared for tag in list(item.get("_ui_tags") or [])}, key=lambda value: _storage_tag_label(value, lang))
-        filters = st.columns([2.25, 1.0, 1.0, 1.05, 0.75], gap="small")
-        with filters[0]:
-            st.text_input(
-                _loc("Поиск", "Іздеу", "Search", lang=lang),
-                key="storage_query",
-                placeholder=_loc("ID, путь, сводка, язык", "ID, жол, қысқаша мазмұн, тіл", "ID, path, summary, language", lang=lang),
-            )
-        with filters[1]:
-            st.selectbox(
-                _loc("Сортировка", "Сұрыптау", "Sort", lang=lang),
-                options=["newest", "oldest", "name"],
-                key="storage_sort",
-                format_func=lambda value: {
-                    "newest": _loc("Новые", "Жаңалары", "Newest", lang=lang),
-                    "oldest": _loc("Старые", "Ескілері", "Oldest", lang=lang),
-                    "name": _loc("Имя / ID", "Аты / ID", "Name / ID", lang=lang),
-                }.get(value, value),
-            )
-        with filters[2]:
-            st.selectbox(
-                _loc("Статус", "Күйі", "Status", lang=lang),
-                options=["all", "ready", "raw"],
-                key="storage_status",
-                format_func=lambda value: {
-                    "all": _loc("Все", "Барлығы", "All", lang=lang),
-                    "ready": _loc("Готово", "Дайын", "Ready", lang=lang),
-                    "raw": _loc("Сырой файл", "Шикі файл", "Raw file", lang=lang),
-                }.get(value, value),
-            )
-        with filters[3]:
-            st.selectbox(
-                _loc("Тег", "Тег", "Tag", lang=lang),
-                options=tag_options,
-                key="storage_tag",
-                format_func=lambda value: _loc("Любой", "Кез келген", "Any", lang=lang) if value == "all" else _storage_tag_label(str(value), lang),
-            )
-        with filters[4]:
-            st.markdown("<div class='filter-button-offset'></div>", unsafe_allow_html=True)
-            st.markdown("<div class='filter-button-offset'></div>", unsafe_allow_html=True)
-            if st.button(ICON_CLEAR, key="storage_clear_filters", use_container_width=True, help=_loc("Сбросить фильтры", "Сүзгілерді тазарту", "Clear filters", lang=lang)):
-                st.session_state["storage_query"] = ""
-                st.session_state["storage_sort"] = "newest"
-                st.session_state["storage_status"] = "all"
-                st.session_state["storage_tag"] = "all"
-                st.rerun()
-
-        filtered = _filter_storage_items(prepared)
-        if not filtered and prepared:
-            _caption(_loc("По текущим фильтрам ничего не найдено.", "Ағымдағы сүзгілер бойынша ештеңе табылмады.", "No videos matched the current filters.", lang=lang))
-        elif not filtered:
-            _caption(_loc("Библиотека пуста. Загрузите первое видео.", "Қойма бос. Алғашқы бейнені жүктеңіз.", "The library is empty. Upload the first video.", lang=lang))
-        else:
-            page = max(1, int(st.session_state.get("storage_page") or 1))
-            total_pages = max(1, math.ceil(len(filtered) / PAGE_SIZE))
-            page = min(page, total_pages)
-            st.session_state["storage_page"] = page
-            start = (page - 1) * PAGE_SIZE
-            end = start + PAGE_SIZE
-            thumbs_dir = Path(cfg.paths.thumbs_dir)
-            for item in filtered[start:end]:
-                _render_storage_card(client, item, thumbs_dir, selected, lang)
-            _storage_pagination(len(filtered), lang)
-
-    with layout[1]:
-        with st.container():
-            _mark("panel-marker")
-            _storage_upload_panel(client, lang)
-        with st.container():
-            _mark("panel-marker")
-            _render_queue_panel(client, cfg, queue, selected, lang)
 
 
 def _render_storage_card(client: BackendClient, cfg: Any, item: Dict[str, Any], thumbs_dir: Path, selected_video_id: str, lang: str) -> None:
@@ -2865,15 +1183,16 @@ def storage_tab(client: BackendClient, cfg: Any, ui_text: Dict[str, Dict[str, An
 
     _ = ui_text
     _bind_storage_state()
-    lang = str(st.session_state.get("ui_lang") or getattr(cfg.ui, "default_lang", None) or "en")
+    lang = _ui_lang(cfg)
 
-    videos = [item for item in client.list_videos() if isinstance(item, dict)]
+    videos = _video_items(client)
     prepared = [_prepare_storage_item(item) for item in videos]
-    video_ids = [str(item.get("video_id") or "") for item in prepared if str(item.get("video_id") or "").strip()]
-    selected = str(st.session_state.get("selected_video_id") or (video_ids[0] if video_ids else ""))
-    if selected not in video_ids and video_ids:
-        selected = video_ids[0]
-    st.session_state["selected_video_id"] = selected
+    video_ids = _video_ids(prepared)
+    if video_ids:
+        selected = _session_choice("selected_video_id", video_ids)
+    else:
+        st.session_state["selected_video_id"] = ""
+        selected = ""
 
     try:
         queue = client.queue_list()
@@ -2885,105 +1204,7 @@ def storage_tab(client: BackendClient, cfg: Any, ui_text: Dict[str, Dict[str, An
         st.session_state["storage_filter_sig"] = filter_sig
         st.session_state["storage_page"] = 1
 
-    st.markdown(f"<div class='page-title'>{E(_loc('Хранилище', 'Қойма', 'Storage', lang=lang))}</div>", unsafe_allow_html=True)
-
-    layout = st.columns([1.9, 0.96], gap="large")
-    with layout[0]:
-        _section(_loc("Видеотека", "Бейне кітапханасы", "Video library", lang=lang))
-        tag_options = ["all"] + sorted({tag for item in prepared for tag in list(item.get("_ui_tags") or [])}, key=lambda value: _storage_tag_label(value, lang))
-        filters = st.columns([2.25, 1.0, 1.0, 1.05, 0.75], gap="small")
-        with filters[0]:
-            st.text_input(
-                _loc("Поиск", "Іздеу", "Search", lang=lang),
-                key="storage_query",
-                placeholder=_loc("ID, путь, сводка, язык", "ID, жол, қысқаша мазмұн, тіл", "ID, path, summary, language", lang=lang),
-            )
-        with filters[1]:
-            st.selectbox(
-                _loc("Сортировка", "Сұрыптау", "Sort", lang=lang),
-                options=["newest", "oldest", "name"],
-                key="storage_sort",
-                format_func=lambda value: {
-                    "newest": _loc("Новые", "Жаңалары", "Newest", lang=lang),
-                    "oldest": _loc("Старые", "Ескілері", "Oldest", lang=lang),
-                    "name": _loc("Имя / ID", "Аты / ID", "Name / ID", lang=lang),
-                }.get(value, value),
-            )
-        with filters[2]:
-            st.selectbox(
-                _loc("Статус", "Күйі", "Status", lang=lang),
-                options=["all", "ready", "raw"],
-                key="storage_status",
-                format_func=lambda value: {
-                    "all": _loc("Все", "Барлығы", "All", lang=lang),
-                    "ready": _loc("Готово", "Дайын", "Ready", lang=lang),
-                    "raw": _loc("Сырой файл", "Шикі файл", "Raw file", lang=lang),
-                }.get(value, value),
-            )
-        with filters[3]:
-            st.selectbox(
-                _loc("Тег", "Тег", "Tag", lang=lang),
-                options=tag_options,
-                key="storage_tag",
-                format_func=lambda value: _loc("Любой", "Кез келген", "Any", lang=lang) if value == "all" else _storage_tag_label(str(value), lang),
-            )
-        with filters[4]:
-            if st.button(ICON_CLEAR, key="storage_clear_filters", use_container_width=True, help=_loc("Сбросить фильтры", "Сүзгілерді тазарту", "Clear filters", lang=lang)):
-                st.session_state["storage_query"] = ""
-                st.session_state["storage_sort"] = "newest"
-                st.session_state["storage_status"] = "all"
-                st.session_state["storage_tag"] = "all"
-                st.rerun()
-
-        filtered = _filter_storage_items(prepared)
-        if not filtered and prepared:
-            _caption(_loc("По текущим фильтрам ничего не найдено.", "Ағымдағы сүзгілер бойынша ештеңе табылмады.", "No videos matched the current filters.", lang=lang))
-        elif not filtered:
-            _caption(_loc("Библиотека пуста. Загрузите первое видео.", "Қойма бос. Алғашқы бейнені жүктеңіз.", "The library is empty. Upload the first video.", lang=lang))
-        else:
-            page = max(1, int(st.session_state.get("storage_page") or 1))
-            total_pages = max(1, math.ceil(len(filtered) / PAGE_SIZE))
-            page = min(page, total_pages)
-            st.session_state["storage_page"] = page
-            start = (page - 1) * PAGE_SIZE
-            end = start + PAGE_SIZE
-            thumbs_dir = Path(cfg.paths.thumbs_dir)
-            for item in filtered[start:end]:
-                _render_storage_card(client, cfg, item, thumbs_dir, selected, lang)
-            _storage_pagination(len(filtered), lang)
-
-    with layout[1]:
-        _mark("storage-side-marker")
-        _storage_upload_panel(client, lang)
-        _render_queue_panel(client, cfg, queue, selected, lang)
-
-
-def storage_tab(client: BackendClient, cfg: Any, ui_text: Dict[str, Dict[str, Any]]) -> None:
-    """Render the storage page with a flat side rail."""
-
-    _ = ui_text
-    _bind_storage_state()
-    lang = str(st.session_state.get("ui_lang") or getattr(cfg.ui, "default_lang", None) or "en")
-
-    videos = [item for item in client.list_videos() if isinstance(item, dict)]
-    prepared = [_prepare_storage_item(item) for item in videos]
-    video_ids = [str(item.get("video_id") or "") for item in prepared if str(item.get("video_id") or "").strip()]
-    selected = str(st.session_state.get("selected_video_id") or (video_ids[0] if video_ids else ""))
-    if selected not in video_ids and video_ids:
-        selected = video_ids[0]
-    st.session_state["selected_video_id"] = selected
-
-    try:
-        queue = client.queue_list()
-    except Exception:
-        queue = {}
-
-    filter_sig = _storage_filter_signature()
-    if filter_sig != str(st.session_state.get("storage_filter_sig") or ""):
-        st.session_state["storage_filter_sig"] = filter_sig
-        st.session_state["storage_page"] = 1
-
-    st.markdown(f"<div class='page-title'>{E(_loc('Хранилище', 'Қойма', 'Storage', lang=lang))}</div>", unsafe_allow_html=True)
+    _page_title(_loc("Хранилище", "Қойма", "Storage", lang=lang))
 
     layout = st.columns([1.9, 0.96], gap="large")
     with layout[0]:
@@ -3228,143 +1449,6 @@ def _render_search_panel_fragment(
     _render_search_results(list(st.session_state.get("search_hits") or []), lang)
 
 
-def search_tab(client: BackendClient, cfg: Any, ui_text: Dict[str, Dict[str, Any]]) -> None:
-    """Render the search page without nested panel wrappers."""
-
-    _ = ui_text
-    _bind_search_state()
-    lang = str(st.session_state.get("ui_lang") or getattr(cfg.ui, "default_lang", None) or "en")
-    videos = [item for item in client.list_videos() if isinstance(item, dict)]
-    if not videos:
-        soft_note(_loc("Библиотека пуста. Сначала загрузите видео.", "Қойма бос. Алдымен бейне жүктеңіз.", "The library is empty. Upload a video to begin.", lang=lang))
-        return
-
-    video_ids = [""] + [str(item.get("video_id") or "") for item in videos if str(item.get("video_id") or "").strip()]
-    current_video = str(st.session_state.get("search_video_id") or "")
-    if current_video not in video_ids:
-        current_video = ""
-        st.session_state["search_video_id"] = ""
-
-    selected_item = next((item for item in videos if str(item.get("video_id") or "") == current_video), None) or {}
-    variant_tokens = video_variant_tokens(selected_item)
-    current_variant = str(st.session_state.get("search_variant") or variant_tokens[0])
-    if current_variant not in variant_tokens:
-        current_variant = variant_tokens[0]
-    st.session_state["search_variant"] = current_variant
-
-    available_languages = collect_available_languages(selected_item or {}, variant_from_token(current_variant))
-    current_lang = str(st.session_state.get("search_lang") or (available_languages[0] if available_languages else lang))
-    if current_lang not in (available_languages or [lang]):
-        current_lang = available_languages[0] if available_languages else lang
-    st.session_state["search_lang"] = current_lang
-
-    st.markdown(f"<div class='page-title'>{E(_loc('Поиск', 'Іздеу', 'Search', lang=lang))}</div>", unsafe_allow_html=True)
-
-    left, right = st.columns([1.68, 1.08], gap="large")
-    with left:
-        _render_search_panel_fragment(
-            client,
-            lang,
-            current_lang,
-            video_ids,
-            available_languages,
-            variant_tokens,
-        )
-
-    with right:
-        _section(_loc("Умный асситент", "Ақылды ассистент", "Smart assistant", lang=lang))
-        _render_chat(list(st.session_state.get("search_rag_messages") or []), lang)
-
-        st.text_input(
-            _loc("Сообщение", "Хабарлама", "Message", lang=lang),
-            key="search_rag_input",
-            placeholder=_loc("Что произошло у входа после 18:00?", "18:00-ден кейін кіреберісте не болды?", "What happened near the entrance after 18:00?", lang=lang),
-            label_visibility="collapsed",
-            on_change=_submit_chat_from_enter,
-            args=(client, lang, current_lang),
-        )
-
-        helper_row = st.columns([0.58, 4.15], gap="small")
-        with helper_row[0]:
-            if st.button(ICON_CLEAR, key="search_clear_chat_btn", use_container_width=True, help=_loc("Очистить чат", "Чатты тазарту", "Clear chat", lang=lang)):
-                st.session_state["search_rag_messages"] = []
-                st.session_state["search_rag_input"] = ""
-                st.rerun()
-        with helper_row[1]:
-            st.markdown(
-                f"<div class='status-line'>{E(_loc('Ассистент использует текущие фильтры и найденные эпизоды.', 'Көмекші ағымдағы сүзгілер мен табылған эпизодтарды пайдаланады.', 'The assistant uses the current filters and retrieved episodes.', lang=lang))}</div>",
-                unsafe_allow_html=True,
-            )
-
-def search_tab(client: BackendClient, cfg: Any, ui_text: Dict[str, Dict[str, Any]]) -> None:
-    """Render the search page without nested panel wrappers."""
-
-    _ = ui_text
-    _bind_search_state()
-    lang = str(st.session_state.get("ui_lang") or getattr(cfg.ui, "default_lang", None) or "en")
-    videos = [item for item in client.list_videos() if isinstance(item, dict)]
-    if not videos:
-        soft_note(_loc("Библиотека пуста. Сначала загрузите видео.", "Қойма бос. Алдымен бейне жүктеңіз.", "The library is empty. Upload a video to begin.", lang=lang))
-        return
-
-    video_ids = [""] + [str(item.get("video_id") or "") for item in videos if str(item.get("video_id") or "").strip()]
-    current_video = str(st.session_state.get("search_video_id") or "")
-    if current_video not in video_ids:
-        current_video = ""
-        st.session_state["search_video_id"] = ""
-
-    selected_item = next((item for item in videos if str(item.get("video_id") or "") == current_video), None) or {}
-    variant_tokens = video_variant_tokens(selected_item)
-    current_variant = str(st.session_state.get("search_variant") or variant_tokens[0])
-    if current_variant not in variant_tokens:
-        current_variant = variant_tokens[0]
-    st.session_state["search_variant"] = current_variant
-
-    available_languages = collect_available_languages(selected_item or {}, variant_from_token(current_variant))
-    current_lang = str(st.session_state.get("search_lang") or (available_languages[0] if available_languages else lang))
-    if current_lang not in (available_languages or [lang]):
-        current_lang = available_languages[0] if available_languages else lang
-    st.session_state["search_lang"] = current_lang
-
-    st.markdown(f"<div class='page-title'>{E(_loc('Поиск', 'Іздеу', 'Search', lang=lang))}</div>", unsafe_allow_html=True)
-
-    left, right = st.columns([1.68, 1.08], gap="large")
-    with left:
-        _render_search_panel_fragment(
-            client,
-            lang,
-            current_lang,
-            video_ids,
-            available_languages,
-            variant_tokens,
-        )
-
-    with right:
-        _section(_loc("Умный асситент", "Ақылды ассистент", "Smart assistant", lang=lang))
-        _render_chat(list(st.session_state.get("search_rag_messages") or []), lang)
-
-        input_row = st.columns([4.35, 0.48], gap="small")
-        with input_row[0]:
-            st.text_input(
-                _loc("Сообщение", "Хабарлама", "Message", lang=lang),
-                key="search_rag_input",
-                placeholder=_loc("Что произошло у входа после 18:00?", "18:00-ден кейін кіреберісте не болды?", "What happened near the entrance after 18:00?", lang=lang),
-                label_visibility="collapsed",
-                on_change=_submit_chat_from_enter,
-                args=(client, lang, current_lang),
-            )
-        with input_row[1]:
-            if st.button(ICON_CLEAR, key="search_clear_chat_btn", use_container_width=True, help=_loc("Очистить чат", "Чатты тазарту", "Clear chat", lang=lang)):
-                st.session_state["search_rag_messages"] = []
-                st.session_state["search_rag_input"] = ""
-                st.rerun()
-
-        st.markdown(
-            f"<div class='status-line'>{E(_loc('Ассистент использует текущие фильтры и найденные эпизоды.', 'Көмекші ағымдағы сүзгілер мен табылған эпизодтарды пайдаланады.', 'The assistant uses the current filters and retrieved episodes.', lang=lang))}</div>",
-            unsafe_allow_html=True,
-        )
-
-
 def _product_subtitle(lang: str) -> str:
     """Return the localized product subtitle."""
 
@@ -3397,30 +1481,25 @@ def reports_metrics_tab(client: BackendClient, cfg: Any, ui_text: Dict[str, Dict
 
     _ = ui_text
     _bind_reports_state()
-    lang = str(st.session_state.get("ui_lang") or getattr(cfg.ui, "default_lang", None) or "en")
-    videos = [item for item in client.list_videos() if isinstance(item, dict)]
+    lang = _ui_lang(cfg)
+    videos = _video_items(client)
     if not videos:
         soft_note(_loc("Библиотека пуста. Сначала загрузите видео.", "Қойма бос. Алдымен бейне жүктеңіз.", "The library is empty. Upload a video to begin.", lang=lang))
         return
 
-    video_ids = [str(item.get("video_id") or "") for item in videos if str(item.get("video_id") or "").strip()]
-    selected_video_id = str(st.session_state.get("reports_video_id") or video_ids[0])
-    if selected_video_id not in video_ids:
-        selected_video_id = video_ids[0]
-    st.session_state["reports_video_id"] = selected_video_id
-
-    selected_item = next((item for item in videos if str(item.get("video_id") or "") == selected_video_id), None) or {}
-    variant_tokens = video_variant_tokens(selected_item)
-    current_variant = str(st.session_state.get("reports_variant") or variant_tokens[0])
-    if current_variant not in variant_tokens:
-        current_variant = variant_tokens[0]
-    st.session_state["reports_variant"] = current_variant
-
-    available_languages = collect_available_languages(selected_item, variant_from_token(current_variant))
-    current_lang = str(st.session_state.get("reports_lang") or (available_languages[0] if available_languages else lang))
-    if current_lang not in (available_languages or [lang]):
-        current_lang = available_languages[0] if available_languages else lang
-    st.session_state["reports_lang"] = current_lang
+    context = _resolve_video_context(
+        videos,
+        video_key="reports_video_id",
+        variant_key="reports_variant",
+        lang_key="reports_lang",
+        base_lang=lang,
+    )
+    video_ids = context["video_ids"]
+    variant_tokens = context["variant_tokens"]
+    selected_video_id = context["selected_video_id"]
+    current_variant = context["current_variant"]
+    available_languages = context["available_languages"]
+    current_lang = context["current_lang"]
 
     try:
         outputs = client.get_video_outputs(
@@ -3431,7 +1510,7 @@ def reports_metrics_tab(client: BackendClient, cfg: Any, ui_text: Dict[str, Dict
     except Exception:
         outputs = {}
 
-    st.markdown(f"<div class='page-title'>{E(_loc('Отчёты', 'Есептер', 'Reports', lang=lang))}</div>", unsafe_allow_html=True)
+    _page_title(_loc("Отчёты", "Есептер", "Reports", lang=lang))
 
     controls = st.columns([1.8, 0.95, 0.95], gap="small")
     with controls[0]:
@@ -3497,32 +1576,26 @@ def search_tab(client: BackendClient, cfg: Any, ui_text: Dict[str, Dict[str, Any
 
     _ = ui_text
     _bind_search_state()
-    lang = str(st.session_state.get("ui_lang") or getattr(cfg.ui, "default_lang", None) or "en")
-    videos = [item for item in client.list_videos() if isinstance(item, dict)]
+    lang = _ui_lang(cfg)
+    videos = _video_items(client)
     if not videos:
         soft_note(_loc("Библиотека пуста. Сначала загрузите видео.", "Қойма бос. Алдымен бейне жүктеңіз.", "The library is empty. Upload a video to begin.", lang=lang))
         return
 
-    video_ids = [""] + [str(item.get("video_id") or "") for item in videos if str(item.get("video_id") or "").strip()]
-    current_video = str(st.session_state.get("search_video_id") or "")
-    if current_video not in video_ids:
-        current_video = ""
-        st.session_state["search_video_id"] = ""
+    context = _resolve_video_context(
+        videos,
+        video_key="search_video_id",
+        variant_key="search_variant",
+        lang_key="search_lang",
+        base_lang=lang,
+        allow_empty_video=True,
+    )
+    video_ids = context["video_options"]
+    variant_tokens = context["variant_tokens"]
+    available_languages = context["available_languages"]
+    current_lang = context["current_lang"]
 
-    selected_item = next((item for item in videos if str(item.get("video_id") or "") == current_video), None) or {}
-    variant_tokens = video_variant_tokens(selected_item)
-    current_variant = str(st.session_state.get("search_variant") or variant_tokens[0])
-    if current_variant not in variant_tokens:
-        current_variant = variant_tokens[0]
-    st.session_state["search_variant"] = current_variant
-
-    available_languages = collect_available_languages(selected_item or {}, variant_from_token(current_variant))
-    current_lang = str(st.session_state.get("search_lang") or (available_languages[0] if available_languages else lang))
-    if current_lang not in (available_languages or [lang]):
-        current_lang = available_languages[0] if available_languages else lang
-    st.session_state["search_lang"] = current_lang
-
-    st.markdown(f"<div class='page-title'>{E(_loc('Поиск', 'Іздеу', 'Search', lang=lang))}</div>", unsafe_allow_html=True)
+    _page_title(_loc("Поиск", "Іздеу", "Search", lang=lang))
 
     left, right = st.columns([1.68, 1.08], gap="large")
     with left:
@@ -3569,441 +1642,6 @@ def search_tab(client: BackendClient, cfg: Any, ui_text: Dict[str, Dict[str, Any
             """,
             unsafe_allow_html=True,
         )
-
-def _overview_features(lang: str) -> List[Dict[str, str]]:
-    """Return expanded overview feature cards for the demo page."""
-
-    return [
-        {
-            "tone": "feature-card tone-a",
-            "label": _loc("Обзор системы", "Жүйе шолуы", "System overview", lang=lang),
-            "title": _loc("Понятный сценарий работы", "Түсінікті жұмыс сценариі", "A clear operator flow", lang=lang),
-            "copy": _loc(
-                "Экран помогает быстро понять, как система ведет видео от загрузки до итогового результата без лишних переходов между разделами.",
-                "Экран артық ауысуларсыз бейненің жүктеуден қорытынды нәтижеге дейін қалай өтетінін тез түсінуге көмектеседі.",
-                "This screen explains how video moves from upload to the final result without unnecessary page hopping.",
-                lang=lang,
-            ),
-            "detail": _loc(
-                "Пользователь сразу видит, где загружать ролики, где смотреть аналитику, как искать нужный эпизод и как собирать короткий отчет.",
-                "Пайдаланушы бірден бейнені қайда жүктеу, аналитиканы қайдан қарау, керекті эпизодты қалай іздеу және қысқа есепті қалай құрастыру керегін көреді.",
-                "Users immediately see where to upload videos, inspect analytics, search for an episode, and build a short report.",
-                lang=lang,
-            ),
-        },
-        {
-            "tone": "feature-card tone-b",
-            "label": _loc("Хранилище", "Қойма", "Storage", lang=lang),
-            "title": _loc("Быстрый доступ к видеотеке", "Бейнеқорға жылдам қолжетімділік", "Fast access to the library", lang=lang),
-            "copy": _loc(
-                "Библиотека собирает ролики в одном месте, чтобы оператору было легко найти нужный файл, проверить его состояние и сразу отправить в обработку.",
-                "Қойма барлық роликті бір жерде ұстап, операторға керекті файлды табуды, күйін тексеруді және бірден өңдеуге жіберуді жеңілдетеді.",
-                "The library keeps every video in one place so operators can quickly find a file, check its status, and send it to processing.",
-                lang=lang,
-            ),
-            "detail": _loc(
-                "Фильтры и очередь помогают не теряться в материалах, даже если в системе уже накопилось много видео и вариантов обработки.",
-                "Сүзгілер мен кезек жүйеде көп бейне мен өңдеу нұсқасы жиналса да материалдан адаспауға көмектеседі.",
-                "Filters and the queue keep the workflow manageable even when the system already contains many videos and processing variants.",
-                lang=lang,
-            ),
-        },
-        {
-            "tone": "feature-card tone-c",
-            "label": _loc("Видеоаналитика", "Бейне аналитикасы", "Video analytics", lang=lang),
-            "title": _loc("Проверка результата по таймлайну", "Нәтижені таймлайн арқылы тексеру", "Verify results through the timeline", lang=lang),
-            "copy": _loc(
-                "После обработки система показывает плеер, краткое описание, статус и компактный таймлайн, чтобы быстро перейти к важному фрагменту.",
-                "Өңдеуден кейін жүйе маңызды фрагментке тез өту үшін плеерді, қысқаша сипаттаманы, күйді және ықшам таймлайнды көрсетеді.",
-                "After processing, the system shows a player, a summary, status details, and a compact timeline for quick review.",
-                lang=lang,
-            ),
-            "detail": _loc(
-                "Это удобно для демонстрации: можно сразу подтвердить, где именно произошло событие, и показать связанный момент без долгого поиска.",
-                "Бұл демонстрация үшін ыңғайлы: оқиға нақты қай жерде болғанын бірден растауға және сәйкес сәтті ұзақ іздемей көрсетуге болады.",
-                "This is demo-friendly: you can immediately confirm where an event happened and show the exact moment without long searching.",
-                lang=lang,
-            ),
-        },
-        {
-            "tone": "feature-card tone-d",
-            "label": _loc("Поиск и отчёты", "Іздеу және есептер", "Search and reports", lang=lang),
-            "title": _loc("Поиск по смыслу и короткие выводы", "Мағына бойынша іздеу және қысқа қорытынды", "Semantic search and short conclusions", lang=lang),
-            "copy": _loc(
-                "Поиск находит эпизоды по смыслу запроса, а ассистент и отчеты опираются на те же найденные моменты, а не на абстрактные догадки.",
-                "Іздеу сұраудың мағынасы бойынша эпизодтарды табады, ал ассистент пен есептер сол табылған сәттерге сүйенеді, абстрактілі жорамалдарға емес.",
-                "Search retrieves episodes from the meaning of the query, while the assistant and reports stay grounded in the same evidence.",
-                lang=lang,
-            ),
-            "detail": _loc(
-                "Так пользователю проще получить понятный ответ по видео и затем быстро превратить его в презентационный вывод для показа системы.",
-                "Осылайша пайдаланушы бейне бойынша түсінікті жауап алып, оны жүйені көрсетуге арналған қысқа қорытындыға тез айналдыра алады.",
-                "This makes it easier to get a clear answer from the video and quickly turn it into a presentation-ready conclusion.",
-                lang=lang,
-            ),
-        },
-    ]
-
-
-def _stage_nav_button_label(stage: Dict[str, str], label: str) -> str:
-    """Build a compact multiline label for one adjacent stage card."""
-
-    return f"{stage['emoji']}  {label}\n{stage['title']}\n{clip_text(stage['short'], 120)}"
-
-
-def _render_overview_carousel(stages: List[Dict[str, str]], session_key: str, lang: str) -> None:
-    """Render system stages with a large current card and clickable side cards."""
-
-    if not stages:
-        return
-
-    idx = int(st.session_state.get(session_key) or 0)
-    idx = max(0, min(idx, len(stages) - 1))
-    st.session_state[session_key] = idx
-    current = stages[idx]
-
-    progress = "".join(
-        f"<span class='stage-dot{' active' if i == idx else ''}'>{i + 1}</span>"
-        for i in range(len(stages))
-    )
-    st.markdown(f"<div class='stage-progress'>{progress}</div>", unsafe_allow_html=True)
-
-    adjacent: List[tuple[int, str]] = []
-    if idx > 0:
-        adjacent.append((idx - 1, _loc("Предыдущий этап", "Алдыңғы кезең", "Previous stage", lang=lang)))
-    if idx + 1 < len(stages):
-        adjacent.append((idx + 1, _loc("Следующий этап", "Келесі кезең", "Next stage", lang=lang)))
-
-    main_col, side_col = st.columns([2.15, 1.02], gap="large")
-    with main_col:
-        st.markdown(
-            f"""
-            <div class="stage-card">
-                <div class="stage-card-head">
-                    <div class="stage-badge">{E(current['emoji'])}</div>
-                    <div>
-                        <div class="stage-kicker">{E(_loc('Этап', 'Кезең', 'Stage', lang=lang))} {idx + 1}</div>
-                        <div class="stage-title">{E(current['title'])}</div>
-                    </div>
-                </div>
-                <div class="stage-short">{E(current['short'])}</div>
-                <div class="stage-copy">{E(current['copy'])}</div>
-                <div class="stage-impact">{E(current['impact'])}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with side_col:
-        for target_idx, label in adjacent:
-            stage = stages[target_idx]
-            with st.container():
-                _mark("stage-nav-marker")
-                if st.button(
-                    _stage_nav_button_label(stage, label),
-                    key=f"{session_key}_{target_idx}",
-                    use_container_width=True,
-                ):
-                    st.session_state[session_key] = target_idx
-                    st.rerun()
-        if len(adjacent) < 2:
-            st.markdown("<div class='stage-nav-spacer'></div>", unsafe_allow_html=True)
-
-
-def overview_tab(client: BackendClient, cfg: Any, ui_text: Dict[str, Dict[str, Any]]) -> None:
-    """Render the overview page."""
-
-    _ = client
-    _ = ui_text
-    lang = str(st.session_state.get("ui_lang") or getattr(cfg.ui, "default_lang", None) or "en")
-
-    st.markdown(
-        f"""
-        <div class="intro-card">
-            <div class="intro-title">{E(_loc('SmartCampus V2T для поиска событий и понятного анализа видео', 'SmartCampus V2T бейне оқиғаларын іздеуге және түсінікті талдауға арналған', 'SmartCampus V2T for event retrieval and clear video review', lang=lang))}</div>
-            <div class="intro-copy">{E(_loc('Демо-интерфейс показывает полный путь: от загрузки видео и запуска обработки до просмотра результата, поиска нужного эпизода и подготовки итогового отчёта.', 'Демо-интерфейс толық жолды көрсетеді: бейнені жүктеу мен өңдеуді іске қосудан бастап нәтижені қарауға, керекті эпизодты іздеуге және қорытынды есеп дайындауға дейін.', 'This demo interface shows the full path from upload and processing to review, event retrieval, and final reporting.', lang=lang))}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    st.markdown("<div class='overview-section-gap'></div>", unsafe_allow_html=True)
-    _section(_loc("Основные функции системы", "Жүйенің негізгі функциялары", "Main system functions", lang=lang))
-    feature_rows = _overview_features(lang)
-    for start in range(0, len(feature_rows), 2):
-        columns = st.columns(2, gap="large")
-        for col, item in zip(columns, feature_rows[start : start + 2]):
-            with col:
-                st.markdown(
-                    f"""
-                    <div class="{E(item['tone'])}">
-                        <div class="feature-label">{E(item['label'])}</div>
-                        <div class="feature-title">{E(item['title'])}</div>
-                        <div class="feature-copy">{E(item['copy'])}</div>
-                        <div class="feature-detail">{E(item['detail'])}</div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-        if start + 2 < len(feature_rows):
-            st.markdown("<div class='overview-grid-gap'></div>", unsafe_allow_html=True)
-
-    st.markdown("<div class='overview-section-gap'></div>", unsafe_allow_html=True)
-    _section(_loc("Этапы работы системы", "Жүйе жұмысының кезеңдері", "System stages", lang=lang))
-    _render_overview_carousel(_overview_stages(lang), "overview_stage_index", lang)
-
-def _overview_features(lang: str) -> List[Dict[str, str]]:
-    """Return compact but clearer overview feature cards."""
-
-    return [
-        {
-            "tone": "feature-card tone-a",
-            "label": _loc("Обзор системы", "Жүйе шолуы", "System overview", lang=lang),
-            "title": _loc("Быстрое понимание сценария", "Жұмыс сценариін тез түсіну", "Quick understanding of the flow", lang=lang),
-            "copy": _loc(
-                "Экран показывает весь путь работы системы простым языком: от появления видео в библиотеке до поиска события и короткого итогового вывода.",
-                "Экран жүйенің толық жұмыс жолын қарапайым тілмен көрсетеді: бейненің кітапханаға түсуінен бастап оқиғаны іздеу мен қысқа қорытындыға дейін.",
-                "This screen explains the full system flow in simple terms, from upload to event search and final reporting.",
-                lang=lang,
-            ),
-            "detail": _loc(
-                "Пользователь сразу понимает, в каком разделе загружать ролики, где смотреть результат обработки и как переходить к нужному эпизоду.",
-                "Пайдаланушы роликті қайда жүктеу, өңдеу нәтижесін қайдан қарау және керекті эпизодқа қалай өту керегін бірден түсінеді.",
-                "Users immediately understand where to upload video, where to inspect results, and how to jump to the relevant episode.",
-                lang=lang,
-            ),
-        },
-        {
-            "tone": "feature-card tone-b",
-            "label": _loc("Хранилище", "Қойма", "Storage", lang=lang),
-            "title": _loc("Удобная видеотека", "Ыңғайлы бейнеқор", "A practical video library", lang=lang),
-            "copy": _loc(
-                "Все ролики собираются в одном месте. Это упрощает просмотр, фильтрацию, запуск обработки и работу с очередью без лишних действий.",
-                "Барлық ролик бір жерде жиналады. Бұл қарауды, сүзуді, өңдеуді іске қосуды және кезекпен жұмысты жеңілдетеді.",
-                "All videos are kept in one place, which makes browsing, filtering, queueing, and processing easier.",
-                lang=lang,
-            ),
-            "detail": _loc(
-                "Даже если материалов становится больше, оператор сохраняет контроль над библиотекой и быстро находит нужный файл.",
-                "Материал көбейсе де оператор кітапхананы бақылауда ұстап, керекті файлды тез таба алады.",
-                "Even as the library grows, operators keep control and can quickly find the file they need.",
-                lang=lang,
-            ),
-        },
-        {
-            "tone": "feature-card tone-c",
-            "label": _loc("Видеоаналитика", "Бейне аналитикасы", "Video analytics", lang=lang),
-            "title": _loc("Проверка по таймлайну", "Таймлайн арқылы тексеру", "Verification through the timeline", lang=lang),
-            "copy": _loc(
-                "После обработки пользователь видит плеер, краткое описание и последовательность найденных фрагментов, привязанных ко времени.",
-                "Өңдеуден кейін пайдаланушы плеерді, қысқаша сипаттаманы және уақытқа байланыстырылған табылған фрагменттерді көреді.",
-                "After processing, users get a player, a short summary, and a timeline of the detected segments.",
-                lang=lang,
-            ),
-            "detail": _loc(
-                "Это удобно для демонстрации: можно быстро показать, где произошло событие и почему система обратила на него внимание.",
-                "Бұл демонстрация үшін ыңғайлы: оқиға қай жерде болғанын және жүйе неге соған назар аударғанын тез көрсетуге болады.",
-                "This is useful in a demo because you can quickly show where an event happened and why it matters.",
-                lang=lang,
-            ),
-        },
-        {
-            "tone": "feature-card tone-d",
-            "label": _loc("Поиск и отчёты", "Іздеу және есептер", "Search and reports", lang=lang),
-            "title": _loc("Поиск по смыслу", "Мағына бойынша іздеу", "Search by meaning", lang=lang),
-            "copy": _loc(
-                "Поиск находит подходящие эпизоды по содержанию запроса, а ассистент и отчеты используют те же найденные фрагменты как основу ответа.",
-                "Іздеу сұраудың мазмұны бойынша эпизодтарды табады, ал ассистент пен есептер сол табылған фрагменттерге сүйенеді.",
-                "Search retrieves relevant episodes from the meaning of the query, and the assistant and reports use the same evidence.",
-                lang=lang,
-            ),
-            "detail": _loc(
-                "Это помогает получить понятный и проверяемый результат, который легко показать в рамках демо или презентации.",
-                "Бұл демо не презентация кезінде көрсетуге ыңғайлы, түсінікті және тексерілетін нәтиже алуға көмектеседі.",
-                "This produces a clear and verifiable result that is easy to present in a demo.",
-                lang=lang,
-            ),
-        },
-    ]
-
-
-def _overview_stages(lang: str) -> List[Dict[str, str]]:
-    """Return expanded system stages in plain language."""
-
-    return [
-        {
-            "emoji": "📥",
-            "title": _loc("Загрузка видео", "Бейнені жүктеу", "Video upload", lang=lang),
-            "short": _loc("Видео попадает в систему и становится доступным для дальнейшей работы.", "Бейне жүйеге түсіп, кейінгі жұмысқа қолжетімді болады.", "The video enters the system and becomes available for the next steps.", lang=lang),
-            "copy": _loc(
-                "На этом этапе оператор добавляет файл в библиотеку. Система фиксирует сам ролик, его базовые параметры и создает понятную точку входа для всей дальнейшей цепочки. Проще говоря, именно здесь начинается жизненный цикл видео внутри платформы.",
-                "Бұл кезеңде оператор файлды кітапханаға қосады. Жүйе роликтің өзін, негізгі параметрлерін тіркеп, келесі қадамдардың бәріне ортақ бастапқы нүкте дайындайды. Қарапайым айтқанда, бейненің платформа ішіндегі өмірі осы жерден басталады.",
-                "At this stage, the operator adds a file to the library. The system stores the video, captures its basic metadata, and creates a clear starting point for all downstream work.",
-                lang=lang,
-            ),
-            "impact": _loc("Без этого шага остальные разделы не смогут работать с роликом.", "Бұл қадамсыз қалған бөлімдер роликпен жұмыс істей алмайды.", "Without this step, the rest of the workflow cannot operate on the video.", lang=lang),
-        },
-        {
-            "emoji": "⚙️",
-            "title": _loc("Подготовка материала", "Материалды дайындау", "Preparation", lang=lang),
-            "short": _loc("Система приводит ролик к стабильному рабочему виду перед анализом.", "Жүйе талдау алдында роликті тұрақты жұмыс форматына келтіреді.", "The system normalizes the video into a stable analysis-ready form.", lang=lang),
-            "copy": _loc(
-                "Здесь выравниваются технические параметры: формат файла, воспроизведение, частота кадров и другие свойства, которые важны для устойчивой аналитики. Пользователю не нужно думать о технических различиях между роликами, потому что система готовит их к единому сценарию обработки.",
-                "Мұнда файл форматы, ойнату, кадр жиілігі және тұрақты аналитика үшін маңызды басқа қасиеттер теңестіріледі. Пайдаланушыға әр роликтің техникалық айырмасын ойлаудың қажеті жоқ, себебі жүйе бәрін ортақ өңдеу сценарийіне дайындайды.",
-                "Here the system aligns the file format, playback settings, frame rate, and other properties that matter for stable analytics.",
-                lang=lang,
-            ),
-            "impact": _loc("Этот шаг снижает шум и уменьшает риск технических сбоев дальше по цепочке.", "Бұл қадам шуды азайтып, келесі кезеңдердегі техникалық ақаулар қаупін төмендетеді.", "This step reduces noise and lowers the risk of technical failures later in the pipeline.", lang=lang),
-        },
-        {
-            "emoji": "🔎",
-            "title": _loc("Анализ сцен и событий", "Сахна мен оқиғаны талдау", "Scene and event analysis", lang=lang),
-            "short": _loc("Система просматривает фрагменты ролика и превращает их в понятные наблюдения.", "Жүйе ролик фрагменттерін қарап, оларды түсінікті бақылауларға айналдырады.", "The system reviews the video fragments and turns them into readable observations.", lang=lang),
-            "copy": _loc(
-                "На этом этапе кадры перестают быть просто картинкой. Для каждого отрезка времени система формирует описание происходящего, выделяет важные моменты и собирает основу для будущего таймлайна и поиска. Именно здесь появляется смысловая структура, с которой уже удобно работать человеку.",
-                "Бұл кезеңде кадрлар жай сурет болудан қалады. Әр уақыт аралығы үшін жүйе не болып жатқанын сипаттап, маңызды сәттерді бөліп, таймлайн мен іздеуге негіз дайындайды. Дәл осы жерде адамға ыңғайлы мағыналық құрылым пайда болады.",
-                "This is the stage where raw frames become readable events. The system builds descriptions for time segments, highlights important moments, and prepares the structure used later in the timeline and search.",
-                lang=lang,
-            ),
-            "impact": _loc("Именно здесь видео превращается в список проверяемых событий, а не просто набор кадров.", "Дәл осы жерде бейне жай кадр жиыны емес, тексерілетін оқиғалар тізіміне айналады.", "This is where the video turns into a set of verifiable events instead of just frames.", lang=lang),
-        },
-        {
-            "emoji": "🗂️",
-            "title": _loc("Индексация результатов", "Нәтижелерді индекстеу", "Indexing", lang=lang),
-            "short": _loc("Найденные события и описания попадают в поисковую основу системы.", "Табылған оқиғалар мен сипаттамалар жүйенің іздеу негізіне түседі.", "Detected events and descriptions are written into the search index.", lang=lang),
-            "copy": _loc(
-                "После анализа система сохраняет полученные эпизоды так, чтобы по ним можно было быстро искать. Это уже не просто промежуточный результат обработки, а рабочая база, на которую затем опираются поиск, ассистент и отчеты. За счет этого нужный момент можно найти не вручную, а по смыслу запроса.",
-                "Талдаудан кейін жүйе алынған эпизодтарды тез іздеуге болатындай сақтайды. Бұл жай ғана аралық нәтиже емес, кейін іздеу, ассистент және есептер сүйенетін жұмыс базасы. Соның арқасында керекті сәтті қолмен емес, сұраудың мағынасы бойынша табуға болады.",
-                "After analysis, the system stores the resulting episodes in a retrieval-friendly form. This becomes the working base for search, the assistant, and reporting.",
-                lang=lang,
-            ),
-            "impact": _loc("Этот шаг делает результаты обработки реально пригодными для практического использования.", "Бұл қадам өңдеу нәтижелерін шынайы жұмысқа жарамды етеді.", "This step turns processed output into something that can be used in practice.", lang=lang),
-        },
-        {
-            "emoji": "🧾",
-            "title": _loc("Поиск, ответы и отчёты", "Іздеу, жауап және есеп", "Search, answers, and reports", lang=lang),
-            "short": _loc("Пользователь находит нужный эпизод и получает короткий понятный вывод на основе видео.", "Пайдаланушы керекті эпизодты тауып, бейне негізінде қысқа әрі түсінікті қорытынды алады.", "Users retrieve the right episode and get a clear conclusion grounded in the video.", lang=lang),
-            "copy": _loc(
-                "Финальный этап объединяет все, что было подготовлено раньше. Пользователь ищет по запросу, открывает найденные эпизоды, задает вопрос ассистенту и при необходимости собирает короткий отчет. Важно, что итоговый ответ остается связанным с конкретными моментами видео, поэтому его легко показать и проверить.",
-                "Соңғы кезең бұрын дайындалғанның бәрін біріктіреді. Пайдаланушы сұрау арқылы іздейді, табылған эпизодтарды ашады, ассистентке сұрақ қояды және қажет болса қысқа есеп құрастырады. Маңыздысы, қорытынды жауап бейненің нақты сәттерімен байланыста қалады, сондықтан оны көрсету де, тексеру де оңай.",
-                "The final stage brings everything together. Users search, open retrieved episodes, ask the assistant questions, and build a short report when needed, while staying grounded in concrete video evidence.",
-                lang=lang,
-            ),
-            "impact": _loc("Так система превращается из процесса обработки в удобный рабочий инструмент для демонстрации и анализа.", "Осылайша жүйе жай өңдеу тізбегінен демонстрация мен талдауға арналған ыңғайлы құралға айналады.", "This is the step that turns the pipeline into a practical tool for analysis and demos.", lang=lang),
-        },
-    ]
-
-
-def _render_overview_carousel(stages: List[Dict[str, str]], session_key: str, lang: str) -> None:
-    """Render the overview stages with formatted previews and separate controls."""
-
-    if not stages:
-        return
-
-    idx = int(st.session_state.get(session_key) or 0)
-    idx = max(0, min(idx, len(stages) - 1))
-    st.session_state[session_key] = idx
-    current = stages[idx]
-
-    progress = "".join(
-        f"<span class='stage-dot{' active' if i == idx else ''}'>{i + 1}</span>"
-        for i in range(len(stages))
-    )
-    st.markdown(f"<div class='stage-progress'>{progress}</div>", unsafe_allow_html=True)
-
-    adjacent: List[tuple[int, str, str]] = []
-    if idx > 0:
-        adjacent.append((idx - 1, _loc("Предыдущий этап", "Алдыңғы кезең", "Previous stage", lang=lang), ICON_PREV))
-    if idx + 1 < len(stages):
-        adjacent.append((idx + 1, _loc("Следующий этап", "Келесі кезең", "Next stage", lang=lang), ICON_NEXT))
-
-    main_col, side_col = st.columns([2.15, 1.02], gap="large")
-    with main_col:
-        st.markdown(
-            f"""
-            <div class="stage-card">
-                <div class="stage-card-head">
-                    <div class="stage-badge">{E(current['emoji'])}</div>
-                    <div>
-                        <div class="stage-kicker">{E(_loc('Этап', 'Кезең', 'Stage', lang=lang))} {idx + 1}</div>
-                        <div class="stage-title">{E(current['title'])}</div>
-                    </div>
-                </div>
-                <div class="stage-short">{E(current['short'])}</div>
-                <div class="stage-copy">{E(current['copy'])}</div>
-                <div class="stage-impact">{E(current['impact'])}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with side_col:
-        for target_idx, label, icon in adjacent:
-            stage = stages[target_idx]
-            st.markdown(
-                f"""
-                <div class="stage-preview">
-                    <div class="stage-preview-head">
-                        <div class="stage-badge preview">{E(stage['emoji'])}</div>
-                        <div>
-                            <div class="stage-preview-label">{E(label)}</div>
-                            <div class="stage-preview-title">{E(stage['title'])}</div>
-                        </div>
-                    </div>
-                    <div class="stage-preview-copy">{E(clip_text(stage['short'], 150))}</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            if st.button(icon, key=f"{session_key}_{target_idx}", use_container_width=True, help=label):
-                st.session_state[session_key] = target_idx
-                st.rerun()
-
-        if len(adjacent) < 2:
-            st.markdown("<div class='stage-nav-spacer'></div>", unsafe_allow_html=True)
-
-
-def overview_tab(client: BackendClient, cfg: Any, ui_text: Dict[str, Dict[str, Any]]) -> None:
-    """Render the overview page."""
-
-    _ = client
-    _ = ui_text
-    lang = str(st.session_state.get("ui_lang") or getattr(cfg.ui, "default_lang", None) or "en")
-
-    st.markdown(
-        f"""
-        <div class="intro-card">
-            <div class="intro-title">{E(_loc('SmartCampus V2T для поиска событий и понятного анализа видео', 'SmartCampus V2T бейне оқиғаларын іздеуге және түсінікті талдауға арналған', 'SmartCampus V2T for event retrieval and clear video review', lang=lang))}</div>
-            <div class="intro-copy">{E(_loc('Демо-интерфейс показывает полный путь: от загрузки видео и запуска обработки до просмотра результата, поиска нужного эпизода и подготовки итогового отчёта.', 'Демо-интерфейс толық жолды көрсетеді: бейнені жүктеу мен өңдеуді іске қосудан бастап нәтижені қарауға, керекті эпизодты іздеуге және қорытынды есеп дайындауға дейін.', 'This demo interface shows the full path from upload and processing to review, event retrieval, and final reporting.', lang=lang))}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    st.markdown("<div class='overview-section-gap'></div>", unsafe_allow_html=True)
-    _section(_loc("Основные функции системы", "Жүйенің негізгі функциялары", "Main system functions", lang=lang))
-    feature_rows = _overview_features(lang)
-    for start in range(0, len(feature_rows), 2):
-        columns = st.columns(2, gap="large")
-        for col, item in zip(columns, feature_rows[start : start + 2]):
-            with col:
-                st.markdown(
-                    f"""
-                    <div class="{E(item['tone'])}">
-                        <div class="feature-label">{E(item['label'])}</div>
-                        <div class="feature-title">{E(item['title'])}</div>
-                        <div class="feature-copy">{E(item['copy'])}</div>
-                        <div class="feature-detail">{E(item['detail'])}</div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-        if start + 2 < len(feature_rows):
-            st.markdown("<div class='overview-grid-gap'></div>", unsafe_allow_html=True)
-
-    st.markdown("<div class='overview-section-gap'></div>", unsafe_allow_html=True)
-    _section(_loc("Этапы работы системы", "Жүйе жұмысының кезеңдері", "System stages", lang=lang))
-    _render_overview_carousel(_overview_stages(lang), "overview_stage_index", lang)
 
 def _overview_features(lang: str) -> List[Dict[str, str]]:
     """Return overview cards with clearer but more compact copy."""
@@ -4217,7 +1855,7 @@ def overview_tab(client: BackendClient, cfg: Any, ui_text: Dict[str, Dict[str, A
 
     _ = client
     _ = ui_text
-    lang = str(st.session_state.get("ui_lang") or getattr(cfg.ui, "default_lang", None) or "en")
+    lang = _ui_lang(cfg)
 
     st.markdown(
         f"""
