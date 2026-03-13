@@ -618,16 +618,38 @@ def _apply_runtime_perf_flags(runtime: RuntimeConfig) -> None:
             pass
 
         precision = str(getattr(runtime, "matmul_precision", "") or "").strip().lower()
-        if precision in {"highest", "high", "medium"}:
-            try:
-                torch.set_float32_matmul_precision(precision)
-            except Exception:
-                pass
+        use_tf32 = bool(getattr(runtime, "cuda_tf32", True))
+
+        # PyTorch 2.9 deprecates the older allow_tf32/set_float32_matmul_precision
+        # path in favor of backend-local fp32_precision controls.
+        matmul_mode = "ieee"
+        if use_tf32 and precision not in {"highest", "ieee"}:
+            matmul_mode = "tf32"
 
         try:
-            use_tf32 = bool(getattr(runtime, "cuda_tf32", True))
-            torch.backends.cuda.matmul.allow_tf32 = use_tf32
-            torch.backends.cudnn.allow_tf32 = use_tf32
+            if hasattr(torch.backends.cuda.matmul, "fp32_precision"):
+                torch.backends.cuda.matmul.fp32_precision = matmul_mode
+            elif precision in {"highest", "high", "medium"}:
+                torch.set_float32_matmul_precision(precision)
+        except Exception:
+            pass
+
+        cudnn_mode = "tf32" if use_tf32 else "ieee"
+        try:
+            if hasattr(torch.backends.cudnn, "fp32_precision"):
+                torch.backends.cudnn.fp32_precision = cudnn_mode
+            if hasattr(torch.backends.cudnn, "conv") and hasattr(torch.backends.cudnn.conv, "fp32_precision"):
+                torch.backends.cudnn.conv.fp32_precision = cudnn_mode
+            if hasattr(torch.backends.cudnn, "rnn") and hasattr(torch.backends.cudnn.rnn, "fp32_precision"):
+                torch.backends.cudnn.rnn.fp32_precision = cudnn_mode
+            elif hasattr(torch.backends.cudnn, "allow_tf32"):
+                torch.backends.cudnn.allow_tf32 = use_tf32
+        except Exception:
+            pass
+
+        try:
+            if not hasattr(torch.backends.cuda.matmul, "fp32_precision") and hasattr(torch.backends.cuda.matmul, "allow_tf32"):
+                torch.backends.cuda.matmul.allow_tf32 = use_tf32
         except Exception:
             pass
     except Exception:
