@@ -1,9 +1,9 @@
-# src/pipeline/llm_client.py
+# src/llm/client.py
 """
-LLM client for SmartCampus V2T pipeline runtime.
+LLM client for SmartCampus V2T semantic runtime.
 
 Purpose:
-- Provide a compact text and JSON generation interface for pipeline services.
+- Provide a compact text and JSON generation interface for semantic stages.
 - Support local transformers and OpenAI-compatible vLLM backends.
 """
 

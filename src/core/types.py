@@ -46,12 +46,14 @@ class VideoMeta:
 
 @dataclass
 class Annotation:
-
     video_id: str
     start_sec: float
     end_sec: float
     description: str
     extra: Optional[Dict[str, Any]] = None
+    anomaly_flag: bool = False
+    anomaly_confidence: float = 0.0
+    anomaly_notes: List[str] = field(default_factory=list)
 
 
 @dataclass

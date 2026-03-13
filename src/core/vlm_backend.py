@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional, Sequence
 import torch
 from transformers import AutoModelForImageTextToText, AutoProcessor
 
-from src.pipeline.config import PipelineConfig
+from src.core.config import PipelineConfig
 
 
 @dataclass

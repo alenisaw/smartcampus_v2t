@@ -6,3 +6,10 @@ backgroundColor = "#0b1117"
 secondaryBackgroundColor = "#131d2a"
 textColor = "#edf3fb"
 font = "sans serif"
+
+[client]
+showSidebarNavigation = false
+
+[server]
+runOnSave = true
+fileWatcherType = "poll"

@@ -25,7 +25,7 @@ def load_ui_text(path_str: str, mtime: float, langs_key: str) -> Dict[str, Dict[
         if not isinstance(bucket, dict):
             raise ValueError(f"Missing UI language: {lang}")
         tabs = bucket.get("tabs")
-        if not isinstance(tabs, list) or len(tabs) != 4:
+        if not isinstance(tabs, list) or len(tabs) != 5:
             raise ValueError(f"Invalid tabs for language: {lang}")
     return data
 

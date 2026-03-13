@@ -29,19 +29,21 @@ from backend.stage_metrics import (
     record_stage as _record_stage,
 )
 from scripts.collect_metrics import export_metrics_bundle
-from src.pipeline.schema_v2 import build_segment_schema_v2
-from src.pipeline.video_to_text import build_clips_from_video_meta
-from src.preprocessing.video_io import preprocess_video
+from src.core.artifacts import build_segment_schema_v2
+from src.video.clips import build_clips_from_video_meta
+from src.video.io import preprocess_video
 from src.utils.video_store import (
     find_video_file,
     metrics_path,
     outputs_manifest_path,
     read_segments,
     read_summary,
+    clip_observations_path,
     segments_path,
     summary_path,
     update_metrics,
     update_outputs_manifest,
+    write_clip_observations,
     write_metrics,
     write_run_manifest,
     write_segments,
@@ -175,11 +177,17 @@ def _build_process_segment_payloads(
             end_sec = float(annotation.get("end_sec", 0.0))
             text = str(annotation.get("normalized_caption") or annotation.get("description", ""))
             extra_payload = annotation.get("extra")
+            anomaly_flag = bool(annotation.get("anomaly_flag", False))
+            anomaly_confidence = float(annotation.get("anomaly_confidence", 0.0) or 0.0)
+            anomaly_notes = list(annotation.get("anomaly_notes") or [])
         else:
             start_sec = float(getattr(annotation, "start_sec", 0.0))
             end_sec = float(getattr(annotation, "end_sec", 0.0))
             text = str(getattr(annotation, "description", ""))
             extra_payload = getattr(annotation, "extra", None)
+            anomaly_flag = bool(getattr(annotation, "anomaly_flag", False))
+            anomaly_confidence = float(getattr(annotation, "anomaly_confidence", 0.0) or 0.0)
+            anomaly_notes = list(getattr(annotation, "anomaly_notes", []) or [])
 
         keyframe_path = clip_keyframes[index - 1] if index - 1 < len(clip_keyframes) else None
         if not keyframe_path:
@@ -204,9 +212,47 @@ def _build_process_segment_payloads(
                 metrics_meta=metrics_meta,
                 extra=extra_payload,
                 language=base_lang,
+                anomaly_flag=anomaly_flag,
+                anomaly_confidence=anomaly_confidence,
+                anomaly_notes=anomaly_notes,
             )
         )
     return segment_payloads
+
+
+def _build_clip_observation_payloads(observations: List[Any]) -> List[Dict[str, Any]]:
+    """Build persisted raw clip-observation rows from the VLM observation stage."""
+
+    rows: List[Dict[str, Any]] = []
+    for index, item in enumerate(observations or [], start=1):
+        if isinstance(item, dict):
+            rows.append(
+                {
+                    "clip_id": str(item.get("clip_id") or f"clip_{index:06d}"),
+                    "video_id": str(item.get("video_id") or ""),
+                    "start_sec": float(item.get("start_sec", 0.0) or 0.0),
+                    "end_sec": float(item.get("end_sec", 0.0) or 0.0),
+                    "description": str(item.get("description") or item.get("normalized_caption") or ""),
+                    "anomaly_flag": bool(item.get("anomaly_flag", False)),
+                    "anomaly_confidence": float(item.get("anomaly_confidence", 0.0) or 0.0),
+                    "anomaly_notes": list(item.get("anomaly_notes") or []),
+                }
+            )
+            continue
+
+        rows.append(
+            {
+                "clip_id": f"clip_{index:06d}",
+                "video_id": str(getattr(item, "video_id", "") or ""),
+                "start_sec": float(getattr(item, "start_sec", 0.0) or 0.0),
+                "end_sec": float(getattr(item, "end_sec", 0.0) or 0.0),
+                "description": str(getattr(item, "description", "") or ""),
+                "anomaly_flag": bool(getattr(item, "anomaly_flag", False)),
+                "anomaly_confidence": float(getattr(item, "anomaly_confidence", 0.0) or 0.0),
+                "anomaly_notes": list(getattr(item, "anomaly_notes", []) or []),
+            }
+        )
+    return rows
 
 
 def _enqueue_translation_jobs(
@@ -642,7 +688,7 @@ def run_process_job(
 
     set_state(paths, job_id, "running", stage="inference", progress=0.20, message="Inference")
     inference_started = time.perf_counter()
-    annotations, metrics = services.pipeline.run(
+    annotations, raw_observations, metrics = services.pipeline.run(
         video_id=video_meta.video_id,
         video_duration_sec=float(video_meta.duration_sec),
         clips=clips,
@@ -683,6 +729,15 @@ def run_process_job(
     )
 
     build_segments_started = time.perf_counter()
+    observation_rows = _build_clip_observation_payloads(list(raw_observations or []))
+    if observation_rows:
+        observations_write_started = time.perf_counter()
+        write_clip_observations(
+            clip_observations_path(Path(cfg.paths.videos_dir), video_id, variant=variant_id),
+            observation_rows,
+        )
+        _record_stage(metric_payload, "write_clip_observations", time.perf_counter() - observations_write_started)
+
     segment_payloads = _build_process_segment_payloads(
         cfg,
         video_meta=video_meta,
@@ -711,29 +766,26 @@ def run_process_job(
     write_segments(base_segments_path, segment_payloads)
     _record_stage(metric_payload, "write_segments", time.perf_counter() - write_segments_started)
 
-    summary_text = (metric_payload.get("extra") or {}).get("global_summary")
-    if summary_text:
-        summary_started = time.perf_counter()
-        summary_payload = services.summary_service.build_summary(
-            video_id=video_id,
-            language=base_lang,
-            duration_sec=float(getattr(video_meta, "duration_sec", 0.0) or 0.0),
-            summary_text=str(summary_text),
-            segments=segment_payloads,
-        )
-        _record_stage(metric_payload, "build_summary", time.perf_counter() - summary_started)
+    summary_started = time.perf_counter()
+    summary_payload = services.summary_service.build_summary(
+        video_id=video_id,
+        language=base_lang,
+        duration_sec=float(getattr(video_meta, "duration_sec", 0.0) or 0.0),
+        segments=segment_payloads,
+    )
+    _record_stage(metric_payload, "build_summary", time.perf_counter() - summary_started)
 
-        guard_started = time.perf_counter()
-        summary_payload = _guard_summary_payload(cfg, summary_payload, services.guard_service)
-        _record_stage(metric_payload, "guard_summary", time.perf_counter() - guard_started)
+    guard_started = time.perf_counter()
+    summary_payload = _guard_summary_payload(cfg, summary_payload, services.guard_service)
+    _record_stage(metric_payload, "guard_summary", time.perf_counter() - guard_started)
 
-        summary_write_started = time.perf_counter()
-        write_summary(
-            summary_path(Path(cfg.paths.videos_dir), video_id, base_lang, variant=variant_id),
-            summary_payload,
-            base_lang,
-        )
-        _record_stage(metric_payload, "write_summary", time.perf_counter() - summary_write_started)
+    summary_write_started = time.perf_counter()
+    write_summary(
+        summary_path(Path(cfg.paths.videos_dir), video_id, base_lang, variant=variant_id),
+        summary_payload,
+        base_lang,
+    )
+    _record_stage(metric_payload, "write_summary", time.perf_counter() - summary_write_started)
 
     run_manifest_started = time.perf_counter()
     write_run_manifest(
@@ -753,6 +805,7 @@ def run_process_job(
                 "translation_backend": str(cfg.translation.backend),
             },
             "output_paths": {
+                "clip_observations": str(clip_observations_path(Path(cfg.paths.videos_dir), video_id, variant=variant_id)),
                 "segments": str(base_segments_path),
                 "summary": str(summary_path(Path(cfg.paths.videos_dir), video_id, base_lang, variant=variant_id)),
                 "metrics": str(metrics_path(Path(cfg.paths.videos_dir), video_id, variant=variant_id)),

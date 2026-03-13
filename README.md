@@ -1,14 +1,14 @@
 # SmartCampus V2T
 
-SmartCampus V2T is a local video-to-text analytics system for surveillance-style and operator-facing workflows. It processes stored video into structured segment artifacts, multilingual summaries, hybrid search indexes, and grounded report/QA/RAG responses.
+SmartCampus V2T is a local video analytics system for surveillance-style and operator-facing workflows. It processes stored video into clip observations, structured segment artifacts, multilingual summaries, hybrid search indexes, and grounded report/QA/RAG responses.
 
 ## What The System Does
 
 - ingests raw videos into the local library,
 - normalizes and preprocesses frames,
 - builds temporal clips and keyframes,
-- generates English captions with a vision-language model,
-- enriches segments with structured fields and video summaries,
+- generates English clip observations with a vision-language model,
+- structures segments and video summaries with a text LLM,
 - produces `ru` and `kz` views through MT plus selective post-edit,
 - builds hybrid retrieval indexes,
 - serves search, grounded reports, QA, and RAG through FastAPI and Streamlit.
@@ -18,7 +18,6 @@ Canonical storage and indexing language is English. Additional language views ar
 ## Documentation Map
 
 - Project guide: [docs/project_guide.md](docs/project_guide.md)
-- Local-only worklog: `docs/local_progress.md` is ignored by git and not part of the public project docs.
 
 ## Repository Layout
 
@@ -27,7 +26,7 @@ app/       Streamlit operator UI
 backend/   FastAPI API, queue control, worker runtime, job executors
 configs/   Runtime profiles and experimental variants
 scripts/   Local operations, metrics, experiments, evaluation
-src/       Core pipeline, translation, search, config, and utilities
+src/       Core runtime, video, semantic LLM, guard, translation, and search layers
 data/      Local runtime artifacts, indexes, caches, research outputs
 docs/      Project documentation
 ```
@@ -72,9 +71,11 @@ python scripts/smoke_services.py --api http://127.0.0.1:8000 --ui http://127.0.0
 - API: `backend/api.py`
 - Worker loop: `backend/worker.py`
 - Job execution: `backend/job_executors.py`
-- Main processing pipeline: `src/pipeline/video_to_text.py`
+- Video observation pipeline: `src/video/describe.py`
+- Semantic analysis and summary: `src/llm/analyze.py`, `src/llm/summary.py`
+- Guard layer: `src/guard/service.py`, `src/guard/schemas.py`
 - Translation: `src/translation/service.py`
-- Search build/query: `src/search/index_builder.py`, `src/search/query_engine.py`
+- Search build/query: `src/search/builder.py`, `src/search/engine.py`
 - UI entrypoint: `app/main.py`
 
 ## Research And Evaluation Utilities
@@ -101,6 +102,7 @@ python scripts/smoke_services.py --api http://127.0.0.1:8000 --ui http://127.0.0
 
 ## Notes
 
-- The repository is built around local filesystem artifacts under `data/`.
-- `.agent/` and `docs/local_progress.md` are local-only and ignored by git.
+- The repository is built around runtime artifacts under `data/`.
+- The active source architecture is `src/core + src/video + src/llm + src/guard + src/search + src/translation`.
+- Raw VLM clip observations are now persisted under `data/videos/<video_id>/outputs/clip_observations.json` and feed the later semantic stages.
 - The detailed architecture, runtime flows, configs, artifact model, and operations guide live in [docs/project_guide.md](docs/project_guide.md).

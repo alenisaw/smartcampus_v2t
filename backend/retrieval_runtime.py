@@ -19,8 +19,8 @@ from fastapi import HTTPException
 from backend.schemas import Citation, MetricsSummaryResponse, SearchHit
 
 if TYPE_CHECKING:
-    from src.pipeline.guard_service import GuardService
-    from src.pipeline.llm_client import LLMClient
+    from src.guard.service import GuardService
+    from src.llm.client import LLMClient
     from src.search import QueryEngine
     from src.translation.service import TranslationService
 
@@ -348,7 +348,7 @@ def get_llm_client(cfg: Any) -> Optional["LLMClient"]:
     client = _LLM_CACHE.get(key)
     if client is None:
         try:
-            from src.pipeline.llm_client import LLMClient
+            from src.llm.client import LLMClient
         except Exception:
             return None
         try:
@@ -368,7 +368,7 @@ def get_guard_service(cfg: Any) -> Optional["GuardService"]:
     service = _GUARD_CACHE.get(key)
     if service is None:
         try:
-            from src.pipeline.guard_service import GuardService
+            from src.guard.service import GuardService
         except Exception:
             return None
         try:

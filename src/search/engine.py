@@ -22,7 +22,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.utils.config_loader import load_pipeline_config
+from src.core.runtime import load_pipeline_config
 
 from .embed import MODEL_NAME_DEFAULT, build_text_embedder, looks_like_transformers_model as _looks_like_transformers_model
 from .builder import (

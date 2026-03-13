@@ -1,10 +1,10 @@
-# src/pipeline/schema_v2.py
+# src/core/artifacts.py
 """
-Schema v2 builders for SmartCampus V2T pipeline.
+Artifact schema builders for SmartCampus V2T.
 
 Purpose:
 - Convert pipeline outputs into canonical segment and video summary artifacts.
-- Keep artifact-shape assembly separate from runtime execution code.
+- Keep artifact-shape assembly under the new compact `src.core` layout.
 """
 
 from __future__ import annotations
@@ -50,6 +50,9 @@ def build_segment_schema_v2(
     metrics_meta: Optional[Dict[str, Any]] = None,
     extra: Optional[Dict[str, Any]] = None,
     language: str = "en",
+    anomaly_flag: bool = False,
+    anomaly_confidence: float = 0.0,
+    anomaly_notes: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Build one Segment Schema v2 object with safe defaults."""
 
@@ -59,6 +62,7 @@ def build_segment_schema_v2(
     preprocessing_meta = dict(preprocessing_meta or {})
     metrics_meta = dict(metrics_meta or {})
     extra = dict(extra or {})
+    anomaly_notes = [str(item).strip() for item in (anomaly_notes or []) if str(item).strip()]
 
     merged_from = extra.get("merged_from")
     if not isinstance(merged_from, list):
@@ -79,8 +83,11 @@ def build_segment_schema_v2(
         "objects": [],
         "people_count_bucket": "none",
         "motion_type": "stable",
-        "anomaly_flag": False,
-        "anomaly_notes": [],
+        "anomaly_flag": bool(anomaly_flag),
+        "anomaly_confidence": float(anomaly_confidence),
+        "anomaly_notes": anomaly_notes,
+        "severity_reason": "",
+        "needs_attention": bool(anomaly_flag),
         "evidence": {
             "keyframe_path": keyframe_path,
         },

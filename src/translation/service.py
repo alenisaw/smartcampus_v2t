@@ -233,7 +233,7 @@ class TranslationService:
             return
         self._llm_client_ready = True
         try:
-            from src.pipeline.llm_client import LLMClient
+            from src.llm.client import LLMClient
 
             self._llm_client = LLMClient.from_config(self.cfg)
         except Exception:
