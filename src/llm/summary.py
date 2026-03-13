@@ -1,10 +1,10 @@
-# src/pipeline/summary_service.py
+# src/llm/summary.py
 """
-Summary service for SmartCampus V2T pipeline.
+Video-level summary generation for SmartCampus V2T.
 
 Purpose:
-- Build canonical video summaries from segment facts.
-- Use optional LLM JSON generation with deterministic fallback repair.
+- Build canonical video summaries from structured segment facts.
+- Keep global summary generation separate from the VLM observation stage.
 """
 
 from __future__ import annotations
@@ -13,8 +13,9 @@ import json
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from src.pipeline.llm_client import LLMClient
-from src.pipeline.schema_v2 import build_video_summary_v2
+from src.guard.schemas import validate_summary_payload
+from src.llm.client import LLMClient
+from src.core.artifacts import build_video_summary_v2
 
 
 def _summary_prompt(video_id: str, duration_sec: float, segments: List[Dict[str, Any]]) -> str:
@@ -30,22 +31,53 @@ def _summary_prompt(video_id: str, duration_sec: float, segments: List[Dict[str,
                 "normalized_caption": item.get("normalized_caption"),
                 "event_type": item.get("event_type"),
                 "risk_level": item.get("risk_level"),
+                "anomaly_flag": item.get("anomaly_flag"),
+                "anomaly_confidence": item.get("anomaly_confidence"),
+                "anomaly_notes": item.get("anomaly_notes"),
                 "tags": item.get("tags"),
             }
         )
 
     return (
-        "Return only JSON for Video Summary Schema v2. Use only provided segment facts.\n"
+        "Return only JSON for Video Summary Schema v2. Use only the provided segment facts.\n"
         f"VIDEO={json.dumps({'video_id': video_id, 'duration_sec': duration_sec}, ensure_ascii=False)}\n"
         f"SEGMENTS={json.dumps(compact_segments, ensure_ascii=False)}"
     )
+
+
+def _fallback_summary_text(segments: List[Dict[str, Any]]) -> str:
+    """Build a short deterministic summary from structured segments."""
+
+    if not segments:
+        return "No significant activity was detected in the processed video."
+
+    seen: List[str] = []
+    for item in segments:
+        text = str(item.get("normalized_caption") or item.get("description") or "").strip()
+        if text and text not in seen:
+            seen.append(text)
+        if len(seen) >= 3:
+            break
+
+    summary = " ".join(seen).strip()
+    attention_segments = [
+        item
+        for item in segments
+        if bool(item.get("anomaly_flag", False)) or str(item.get("risk_level", "normal")) != "normal"
+    ]
+    if attention_segments:
+        summary = (
+            f"{summary} "
+            f"{len(attention_segments)} segment(s) require attention based on visible anomaly signals."
+        ).strip()
+    return summary or "No significant activity was detected in the processed video."
 
 
 def _repair_summary_payload(data: Optional[Dict[str, Any]], fallback: Dict[str, Any]) -> Dict[str, Any]:
     """Merge a partial LLM summary into a fully valid fallback summary."""
 
     if not isinstance(data, dict):
-        return fallback
+        return validate_summary_payload(fallback)
 
     merged = dict(fallback)
     for key in (
@@ -61,27 +93,16 @@ def _repair_summary_payload(data: Optional[Dict[str, Any]], fallback: Dict[str, 
         if key in data:
             merged[key] = data[key]
 
-    if not isinstance(merged.get("key_events"), list):
-        merged["key_events"] = fallback.get("key_events", [])
-    if not isinstance(merged.get("citations"), list):
-        merged["citations"] = fallback.get("citations", [])
-    if not isinstance(merged.get("translation_views"), dict):
-        merged["translation_views"] = fallback.get("translation_views", {})
-    if not isinstance(merged.get("risk_overview"), dict):
-        merged["risk_overview"] = fallback.get("risk_overview", {})
-    if not isinstance(merged.get("statistics"), dict):
-        merged["statistics"] = fallback.get("statistics", {})
-
     merged["schema_version"] = "2.0"
     merged["video_id"] = fallback.get("video_id")
     merged["language"] = fallback.get("language")
     merged.setdefault("summary", merged.get("global_summary", fallback.get("summary", "")))
-    return merged
+    return validate_summary_payload(merged)
 
 
 @dataclass
 class SummaryService:
-    """Generate a schema v2 video summary with optional LLM and deterministic fallback."""
+    """Generate a video summary with optional LLM and deterministic fallback."""
 
     cfg: Any
     llm_client: Optional[LLMClient] = None
@@ -103,17 +124,18 @@ class SummaryService:
         video_id: str,
         language: str,
         duration_sec: float,
-        summary_text: str,
         segments: List[Dict[str, Any]],
+        summary_text: str = "",
     ) -> Dict[str, Any]:
-        """Build a summary, preferring strict-JSON LLM output and falling back deterministically."""
+        """Build a summary from structured segments, preferring LLM JSON output."""
 
+        fallback_text = str(summary_text or "").strip() or _fallback_summary_text(segments)
         fallback = build_video_summary_v2(
             cfg=self.cfg,
             video_id=video_id,
             language=language,
             duration_sec=duration_sec,
-            summary_text=summary_text,
+            summary_text=fallback_text,
             segments=segments,
         )
         llm_payload = self._try_llm_summary(video_id=video_id, duration_sec=duration_sec, segments=segments)

@@ -1,10 +1,10 @@
-# src/utils/config_loader.py
+# src/core/runtime.py
 """
-Config loader for SmartCampus V2T.
+Runtime config loading for SmartCampus V2T.
 
 Purpose:
 - Resolve profile and variant YAML inputs into typed effective runtime config.
-- Keep raw config merging, path resolution, and validation in one module.
+- Keep raw config merging, path resolution, and validation under `src.core`.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import yaml
 
-from src.pipeline.config import (
+from src.core.config import (
     BackendConfig,
     ClipsConfig,
     ExperimentConfig,
@@ -213,7 +213,7 @@ def _dependency_files(
 ) -> List[Path]:
     """Collect all files that influence the effective config for cache invalidation."""
 
-    raw, deps = _load_with_extends(config_path)
+    _raw, deps = _load_with_extends(config_path)
     variants_dir = config_path.resolve().parents[1] / "variants"
 
     if variant:

@@ -1,17 +1,17 @@
-# src/pipeline/config.py
+# src/core/config.py
 """
-Typed pipeline configuration for SmartCampus V2T.
+Typed runtime configuration for SmartCampus V2T.
 
 Purpose:
 - Define the effective runtime config contract after profile and variant resolution.
-- Keep strongly typed settings separate from raw config loading logic.
+- Keep strongly typed settings under the new compact `src.core` layout.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 
 @dataclass

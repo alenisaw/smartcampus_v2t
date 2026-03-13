@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from src.utils.config_loader import load_pipeline_bundle
+from src.core.runtime import load_pipeline_bundle
 
 
 def now_ts() -> float:

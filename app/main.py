@@ -1,4 +1,3 @@
-# app/main.py
 """
 Streamlit entrypoint for SmartCampus V2T.
 
@@ -21,10 +20,42 @@ if str(PROJECT_ROOT) not in sys.path:
 from app import ui as U
 from app.api_client import BackendClient
 from app.state import UIState
-from src.utils.config_loader import config_cache_token, load_pipeline_config
+from src.core.runtime import config_cache_token, load_pipeline_config
 
-TAB_IDS = ["home", "processing", "video", "search"]
+TAB_IDS = ["home", "processing", "video", "search", "reports"]
 CFG_PATH = PROJECT_ROOT / "configs" / "profiles" / "main.yaml"
+EARLY_SHELL_CSS = """
+<style>
+[data-testid="stSidebar"],
+[data-testid="stSidebarNav"],
+[data-testid="stSidebarCollapsedControl"],
+[data-testid="collapsedControl"]{
+  display:none !important;
+}
+</style>
+"""
+
+
+def _tab_labels(lang: str) -> list[str]:
+    """Return localized top-level tab labels."""
+
+    return {
+        "ru": [
+            "\u041e\u0431\u0437\u043e\u0440",
+            "\u0425\u0440\u0430\u043d\u0438\u043b\u0438\u0449\u0435",
+            "\u0412\u0438\u0434\u0435\u043e\u0430\u043d\u0430\u043b\u0438\u0442\u0438\u043a\u0430",
+            "\u041f\u043e\u0438\u0441\u043a",
+            "\u041e\u0442\u0447\u0451\u0442\u044b",
+        ],
+        "kz": [
+            "\u0428\u043e\u043b\u0443",
+            "\u049a\u043e\u0439\u043c\u0430",
+            "\u0411\u0435\u0439\u043d\u0435 \u0430\u043d\u0430\u043b\u0438\u0442\u0438\u043a\u0430\u0441\u044b",
+            "\u0406\u0437\u0434\u0435\u0443",
+            "\u0415\u0441\u0435\u043f\u0442\u0435\u0440",
+        ],
+        "en": ["Overview", "Storage", "Video Analytics", "Search", "Reports"],
+    }.get(str(lang or "en"), ["Overview", "Storage", "Video Analytics", "Search", "Reports"])
 
 
 @st.cache_resource(show_spinner=False)
@@ -57,11 +88,16 @@ def _get_tab_from_query(default_tab: str = "home") -> str:
     aliases = {
         "operations": "processing",
         "process": "processing",
-        "storage": "video",
+        "storage": "processing",
+        "library": "processing",
         "videos": "video",
         "gallery": "video",
-        "analytics": "search",
+        "video-analytics": "video",
+        "analytics": "video",
         "assistant": "search",
+        "reports": "reports",
+        "metrics": "reports",
+        "summaries": "reports",
     }
     tab = aliases.get(tab, tab)
     return tab if tab in TAB_IDS else default_tab
@@ -70,7 +106,8 @@ def _get_tab_from_query(default_tab: str = "home") -> str:
 def main() -> None:
     """Render the demo UI and route to the selected page."""
 
-    st.set_page_config(page_title="SmartCampus V2T", layout="wide")
+    st.set_page_config(page_title="SmartCampus V2T", layout="wide", initial_sidebar_state="collapsed")
+    st.markdown(EARLY_SHELL_CSS, unsafe_allow_html=True)
 
     cfg = get_cfg()
     U.load_and_apply_css(Path(cfg.ui.styles_path))
@@ -104,9 +141,9 @@ def main() -> None:
     tab = _get_tab_from_query(default_tab="home")
 
     T = U.get_T(ui_text, st.session_state.get("ui_lang", default_lang))
-    labels = T.get("tabs") or ["Overview", "Processing", "Video Analytics", "Search"]
+    labels = _tab_labels(str(st.session_state.get("ui_lang", default_lang)))
     if not isinstance(labels, list) or len(labels) != len(TAB_IDS):
-        labels = ["Overview", "Processing", "Video Analytics", "Search"]
+        labels = ["Overview", "Storage", "Video Analytics", "Search", "Reports"]
 
     tab = U.render_header(
         T=T,
@@ -123,15 +160,17 @@ def main() -> None:
         st.stop()
 
     if tab == "home":
-        U.home_tab(client, cfg, ui_text)
+        U.overview_tab(client, cfg, ui_text)
     elif tab == "processing":
-        U.processing_tab(client, cfg, ui_text)
+        U.storage_tab(client, cfg, ui_text)
     elif tab == "video":
-        U.gallery_tab(client, cfg, ui_text)
+        U.video_analytics_tab(client, cfg, ui_text)
+    elif tab == "reports":
+        U.reports_metrics_tab(client, cfg, ui_text)
     else:
         U.search_tab(client, cfg, ui_text)
 
-    U.footer(U.get_T(ui_text, st.session_state.get("ui_lang", default_lang)))
+    U.footer(U.get_T(ui_text, st.session_state.get("ui_lang", default_lang)), str(st.session_state.get("ui_lang", default_lang)))
     U.render_i18n_metrics()
 
 

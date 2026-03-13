@@ -1,10 +1,10 @@
-# src/pipeline/guard_service.py
+# src/guard/service.py
 """
-Guard service for SmartCampus V2T pipeline runtime.
+Guard service for SmartCampus V2T semantic runtime.
 
 Purpose:
 - Apply query and output policy checks with model-backed or rule-based decisions.
-- Keep guard behavior close to the pipeline LLM runtime layer.
+- Keep policy guard behavior explicit in the new compact source layout.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import json
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from src.pipeline.llm_client import LLMClient
+from src.llm.client import LLMClient
 
 _QUERY_BLOCKLIST = (
     "ignore previous instructions",

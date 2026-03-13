@@ -18,7 +18,7 @@ The repository contains three main runtime surfaces:
 - a FastAPI backend,
 - a worker-based filesystem queue for asynchronous processing.
 
-The pipeline is already assembled end to end. The codebase includes preprocessing, clip building, VLM captioning, structuring, summary generation, machine translation, selective post-edit, hybrid retrieval, experiment utilities, and research metrics export.
+The pipeline is already assembled end to end. The codebase includes preprocessing, clip building, VLM observation, semantic segment analysis, summary generation, machine translation, selective post-edit, hybrid retrieval, experiment utilities, and research metrics export.
 
 ## 2. High-Level Architecture
 
@@ -27,17 +27,17 @@ Streamlit UI
   -> FastAPI API
   -> filesystem queue + persisted jobs
   -> worker runtime
-  -> preprocessing
-  -> clip builder + keyframe policy
-  -> VLM captioning
-  -> segment structuring
+  -> video decode + clip builder + keyframe policy
+  -> VLM clip observation
+  -> guard/schema repair
+  -> semantic segment analysis
   -> video summary generation
   -> translation + selective post-edit
   -> hybrid index build
   -> search / reports / QA / RAG
 ```
 
-The repository is local-first. Data, indexes, manifests, metrics, and experiment artifacts are persisted under `data/`.
+The repository persists data, indexes, manifests, metrics, and experiment artifacts under `data/`.
 
 ## 3. Repository Structure
 
@@ -49,7 +49,7 @@ Streamlit UI layer.
 - `ui.py`: facade over the modular UI.
 - `api_client.py`: REST client for the backend.
 - `state.py`: session defaults for UI state.
-- `pages/`: page-level renderers for storage, analytics, and assistant surfaces.
+- `pages/`: page-level renderers for overview, storage, video analytics, search, and reports surfaces.
 - `components/`: reusable UI components.
 - `lib/`: formatting, i18n, and media helpers.
 - `assets/`: CSS, translations, and brand assets.
@@ -80,14 +80,12 @@ Runtime selection uses one profile plus an optional variant override.
 
 Core application logic.
 
-- `preprocessing/`: FFmpeg decode normalization and frame preparation.
-- `pipeline/`: clip building, captioning orchestration, segment schema, and summaries.
+- `core/`: typed runtime config plus config-loading entrypoints.
+- `video/`: decode entrypoints, clip building, and VLM observation.
+- `llm/`: semantic segment analysis and video summary generation.
+- `guard/`: policy checks and schema guards.
 - `translation/`: MT routing, cache, and selective post-edit.
 - `search/`: hybrid indexing and querying.
-- `guard/`: input/output guard hooks.
-- `llm/`: shared text-generation client.
-- `core/`: runtime types and model-specific backend logic.
-- `utils/`: config loading and video artifact path helpers.
 
 ### `scripts/`
 
@@ -116,7 +114,6 @@ Local runtime artifacts.
 Project documentation.
 
 - `project_guide.md`: detailed architecture and operations guide.
-- `local_progress.md`: local-only progress notes, ignored by git.
 
 ## 4. Runtime Model
 
@@ -144,7 +141,7 @@ The effective configuration is the merged result of:
 2. optional `extends` chain inside YAML,
 3. optional variant override.
 
-Typed config objects are defined in `src/pipeline/pipeline_config.py`. Loading and merging logic lives in `src/utils/config_loader.py`.
+Typed config objects are exposed through `src/core/config.py`. Loading and merging logic lives in `src/core/runtime.py`.
 
 ### Worker Roles
 
@@ -173,20 +170,22 @@ The `process` job is the main end-to-end path.
 4. Frame quality filters are applied for dark frames, low-motion frames, and blur flags.
 5. Clip windows are produced from the processed frame stream.
 6. Keyframes are selected according to the configured keyframe policy.
-7. The VLM generates English clip captions.
-8. Captions are sanitized and smoothed.
-9. Segment schema payloads are built and enriched.
-10. A video summary is generated.
+7. The VLM generates strict English clip observations (`description`, `anomaly_flag`, `anomaly_confidence`, `anomaly_notes`).
+8. Clip observations are sanitized and merged into larger segments when adjacent windows are semantically close.
+9. Segment schema payloads are built and enriched by the semantic LLM layer.
+10. A video summary is generated from structured segments, not from the VLM stage.
 11. Artifacts and manifests are written to disk.
 12. Optional index updates and translation fan-out are triggered.
 13. Metrics are persisted.
 
 Key implementation points:
 
-- preprocessing: `src/preprocessing/video_io.py`
-- orchestration: `src/pipeline/video_to_text.py`
-- structuring: `src/pipeline/structuring.py`
-- summary generation: `src/pipeline/summary_service.py`
+- decode entrypoint: `src/video/io.py`
+- clip building: `src/video/clips.py`
+- VLM observation: `src/video/describe.py`
+- segment analysis: `src/llm/analyze.py`
+- summary generation: `src/llm/summary.py`
+- guard/schema repair: `src/guard/service.py`, `src/guard/schemas.py`
 
 ### 5.2 Translate Job
 
@@ -216,7 +215,7 @@ The `index` job rebuilds or refreshes retrieval indexes from stored outputs.
 
 Implementation point:
 
-- `src/search/index_builder.py`
+- `src/search/builder.py`
 
 ## 6. Key Runtime Concepts
 
@@ -272,24 +271,24 @@ The search stack supports dense input mode `text_keyframe`, which augments text 
 
 ### Core Pipeline
 
-- `src/pipeline/video_to_text.py`
-  Main process-job orchestration and clip captioning pipeline.
+- `src/video/describe.py`
+  Main VLM observation pipeline for clip-level descriptions and anomaly signals.
 
-- `src/preprocessing/video_io.py`
-  Decode normalization and frame preparation.
+- `src/video/io.py`
+  Decode normalization entrypoint and frame preparation access.
 
-- `src/pipeline/structuring.py`
-  Structured segment enrichment.
+- `src/llm/analyze.py`
+  Structured segment enrichment, event classification, risk classification, and internal retrieval tags.
 
-- `src/pipeline/summary_service.py`
-  Video-level summary generation.
+- `src/llm/summary.py`
+  Video-level summary generation from structured segments.
 
 ### Search
 
-- `src/search/index_builder.py`
+- `src/search/builder.py`
   Index build/update logic and embedder integration.
 
-- `src/search/query_engine.py`
+- `src/search/engine.py`
   Query-time hybrid retrieval and rerank flow.
 
 ### Translation
@@ -307,6 +306,7 @@ data/
     raw/
     cache/
     outputs/
+      clip_observations.json
       segments/
       summaries/
       metrics.json
@@ -331,6 +331,9 @@ data/
 
 - `metrics.json`
   Runtime metrics for the process or translation path, including stage timings.
+
+- `clip_observations.json`
+  Raw VLM observations per clip before semantic consolidation and video-level summary.
 
 - `batch_manifest.json`
   Experimental parent/child fan-out manifest for variant runs.
@@ -418,9 +421,11 @@ The UI remains on Streamlit and is structured as an operator console rather than
 
 Main tabs:
 
-- storage: video library, upload, process execution, output inspection
-- analytics: retrieval, filtering, search result inspection
-- assistant: grounded reports, QA, RAG, runtime metrics inspection
+- overview: system explanation and pipeline storytelling
+- storage: video library, upload, queue, and process execution
+- video analytics: inspection of one processed video
+- search: retrieval plus grounded assistant
+- reports / metrics: generated reports, summaries, and metrics
 
 The UI is now organized internally into:
 
@@ -544,10 +549,8 @@ docker compose --profile with_ct2 up --build
 
 ## 14. Operational Notes
 
-- The repository is local-first and artifact-heavy by design.
+- The repository is artifact-heavy by design.
 - `data/` is ignored by git and acts as the runtime workspace.
-- `.agent/` is local Codex memory and is ignored by git.
-- `docs/local_progress.md` is local-only and ignored by git.
 - `__pycache__/` is ignored by git and should not be treated as source structure.
 
 ## 15. Current Architectural Pressure Points
@@ -556,9 +559,8 @@ The codebase is functional, but several modules carry too much responsibility:
 
 - `backend/api.py`
 - `backend/job_executors.py`
-- `src/search/index_builder.py`
-- `src/search/query_engine.py`
-- `src/pipeline/video_to_text.py`
+- `src/search/builder.py`
+- `src/search/engine.py`
 
 These are the main candidates for internal reorganization without changing runtime behavior.
 
@@ -570,7 +572,7 @@ These are the main candidates for internal reorganization without changing runti
 - Video: FFmpeg, OpenCV
 - Translation: CTranslate2, sentencepiece, sacremoses
 - Retrieval: BM25 plus dense embeddings plus rerank
-- Storage: JSON, local filesystem, SQLite-based caches where applicable
+- Storage: JSON artifacts and SQLite-based caches where applicable
 - Containers: Docker, Docker Compose
 
 ## 17. Development Guidance

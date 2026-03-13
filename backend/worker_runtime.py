@@ -22,10 +22,10 @@ from backend.experimental import (
 from backend.index_runtime import write_index_state as _write_index_state
 from backend.job_control import create_job, notify_webhook, read_job, remove_lock_if_exists, set_state, write_job
 from backend.job_executors import WorkerServices
-from src.pipeline.guard_service import GuardService
-from src.pipeline.summary_service import SummaryService
-from src.pipeline.structuring import StructuringService
-from src.pipeline.video_to_text import VideoToTextPipeline
+from src.guard.service import GuardService
+from src.llm.analyze import StructuringService
+from src.llm.summary import SummaryService
+from src.video.describe import VideoToTextPipeline
 from src.search.builder import search_config_fingerprint
 from src.translation.service import TranslationService
 from src.utils.video_store import update_outputs_manifest, write_batch_manifest

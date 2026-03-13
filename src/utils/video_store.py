@@ -89,6 +89,12 @@ def summaries_dir(videos_dir: Path, video_id: str, variant: Optional[str] = None
     return outputs_dir(videos_dir, video_id, variant=variant) / "summaries"
 
 
+def clip_observations_path(videos_dir: Path, video_id: str, variant: Optional[str] = None) -> Path:
+    """Return the path of the raw clip-observation artifact."""
+
+    return outputs_dir(videos_dir, video_id, variant=variant) / "clip_observations.json"
+
+
 def segments_path(videos_dir: Path, video_id: str, lang: str, variant: Optional[str] = None) -> Path:
     """Return the path of the segments artifact for one language."""
 
@@ -384,6 +390,21 @@ def read_summary(path: Path) -> Optional[Dict[str, Any]]:
 
     obj = _read_json(path, default=None)
     return obj if isinstance(obj, dict) else None
+
+
+def read_clip_observations(path: Path) -> List[Dict[str, Any]]:
+    """Read the raw clip-observation artifact."""
+
+    obj = _read_json(path, default=[])
+    if isinstance(obj, list):
+        return [item for item in obj if isinstance(item, dict)]
+    return []
+
+
+def write_clip_observations(path: Path, rows: Iterable[Dict[str, Any]]) -> None:
+    """Write the raw clip-observation artifact as JSON."""
+
+    _write_json(path, list(rows))
 
 
 def write_summary(path: Path, summary: Any, lang: str, extra: Optional[Dict[str, Any]] = None) -> None:

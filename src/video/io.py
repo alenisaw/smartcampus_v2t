@@ -1,10 +1,10 @@
-# src/preprocessing/video_io.py
+# src/video/io.py
 """
 Video preprocessing for SmartCampus V2T.
 
 Purpose:
-- Decode, normalize, filter, and persist frames for downstream pipeline stages.
-- Handle FPS normalization, anonymization, quality filtering, and cached video meta.
+- Decode, normalize, filter, and persist frames for downstream stages.
+- Handle FPS normalization, anonymization, quality filtering, and cached video metadata.
 """
 
 from __future__ import annotations
@@ -21,8 +21,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
+from src.core.config import PipelineConfig
 from src.core.types import FrameInfo, VideoMeta
-from src.pipeline.config import PipelineConfig
 from src.utils.video_store import cache_dir as video_cache_dir
 from src.utils.video_store import find_video_file
 
@@ -46,6 +46,8 @@ def _cfg_video_io_get(config: PipelineConfig, key: str, default: Any) -> Any:
 
 
 def preprocess_video(video_path: str | Path, config: PipelineConfig) -> VideoMeta:
+    """Preprocess one video path into cached frame metadata."""
+
     video_path = Path(video_path).resolve()
     video_id = video_path.stem
     return prepare_video(video_id=video_id, config=config, video_path=video_path)
@@ -56,6 +58,8 @@ def prepare_video(
     config: PipelineConfig,
     video_path: Optional[Path] = None,
 ) -> VideoMeta:
+    """Prepare cached frame metadata for one video id."""
+
     paths_cfg = config.paths
     video_cfg = config.video
 
