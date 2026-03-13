@@ -1428,6 +1428,7 @@ def _render_search_panel_fragment(
             placeholder=_loc("1, 2-3, группа", "1, 2-3, топ", "1, 2-3, group", lang=lang),
         )
 
+    _mark("search-controls-row-marker")
     controls_row = st.columns([1.08, 1.08, 0.95, 1.15], gap="small")
     with controls_row[0]:
         st.checkbox(_loc("Только аномалии", "Тек ауытқулар", "Anomalies only", lang=lang), key="search_anomaly_only")
@@ -1476,17 +1477,16 @@ def footer(T: Dict[str, Any], lang: str) -> None:
         )
 
 
+
+
 def reports_metrics_tab(client: BackendClient, cfg: Any, ui_text: Dict[str, Dict[str, Any]]) -> None:
-    """Render the reports page without nested panel wrappers."""
+    """Render the reports page without extra placeholder copy and with inline build warnings."""
 
     _ = ui_text
     _bind_reports_state()
     lang = _ui_lang(cfg)
-    videos = _video_items(client)
-    if not videos:
-        soft_note(_loc("Библиотека пуста. Сначала загрузите видео.", "Қойма бос. Алдымен бейне жүктеңіз.", "The library is empty. Upload a video to begin.", lang=lang))
-        return
 
+    videos = client.list_videos()
     context = _resolve_video_context(
         videos,
         video_key="reports_video_id",
@@ -1527,36 +1527,62 @@ def reports_metrics_tab(client: BackendClient, cfg: Any, ui_text: Dict[str, Dict
             _loc("Фокус отчёта", "Есеп бағыты", "Report focus", lang=lang),
             key="reports_focus",
             height=120,
-            placeholder=_loc("Например: что происходило у входа и были ли сигналы риска?", "Мысалы: кіреберісте не болды және тәуекел белгілері болды ма?", "For example: what happened near the entrance and were there risk signals?", lang=lang),
+            placeholder=_loc(
+                "Например: что происходило у входа и были ли сигналы риска?",
+                "Мысалы: кіреберісте не болды және тәуекел белгілері болды ма?",
+                "For example: what happened near the entrance and were there risk signals?",
+                lang=lang,
+            ),
         )
+
+        report_build_notice = ""
         action_cols = st.columns([0.85, 3.15], gap="small")
         with action_cols[0]:
             if st.button(ICON_START, key="reports_build_btn", use_container_width=True, help=_loc("Построить отчёт", "Есеп құрастыру", "Build report", lang=lang)):
-                try:
-                    st.session_state["reports_payload"] = client.build_report(
-                        video_id=selected_video_id or None,
-                        language=str(st.session_state.get("reports_lang") or lang),
-                        variant=variant_from_token(st.session_state.get("reports_variant")),
-                        query=str(st.session_state.get("reports_focus") or "").strip() or None,
-                        top_k=8,
+                if not selected_video_id:
+                    st.session_state["reports_payload"] = {}
+                    report_build_notice = _loc(
+                        "Нельзя построить отчёт: сначала выберите видео.",
+                        "Есепті құрастыру мүмкін емес: алдымен бейнені таңдаңыз.",
+                        "The report cannot be built until a video is selected.",
+                        lang=lang,
                     )
-                except Exception as exc:
-                    soft_note(f"{_error_prefix(lang)}: {exc}", kind="warn")
+                elif not outputs:
+                    st.session_state["reports_payload"] = {}
+                    report_build_notice = _loc(
+                        "Нельзя построить отчёт для видео {video_id}: результаты обработки пока недоступны.",
+                        "{video_id} бейнесі үшін есепті құрастыру мүмкін емес: өңдеу нәтижелері әзірге қолжетімсіз.",
+                        "The report cannot be built for video {video_id}: processed results are not available yet.",
+                        lang=lang,
+                    ).format(video_id=selected_video_id)
+                else:
+                    try:
+                        st.session_state["reports_payload"] = client.build_report(
+                            video_id=selected_video_id or None,
+                            language=str(st.session_state.get("reports_lang") or lang),
+                            variant=variant_from_token(st.session_state.get("reports_variant")),
+                            query=str(st.session_state.get("reports_focus") or "").strip() or None,
+                            top_k=8,
+                        )
+                    except Exception:
+                        report_build_notice = _loc(
+                            "Не удалось построить отчёт для видео {video_id}. Проверьте, что обработка завершена и данные доступны.",
+                            "{video_id} бейнесі үшін есепті құрастыру мүмкін болмады. Өңдеу аяқталғанын және деректердің қолжетімді екенін тексеріңіз.",
+                            "The report could not be built for video {video_id}. Check that processing is complete and the data is available.",
+                            lang=lang,
+                        ).format(video_id=selected_video_id)
+
         with action_cols[1]:
-            st.markdown(
-                f"<div class='status-line'>{E(_loc('Страница подготовлена как компактный демо-отчёт с опорой на найденные эпизоды.', 'Бет табылған эпизодтарға сүйенген ықшам демо-есеп ретінде жасалған.', 'This page is designed as a compact demo report grounded in retrieved evidence.', lang=lang))}</div>",
-                unsafe_allow_html=True,
-            )
+            if report_build_notice:
+                st.markdown(
+                    f"<div class='bootstrap-alert bootstrap-alert--warning' role='alert'>{E(report_build_notice)}</div>",
+                    unsafe_allow_html=True,
+                )
 
         report_payload = st.session_state.get("reports_payload") or {}
         report_text = str(report_payload.get("report") or "").strip()
         if report_text:
             st.markdown(f"<div class='report-body'>{E(report_text)}</div>", unsafe_allow_html=True)
-        else:
-            st.markdown(
-                f"<div class='report-placeholder'>{E(_loc('Сформируйте отчёт, чтобы получить краткий аналитический вывод по выбранному видео.', 'Таңдалған бейне бойынша қысқа аналитикалық қорытынды алу үшін есеп құрастырыңыз.', 'Build a report to generate a short analytical summary for the selected video.', lang=lang))}</div>",
-                unsafe_allow_html=True,
-            )
 
     with top[1]:
         _section(_loc("Снимок запуска", "Іске қосу көрінісі", "Run snapshot", lang=lang))
@@ -1565,14 +1591,13 @@ def reports_metrics_tab(client: BackendClient, cfg: Any, ui_text: Dict[str, Dict
             summary_text = str(outputs.get("global_summary") or "").strip()
             if summary_text:
                 st.markdown(f"<div class='analytics-copy'>{E(clip_text(summary_text, 260))}</div>", unsafe_allow_html=True)
-        else:
-            _caption(_loc("Готовые результаты для выбранного видео пока недоступны.", "Таңдалған бейне үшін дайын нәтижелер әзірге жоқ.", "Processed outputs for the selected video are not available yet.", lang=lang))
 
     _render_supporting_evidence(list((st.session_state.get("reports_payload") or {}).get("supporting_hits") or []), lang)
 
 
+
 def search_tab(client: BackendClient, cfg: Any, ui_text: Dict[str, Dict[str, Any]]) -> None:
-    """Render the search page without nested panel wrappers."""
+    """Render the search page with the assistant hint above chat and a corrected title."""
 
     _ = ui_text
     _bind_search_state()
@@ -1609,14 +1634,25 @@ def search_tab(client: BackendClient, cfg: Any, ui_text: Dict[str, Dict[str, Any
         )
 
     with right:
-        _section(_loc("Умный асситент", "Ақылды ассистент", "Smart assistant", lang=lang))
-        clear_row = st.columns([4.24, 0.56], gap="small")
+        _section(_loc("Умный ассистент", "Ақылды ассистент", "Smart assistant", lang=lang))
+        st.markdown(
+            f"""
+            <div class='assistant-info'>
+                <div class='assistant-info-icon'>ℹ</div>
+                <div class='assistant-info-copy'>{E(_loc('Ассистент использует текущие фильтры и найденные эпизоды.', 'Көмекші ағымдағы сүзгілер мен табылған эпизодтарды пайдаланады.', 'The assistant uses the current filters and retrieved episodes.', lang=lang))}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        clear_row = st.columns([4.12, 0.68], gap="small")
         with clear_row[1]:
             _mark("chat-clear-marker")
             if st.button("\U0001F5D1", key="search_clear_chat_btn", help=_loc("Очистить чат", "Чатты тазарту", "Clear chat", lang=lang)):
                 st.session_state["search_rag_messages"] = []
                 st.session_state["search_rag_input"] = ""
                 st.rerun()
+
         _render_chat(list(st.session_state.get("search_rag_messages") or []), lang)
 
         st.text_input(
@@ -1633,89 +1669,7 @@ def search_tab(client: BackendClient, cfg: Any, ui_text: Dict[str, Dict[str, Any
             args=(client, lang, current_lang),
         )
 
-        st.markdown(
-            f"""
-            <div class='assistant-info'>
-                <div class='assistant-info-icon'>ℹ</div>
-                <div class='assistant-info-copy'>{E(_loc('Ассистент использует текущие фильтры и найденные эпизоды.', 'Көмекші ағымдағы сүзгілер мен табылған эпизодтарды пайдаланады.', 'The assistant uses the current filters and retrieved episodes.', lang=lang))}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
 
-def _overview_features(lang: str) -> List[Dict[str, str]]:
-    """Return overview cards with clearer but more compact copy."""
-
-    return [
-        {
-            "tone": "feature-card tone-a",
-            "label": _loc("Обзор системы", "Жүйе шолуы", "System overview", lang=lang),
-            "title": _loc("Понятный сценарий работы", "Түсінікті жұмыс сценариі", "A clear workflow", lang=lang),
-            "copy": _loc(
-                "Раздел помогает быстро понять, как видео проходит путь от загрузки до поиска событий и итогового отчета.",
-                "Бұл бөлім бейненің жүктеуден бастап оқиғаны іздеуге және қорытынды есепке дейінгі жолын тез түсінуге көмектеседі.",
-                "This section quickly explains how video moves from upload to event retrieval and reporting.",
-                lang=lang,
-            ),
-            "detail": _loc(
-                "Пользователь сразу видит структуру системы и понимает, куда идти на каждом этапе работы.",
-                "Пайдаланушы жүйе құрылымын бірден көріп, әр кезеңде қайда өту керегін түсінеді.",
-                "Users immediately see the system structure and understand where to go at each step.",
-                lang=lang,
-            ),
-        },
-        {
-            "tone": "feature-card tone-b",
-            "label": _loc("Хранилище", "Қойма", "Storage", lang=lang),
-            "title": _loc("Видеотека и очередь", "Бейнеқор және кезек", "Library and queue", lang=lang),
-            "copy": _loc(
-                "Все ролики собраны в одном месте. Это упрощает загрузку, фильтрацию, запуск обработки и контроль очереди.",
-                "Барлық ролик бір жерде жиналған. Бұл жүктеуді, сүзуді, өңдеуді іске қосуды және кезекті бақылауды жеңілдетеді.",
-                "All videos are kept in one place, which simplifies upload, filtering, queueing, and processing control.",
-                lang=lang,
-            ),
-            "detail": _loc(
-                "Даже если файлов становится больше, оператору остается удобно находить нужный материал и работать с ним дальше.",
-                "Файл көбейсе де операторға керекті материалды табу және онымен әрі қарай жұмыс істеу ыңғайлы болып қалады.",
-                "Even as the number of files grows, operators can still find the right material quickly.",
-                lang=lang,
-            ),
-        },
-        {
-            "tone": "feature-card tone-c",
-            "label": _loc("Видеоаналитика", "Бейне аналитикасы", "Video analytics", lang=lang),
-            "title": _loc("Проверка результата", "Нәтижені тексеру", "Result verification", lang=lang),
-            "copy": _loc(
-                "После обработки система показывает плеер, краткое описание и таймлайн найденных фрагментов, привязанных ко времени.",
-                "Өңдеуден кейін жүйе плеерді, қысқаша сипаттаманы және уақытқа байланыстырылған табылған фрагменттер таймлайнын көрсетеді.",
-                "After processing, the system shows a player, a short summary, and a timeline of detected fragments.",
-                lang=lang,
-            ),
-            "detail": _loc(
-                "Это делает демонстрацию понятной: можно быстро показать, где именно произошло событие и на чем основан результат.",
-                "Бұл демонстрацияны түсінікті етеді: оқиға нақты қай жерде болғанын және нәтиже неге сүйенетінін тез көрсетуге болады.",
-                "This keeps the demo clear: you can quickly show where an event happened and what evidence supports it.",
-                lang=lang,
-            ),
-        },
-        {
-            "tone": "feature-card tone-d",
-            "label": _loc("Поиск и отчёты", "Іздеу және есептер", "Search and reports", lang=lang),
-            "title": _loc("Осмысленный поиск", "Мағыналы іздеу", "Meaning-based search", lang=lang),
-            "copy": _loc(
-                "Поиск находит нужные эпизоды по смыслу запроса, а ассистент и отчеты используют те же найденные фрагменты.",
-                "Іздеу сұраудың мағынасы бойынша керекті эпизодтарды табады, ал ассистент пен есептер сол табылған фрагменттерді пайдаланады.",
-                "Search retrieves relevant episodes from the meaning of the query, and the assistant and reports use the same evidence.",
-                lang=lang,
-            ),
-            "detail": _loc(
-                "Это позволяет получить понятный, проверяемый и удобный для презентации итоговый вывод.",
-                "Бұл түсінікті, тексерілетін және презентацияға ыңғайлы қорытынды алуға мүмкіндік береді.",
-                "This leads to a clear, verifiable, presentation-ready conclusion.",
-                lang=lang,
-            ),
-        },
-    ]
 
 
 def _overview_stages(lang: str) -> List[Dict[str, str]]:
@@ -1785,14 +1739,95 @@ def _overview_stages(lang: str) -> List[Dict[str, str]]:
     ]
 
 
-def _stage_nav_button_label(stage: Dict[str, str], label: str) -> str:
-    """Build a compact multiline label for one adjacent stage button-card."""
 
-    return f"{stage['emoji']}  {label}\n{stage['title']}\n{clip_text(stage['short'], 112)}"
+def _overview_features(lang: str) -> List[Dict[str, str]]:
+    """Return the refreshed Overview feature cards."""
+
+    return [
+        {
+            "tone": "feature-card tone-a",
+            "label": _loc("VLM-слой", "VLM қабаты", "VLM layer", lang=lang),
+            "title": _loc("Генерация видеоописаний", "Бейнесипаттамаларды генерациялау", "Video description generation", lang=lang),
+            "copy": _loc(
+                "Система проходит по фрагментам видео и формирует нейтральные описания сцен, действий и объектов.",
+                "Жүйе бейненің фрагменттері бойынша өтіп, көріністердің, әрекеттердің және объектілердің бейтарап сипаттамаларын жасайды.",
+                "The system moves through video fragments and produces neutral descriptions of scenes, actions, and objects.",
+                lang=lang,
+            ),
+            "detail": _loc(
+                "Это создает основу для таймлайна, сводки и последующего анализа без ручного просмотра каждого отрезка.",
+                "Бұл таймлайнға, қорытындыға және әр бөлікті қолмен қарамай-ақ кейінгі талдауға негіз дайындайды.",
+                "This creates the base for the timeline, summary, and later analysis without manually reviewing every segment.",
+                lang=lang,
+            ),
+        },
+        {
+            "tone": "feature-card tone-b",
+            "label": _loc("Структурирование", "Құрылымдау", "Structuring", lang=lang),
+            "title": _loc("Аналитика", "Аналитика", "Analytics", lang=lang),
+            "copy": _loc(
+                "Из видеоописаний собираются эпизоды, сигналы внимания, краткая сводка и метрики обработки.",
+                "Бейнесипаттамалардан эпизодтар, назар аударту сигналдары, қысқа қорытынды және өңдеу метрикалары жиналады.",
+                "Video descriptions are turned into episodes, attention signals, a short summary, and processing metrics.",
+                lang=lang,
+            ),
+            "detail": _loc(
+                "Оператор сразу видит, что произошло, когда это было и какие участки ролика важны для проверки.",
+                "Оператор бірден не болғанын, оның қашан болғанын және роликтің қай бөліктері тексеруге маңызды екенін көреді.",
+                "Operators immediately see what happened, when it happened, and which parts of the video matter for review.",
+                lang=lang,
+            ),
+        },
+        {
+            "tone": "feature-card tone-c",
+            "label": _loc("Навигация", "Навигация", "Navigation", lang=lang),
+            "title": _loc("Поиск событий", "Оқиғаларды іздеу", "Event search", lang=lang),
+            "copy": _loc(
+                "Поиск находит нужные эпизоды по смыслу запроса, временным ориентирам и содержанию наблюдений.",
+                "Іздеу сұраудың мағынасы, уақыт белгілері және бақылау мазмұны бойынша керек эпизодтарды табады.",
+                "Search retrieves the right episodes from the query meaning, time cues, and observation content.",
+                lang=lang,
+            ),
+            "detail": _loc(
+                "Это ускоряет разбор больших архивов и помогает сразу перейти к нужному моменту в аналитике.",
+                "Бұл үлкен архивтерді талдауды жылдамдатып, аналитикадағы керек сәтке бірден өтуге көмектеседі.",
+                "This speeds up archive review and helps jump straight to the relevant moment in analytics.",
+                lang=lang,
+            ),
+        },
+        {
+            "tone": "feature-card tone-d",
+            "label": _loc("Диалог по данным", "Дерекке негізделген диалог", "Grounded dialogue", lang=lang),
+            "title": _loc("Ассистент", "Ассистент", "Assistant", lang=lang),
+            "copy": _loc(
+                "Ассистент отвечает на вопросы по найденным эпизодам и опирается на те же фрагменты, что открыты в системе.",
+                "Ассистент табылған эпизодтар бойынша сұрақтарға жауап береді және жүйеде ашық тұрған сол фрагменттерге сүйенеді.",
+                "The assistant answers questions about retrieved episodes and relies on the same fragments opened in the system.",
+                lang=lang,
+            ),
+            "detail": _loc(
+                "Так проще уточнять детали, собирать краткие выводы и удерживать ответ привязанным к видеодоказательствам.",
+                "Осылайша детальдарды нақтылау, қысқа қорытынды жинау және жауапты бейне-дәлелдерге байлап ұстау жеңілдейді.",
+                "This makes it easier to refine details, build short conclusions, and keep the answer tied to video evidence.",
+                lang=lang,
+            ),
+        },
+    ]
+
+
+
+
+
+
+def _stage_nav_button_label(stage: Dict[str, str], stage_number: int, lang: str) -> str:
+    """Build a compact multiline stage-switch button label without emoji."""
+
+    stage_label = _loc("\u042d\u0442\u0430\u043f", "\u041a\u0435\u0437\u0435\u04a3", "Stage", lang=lang)
+    return "\n".join((f"{stage_label} {stage_number}", stage["title"]))
 
 
 def _render_overview_carousel(stages: List[Dict[str, str]], session_key: str, lang: str) -> None:
-    """Render overview stages with one main card and two side card-buttons."""
+    """Render overview stages with one main card and two compact native stage switch buttons."""
 
     if not stages:
         return
@@ -1801,6 +1836,7 @@ def _render_overview_carousel(stages: List[Dict[str, str]], session_key: str, la
     idx = max(0, min(idx, len(stages) - 1))
     st.session_state[session_key] = idx
     current = stages[idx]
+    stage_label = _loc("\u042d\u0442\u0430\u043f", "\u041a\u0435\u0437\u0435\u04a3", "Stage", lang=lang)
 
     progress = "".join(
         f"<span class='stage-dot{' active' if i == idx else ''}'>{i + 1}</span>"
@@ -1808,46 +1844,50 @@ def _render_overview_carousel(stages: List[Dict[str, str]], session_key: str, la
     )
     st.markdown(f"<div class='stage-progress'>{progress}</div>", unsafe_allow_html=True)
 
-    adjacent: List[tuple[int, str]] = []
+    adjacent: List[int] = []
     if idx > 0:
-        adjacent.append((idx - 1, _loc("Предыдущий этап", "Алдыңғы кезең", "Previous stage", lang=lang)))
+        adjacent.append(idx - 1)
     if idx + 1 < len(stages):
-        adjacent.append((idx + 1, _loc("Следующий этап", "Келесі кезең", "Next stage", lang=lang)))
+        adjacent.append(idx + 1)
 
-    main_col, side_col = st.columns([2.1, 1.0], gap="large")
-    with main_col:
-        st.markdown(
-            f"""
-            <div class="stage-card">
-                <div class="stage-card-head">
-                    <div class="stage-badge">{E(current['emoji'])}</div>
-                    <div>
-                        <div class="stage-kicker">{E(_loc('Этап', 'Кезең', 'Stage', lang=lang))} {idx + 1}</div>
-                        <div class="stage-title">{E(current['title'])}</div>
+    with st.container():
+        _mark("stage-layout-marker")
+        main_col, side_col = st.columns([2.02, 0.98], gap="medium")
+
+        with main_col:
+            st.markdown(
+                f"""
+                <div class="stage-card">
+                    <div class="stage-card-head">
+                        <div class="stage-badge">{E(current['emoji'])}</div>
+                        <div>
+                            <div class="stage-kicker">{E(stage_label)} {idx + 1}</div>
+                            <div class="stage-title">{E(current['title'])}</div>
+                        </div>
                     </div>
+                    <div class="stage-short">{E(current['short'])}</div>
+                    <div class="stage-copy">{E(current['copy'])}</div>
+                    <div class="stage-impact">{E(current['impact'])}</div>
                 </div>
-                <div class="stage-short">{E(current['short'])}</div>
-                <div class="stage-copy">{E(current['copy'])}</div>
-                <div class="stage-impact">{E(current['impact'])}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+                """,
+                unsafe_allow_html=True,
+            )
 
-    with side_col:
-        for target_idx, label in adjacent:
-            stage = stages[target_idx]
-            with st.container():
-                _mark("stage-nav-marker")
-                if st.button(
-                    _stage_nav_button_label(stage, label),
-                    key=f"{session_key}_{target_idx}",
-                    use_container_width=True,
-                ):
-                    st.session_state[session_key] = target_idx
-                    st.rerun()
-        if len(adjacent) < 2:
-            st.markdown("<div class='stage-nav-spacer'></div>", unsafe_allow_html=True)
+        with side_col:
+            for target_idx in adjacent:
+                stage = stages[target_idx]
+                with st.container():
+                    _mark("stage-nav-marker")
+                    if st.button(
+                        _stage_nav_button_label(stage, target_idx + 1, lang),
+                        key=f"{session_key}_{target_idx}",
+                        use_container_width=True,
+                        help=stage["title"],
+                    ):
+                        st.session_state[session_key] = target_idx
+                        st.rerun()
+            if len(adjacent) < 2:
+                st.markdown("<div class='stage-nav-spacer'></div>", unsafe_allow_html=True)
 
 
 def overview_tab(client: BackendClient, cfg: Any, ui_text: Dict[str, Dict[str, Any]]) -> None:
