@@ -9,16 +9,14 @@ Purpose:
 
 from __future__ import annotations
 
-import io
 import json
 import logging
 import numpy as np
 import pickle
-import re
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 DEFAULT_DATA_DIR = Path("data")
 DEFAULT_VIDEOS_ROOT = DEFAULT_DATA_DIR / "videos"
@@ -53,7 +51,6 @@ from .store import (
     load_manifest as _load_manifest,
     load_prev_embeddings as _load_prev_embeddings,
     normalize_embed_store_dtype as _normalize_embed_store_dtype,
-    read_json as _read_json,
     read_jsonl_gz as _read_jsonl_gz,
     read_jsonl_zst as _read_jsonl_zst,
     resolve_index_dir,
@@ -61,6 +58,7 @@ from .store import (
     save_manifest as _save_manifest,
     stable_doc_id as _stable_doc_id,
     write_json as _write_json,
+    zstd,
 )
 from .text import tokenize as _tokenize
 from .types import BM25Index, Doc, normalize_loaded_doc as _normalize_loaded_doc
@@ -70,6 +68,218 @@ def _hash_text(text: str) -> str:
     import hashlib
 
     return hashlib.sha1(text.encode("utf-8")).hexdigest()
+
+
+def _configure_manifest_layout(manifest: Dict[str, Any], *, variant: Optional[str], language: str, dense_input_mode: str) -> None:
+    manifest.setdefault("sources", {})
+    if variant:
+        manifest["layout"] = "videos/<video_id>/outputs/variants/<variant>/segments/<lang>.jsonl.zst"
+        if zstd is None:
+            manifest["layout"] = "videos/<video_id>/outputs/variants/<variant>/segments/<lang>.jsonl.gz"
+        manifest["doc_id_scheme"] = "stable_by_variant_and_position"
+    else:
+        manifest["layout"] = "videos/<video_id>/outputs/segments/<lang>.jsonl.zst"
+        if zstd is None:
+            manifest["layout"] = "videos/<video_id>/outputs/segments/<lang>.jsonl.gz"
+        manifest["doc_id_scheme"] = "stable_by_position"
+    manifest["language"] = str(language)
+    manifest["variant"] = str(variant) if variant else None
+    manifest["dense_input_mode"] = dense_input_mode
+    manifest["version"] = max(5, int(manifest.get("version", 5) or 5))
+    manifest["has_dense_valid"] = True
+
+
+def _load_segment_rows(path: Path) -> List[Any]:
+    if path.suffix == ".zst":
+        return _read_jsonl_zst(path)
+    return _read_jsonl_gz(path)
+
+
+def _upsert_docs_from_segment_file(
+    *,
+    path: Path,
+    videos_root: Path,
+    language: str,
+    video_id: str,
+    file_variant: Optional[str],
+    rows: List[Any],
+    docs_by_id: Dict[str, Doc],
+    changed_doc_ids: set[str],
+) -> int:
+    new_num_docs = 0
+    for i, item in enumerate(rows):
+        if not isinstance(item, dict):
+            continue
+        try:
+            start = float(item["start_sec"])
+            end = float(item["end_sec"])
+            display_text = str(item.get("normalized_caption") or item.get("description", "") or "")
+        except Exception:
+            continue
+
+        doc_id = _stable_doc_id(video_id, i, variant=file_variant)
+        doc_extra = _extract_doc_metadata(item, file_variant)
+        keyframe_raw = None
+        evidence = item.get("evidence")
+        if isinstance(evidence, dict):
+            keyframe_raw = evidence.get("keyframe_path")
+        if not keyframe_raw:
+            keyframe_raw = doc_extra.get("keyframe_path")
+        keyframe_abs = _resolve_keyframe_path(
+            raw_path=str(keyframe_raw or ""),
+            videos_root=videos_root,
+            video_id=video_id,
+            segment_file=path,
+        )
+        if keyframe_abs:
+            doc_extra["keyframe_path"] = keyframe_abs
+        search_text = _build_searchable_text(display_text, doc_extra)
+        docs_by_id[doc_id] = Doc(
+            doc_id=doc_id,
+            video_id=video_id,
+            language=str(language),
+            start_sec=start,
+            end_sec=end,
+            text=search_text,
+            display_text=display_text,
+            extra=doc_extra,
+            source_path=str(path),
+        )
+        changed_doc_ids.add(doc_id)
+        new_num_docs += 1
+    return new_num_docs
+
+
+def _scan_segment_sources(
+    *,
+    files: List[Path],
+    videos_root: Path,
+    language: str,
+    manifest: Dict[str, Any],
+    docs_by_id: Dict[str, Doc],
+) -> Dict[str, Any]:
+    t_scan0 = time.perf_counter()
+    changed_doc_ids: set[str] = set()
+    changed_files = 0
+    unchanged_files = 0
+    parse_errors = 0
+    docs_added_or_updated = 0
+    docs_deleted = 0
+    changed_any = False
+
+    for path in files:
+        path = path.resolve()
+        path_key = str(path)
+        fp = _file_fingerprint(path)
+
+        prev = (manifest.get("sources") or {}).get(path_key)
+        prev_fp = prev.get("fingerprint") if isinstance(prev, dict) else None
+        if prev_fp == fp:
+            unchanged_files += 1
+            continue
+
+        changed_files += 1
+        video_id, file_variant = _guess_source_from_path(path)
+        try:
+            rows = _load_segment_rows(path)
+        except Exception:
+            parse_errors += 1
+            continue
+
+        prev_num_docs = int(prev.get("num_docs", 0)) if isinstance(prev, dict) else 0
+        new_num_docs = _upsert_docs_from_segment_file(
+            path=path,
+            videos_root=videos_root,
+            language=language,
+            video_id=video_id,
+            file_variant=file_variant,
+            rows=rows,
+            docs_by_id=docs_by_id,
+            changed_doc_ids=changed_doc_ids,
+        )
+        docs_added_or_updated += int(new_num_docs)
+
+        if prev_num_docs > new_num_docs:
+            for j in range(new_num_docs, prev_num_docs):
+                did = _stable_doc_id(video_id, j, variant=file_variant)
+                if did in docs_by_id:
+                    docs_by_id.pop(did, None)
+                    docs_deleted += 1
+
+        manifest["sources"][path_key] = {
+            "fingerprint": fp,
+            "video_id": video_id,
+            "variant": file_variant,
+            "language": str(language),
+            "num_docs": int(new_num_docs),
+        }
+        changed_any = True
+
+    return {
+        "changed_any": changed_any,
+        "changed_doc_ids": changed_doc_ids,
+        "changed_files": changed_files,
+        "unchanged_files": unchanged_files,
+        "parse_errors": parse_errors,
+        "docs_added_or_updated": docs_added_or_updated,
+        "docs_deleted": docs_deleted,
+        "scan_ms": (time.perf_counter() - t_scan0) * 1000.0,
+    }
+
+
+def _build_no_change_meta(
+    *,
+    manifest: Dict[str, Any],
+    config_fingerprint: Optional[str],
+    embedding_backend: str,
+    embed_store_dtype: str,
+    language: str,
+    variant: Optional[str],
+    query_prefix: str,
+    passage_prefix: str,
+    normalize_text: bool,
+    lemmatize: bool,
+    dense_input_mode: str,
+    docs_by_id: Dict[str, Doc],
+    files: List[Path],
+    scan_stats: Dict[str, Any],
+    total_ms: float,
+) -> Dict[str, Any]:
+    return {
+        "index_schema_version": 5,
+        "config_fingerprint": (str(config_fingerprint) if config_fingerprint else None),
+        "config_tag": config_tag_from_fingerprint(config_fingerprint),
+        "model_name": manifest.get("model_name"),
+        "embedding_backend": embedding_backend,
+        "num_docs": int(len(docs_by_id)),
+        "bm25": dict(manifest.get("bm25") or {}),
+        "embed_store_dtype": embed_store_dtype,
+        "layout": manifest.get("layout"),
+        "doc_id_scheme": manifest.get("doc_id_scheme"),
+        "language": str(language),
+        "variant": (str(variant) if variant else None),
+        "query_prefix": str(query_prefix),
+        "passage_prefix": str(passage_prefix),
+        "normalize_text": bool(normalize_text),
+        "lemmatize": bool(lemmatize),
+        "dense_input_mode": dense_input_mode,
+        "has_dense_valid": True,
+        "runtime": {
+            "note": "No changes detected. Index not rebuilt.",
+            "timings_ms": {
+                "scan": float(scan_stats["scan_ms"]),
+                "total": float(total_ms),
+            },
+            "counts": {
+                "files_total": int(len(files)),
+                "files_changed": int(scan_stats["changed_files"]),
+                "files_unchanged": int(scan_stats["unchanged_files"]),
+                "parse_errors": int(scan_stats["parse_errors"]),
+                "docs_added_or_updated": int(scan_stats["docs_added_or_updated"]),
+                "docs_deleted": int(scan_stats["docs_deleted"]),
+            },
+        },
+    }
 
 
 def search_config_fingerprint(cfg: Any) -> str:
@@ -132,6 +342,7 @@ def build_or_update_index(
 ) -> Path:
 
     t_total0 = time.perf_counter()
+    videos_root = Path(videos_root)
 
     base_index_dir = Path(index_dir)
     real_index_dir = resolve_index_dir(base_index_dir, config_fingerprint, language=language, variant=variant)
@@ -160,159 +371,48 @@ def build_or_update_index(
         old_doc_ids, old_emb = _load_prev_embeddings(real_index_dir)
 
     manifest["bm25"] = {"k1": float(bm25_k1), "b": float(bm25_b)}
-    manifest.setdefault("sources", {})
-    if variant:
-        manifest["layout"] = "videos/<video_id>/outputs/variants/<variant>/segments/<lang>.jsonl.zst"
-        if zstd is None:
-            manifest["layout"] = "videos/<video_id>/outputs/variants/<variant>/segments/<lang>.jsonl.gz"
-        manifest["doc_id_scheme"] = "stable_by_variant_and_position"
-    else:
-        manifest["layout"] = "videos/<video_id>/outputs/segments/<lang>.jsonl.zst"
-        if zstd is None:
-            manifest["layout"] = "videos/<video_id>/outputs/segments/<lang>.jsonl.gz"
-        manifest["doc_id_scheme"] = "stable_by_position"
-    manifest["language"] = str(language)
-    manifest["variant"] = str(variant) if variant else None
-    manifest["dense_input_mode"] = dense_input_mode
-    manifest["version"] = max(5, int(manifest.get("version", 5) or 5))
-    manifest["has_dense_valid"] = True
+    _configure_manifest_layout(manifest, variant=variant, language=language, dense_input_mode=dense_input_mode)
 
-    files = _iter_segment_files(Path(videos_root), language=language, variant=variant)
+    files = _iter_segment_files(videos_root, language=language, variant=variant)
     if not files:
         suffix = f", variant={variant}" if variant else ""
         raise RuntimeError(f"No segments found under: {videos_root} (lang={language}{suffix})")
 
-    t_scan0 = time.perf_counter()
-
-    changed_any = False
-    changed_doc_ids: set[str] = set()
-    changed_files = 0
-    unchanged_files = 0
-    parse_errors = 0
-    docs_added_or_updated = 0
-    docs_deleted = 0
-
-    for f in files:
-        f = f.resolve()
-        f_key = str(f)
-        fp = _file_fingerprint(f)
-
-        prev = (manifest.get("sources") or {}).get(f_key)
-        prev_fp = prev.get("fingerprint") if isinstance(prev, dict) else None
-
-        if prev_fp == fp:
-            unchanged_files += 1
-            continue
-
-        changed_files += 1
-        video_id, file_variant = _guess_source_from_path(f)
-
-        try:
-            if f.suffix == ".zst":
-                data = _read_jsonl_zst(f)
-            else:
-                data = _read_jsonl_gz(f)
-        except Exception:
-            parse_errors += 1
-            continue
-
-        prev_num_docs = int(prev.get("num_docs", 0)) if isinstance(prev, dict) else 0
-
-        new_num_docs = 0
-        for i, item in enumerate(data):
-            if not isinstance(item, dict):
-                continue
-            try:
-                start = float(item["start_sec"])
-                end = float(item["end_sec"])
-                display_text = str(item.get("normalized_caption") or item.get("description", "") or "")
-            except Exception:
-                continue
-
-            doc_id = _stable_doc_id(video_id, i, variant=file_variant)
-            doc_extra = _extract_doc_metadata(item, file_variant)
-            keyframe_raw = None
-            evidence = item.get("evidence")
-            if isinstance(evidence, dict):
-                keyframe_raw = evidence.get("keyframe_path")
-            if not keyframe_raw:
-                keyframe_raw = doc_extra.get("keyframe_path")
-            keyframe_abs = _resolve_keyframe_path(
-                raw_path=str(keyframe_raw or ""),
-                videos_root=Path(videos_root),
-                video_id=video_id,
-                segment_file=f,
-            )
-            if keyframe_abs:
-                doc_extra["keyframe_path"] = keyframe_abs
-            search_text = _build_searchable_text(display_text, doc_extra)
-            docs_by_id[doc_id] = Doc(
-                doc_id=doc_id,
-                video_id=video_id,
-                language=str(language),
-                start_sec=start,
-                end_sec=end,
-                text=search_text,
-                display_text=display_text,
-                extra=doc_extra,
-                source_path=f_key,
-            )
-            changed_doc_ids.add(doc_id)
-            docs_added_or_updated += 1
-            new_num_docs += 1
-
-        if prev_num_docs > new_num_docs:
-            for j in range(new_num_docs, prev_num_docs):
-                did = _stable_doc_id(video_id, j, variant=file_variant)
-                if did in docs_by_id:
-                    docs_by_id.pop(did, None)
-                    docs_deleted += 1
-
-        manifest["sources"][f_key] = {
-            "fingerprint": fp,
-            "video_id": video_id,
-            "variant": file_variant,
-            "language": str(language),
-            "num_docs": int(new_num_docs),
-        }
-        changed_any = True
-
-    t_scan_ms = (time.perf_counter() - t_scan0) * 1000.0
+    scan_stats = _scan_segment_sources(
+        files=files,
+        videos_root=videos_root,
+        language=language,
+        manifest=manifest,
+        docs_by_id=docs_by_id,
+    )
+    changed_any = bool(scan_stats["changed_any"])
+    changed_doc_ids = set(scan_stats["changed_doc_ids"])
+    changed_files = int(scan_stats["changed_files"])
+    unchanged_files = int(scan_stats["unchanged_files"])
+    parse_errors = int(scan_stats["parse_errors"])
+    docs_added_or_updated = int(scan_stats["docs_added_or_updated"])
+    docs_deleted = int(scan_stats["docs_deleted"])
+    t_scan_ms = float(scan_stats["scan_ms"])
 
     if not changed_any and not bm25_changed and not model_changed and not dense_mode_changed:
         _save_manifest(real_index_dir, manifest)
-        meta = {
-            "index_schema_version": 5,
-            "config_fingerprint": (str(config_fingerprint) if config_fingerprint else None),
-            "config_tag": config_tag_from_fingerprint(config_fingerprint),
-            "model_name": manifest.get("model_name"),
-            "embedding_backend": embedding_backend,
-            "num_docs": int(len(docs_by_id)),
-            "bm25": {"k1": float(bm25_k1), "b": float(bm25_b)},
-            "embed_store_dtype": embed_store_dtype,
-            "layout": manifest.get("layout"),
-            "doc_id_scheme": manifest.get("doc_id_scheme"),
-            "language": str(language),
-            "variant": (str(variant) if variant else None),
-            "query_prefix": str(query_prefix),
-            "passage_prefix": str(passage_prefix),
-            "normalize_text": bool(normalize_text),
-            "lemmatize": bool(lemmatize),
-            "dense_input_mode": dense_input_mode,
-            "has_dense_valid": True,
-            "runtime": {
-                "note": "No changes detected. Index not rebuilt.",
-                "timings_ms": {"scan": float(t_scan_ms), "total": float((time.perf_counter() - t_total0) * 1000.0)},
-                "counts": {
-                    "files_total": int(len(files)),
-                    "files_changed": int(changed_files),
-                    "files_unchanged": int(unchanged_files),
-                    "parse_errors": int(parse_errors),
-                    "docs_added_or_updated": int(docs_added_or_updated),
-                    "docs_deleted": int(docs_deleted),
-                },
-            },
-        }
+        meta = _build_no_change_meta(
+            manifest=manifest,
+            config_fingerprint=config_fingerprint,
+            embedding_backend=embedding_backend,
+            embed_store_dtype=embed_store_dtype,
+            language=language,
+            variant=variant,
+            query_prefix=query_prefix,
+            passage_prefix=passage_prefix,
+            normalize_text=normalize_text,
+            lemmatize=lemmatize,
+            dense_input_mode=dense_input_mode,
+            docs_by_id=docs_by_id,
+            files=files,
+            scan_stats=scan_stats,
+            total_ms=(time.perf_counter() - t_total0) * 1000.0,
+        )
         _write_json(real_index_dir / "meta.json", meta)
 
         logger.info(

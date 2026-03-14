@@ -23,7 +23,7 @@ Canonical storage and indexing language is English. Additional language views ar
 
 ```text
 app/       Streamlit operator UI
-backend/   FastAPI API, queue control, worker runtime, job executors
+backend/   FastAPI entrypoints, retrieval runtime, HTTP helpers, worker runtime, and job execution layers
 configs/   Runtime profiles and experimental variants
 scripts/   Local operations, metrics, experiments, evaluation
 src/       Core runtime, video, semantic LLM, guard, translation, and search layers
@@ -70,7 +70,9 @@ python scripts/smoke_services.py --api http://127.0.0.1:8000 --ui http://127.0.0
 
 - API: `backend/api.py`
 - Worker loop: `backend/worker.py`
-- Job execution: `backend/job_executors.py`
+- Retrieval/runtime glue: `backend/retrieval_runtime.py`
+- API support: `backend/http/common.py`, `backend/http/grounded.py`
+- Job execution: `backend/jobs/process_runtime.py`, `backend/jobs/translate_runtime.py`, `backend/jobs/runtime_common.py`
 - Video observation pipeline: `src/video/describe.py`
 - Semantic analysis and summary: `src/llm/analyze.py`, `src/llm/summary.py`
 - Guard layer: `src/guard/service.py`, `src/guard/schemas.py`

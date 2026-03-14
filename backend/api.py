@@ -3,62 +3,47 @@
 FastAPI backend for SmartCampus V2T.
 
 Purpose:
-- Provide HTTP API for Streamlit UI:
-  - videos: list/upload/delete
-  - runs: list/get outputs/delete
-  - jobs: enqueue processing (worker consumes filesystem queue), status, cancel
-  - queue: pause/resume/status/list/remove queued job + reorder
-  - search: execute hybrid search over built index
-  - index: rebuild/status
+- Provide the stable HTTP entrypoint for Streamlit UI and worker-facing backend operations.
+- Keep route registration centralized while delegating shared logic to smaller backend modules.
 """
 
 from __future__ import annotations
 
 import shutil
-import subprocess
 from pathlib import Path
-import time
 from typing import Any, Dict, Optional, List
 
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 
+from backend.http.common import get_api_context, normalize_uploaded_video as _normalize_uploaded_video
+from backend.http.grounded import build_qa_response, build_rag_response, build_report_response
 from backend.deps import (
     atomic_write_json,
-    get_backend_paths,
     list_videos,
-    load_cfg_and_raw,
     new_job_id,
     now_ts,
     read_json,
     read_video_outputs,
 )
-from backend.index_runtime import rebuild_index_status as _rebuild_index_status, write_index_state as _write_index_state
-from backend.job_queue_runtime import (
+from backend.jobs.index_runtime import rebuild_index_status as _rebuild_index_status, write_index_state as _write_index_state
+from backend.jobs.queue_runtime import (
     build_job_record as _build_job_record,
     cancel_queued_job as _cancel_queued_job,
     enqueue_job as _enqueue_job,
     move_job_in_queue as _move_job_in_queue,
     queue_snapshot as _queue_snapshot,
-    queue_status as _queue_status,
     read_job_or_404 as _read_job,
     set_queue_paused as _set_queue_paused,
     write_job as _write_job,
 )
 from backend.retrieval_runtime import (
     annotation_hits as _annotation_hits,
-    generate_grounded_text as _generate_grounded_text,
     resolve_request_language as _resolve_request_language,
     search_hits as _search_hits,
     search_hits_with_fallback as _search_hits_with_fallback,
-    guard_output_text as _guard_output_text,
     guard_query_text as _guard_query_text,
-    hit_to_citation as _hit_to_citation,
-    hit_to_schema as _hit_to_schema,
     metrics_summary_from_outputs as _metrics_summary_from_outputs,
-    qa_text_from_hits as _qa_text_from_hits,
-    report_text_from_hits as _report_text_from_hits,
-    translate_output_text as _translate_output_text,
 )
 from backend.schemas import (
     Citation,
@@ -114,60 +99,17 @@ def v1_healthz():
     return {"ok": True}
 
 
-def _get_cfg_paths():
-    cfg, raw = load_cfg_and_raw()
-    paths = get_backend_paths(cfg, raw)
-    return cfg, raw, paths
-
-def _normalize_uploaded_video(raw_path: Path) -> Path:
-    """Convert uploaded videos to mp4 when ffmpeg is available."""
-
-    if raw_path.suffix.lower() == ".mp4":
-        return raw_path
-    if not shutil.which("ffmpeg"):
-        return raw_path
-
-    mp4_path = raw_path.with_suffix(".mp4")
-    command = [
-        "ffmpeg",
-        "-y",
-        "-i",
-        str(raw_path),
-        "-c:v",
-        "libx264",
-        "-preset",
-        "veryfast",
-        "-crf",
-        "23",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "128k",
-        str(mp4_path),
-    ]
-    try:
-        result = subprocess.run(command, capture_output=True, text=True)
-        if result.returncode == 0 and mp4_path.exists() and mp4_path.stat().st_size > 0:
-            try:
-                raw_path.unlink(missing_ok=True)
-            except Exception:
-                pass
-            return mp4_path
-    except Exception:
-        pass
-    return raw_path
-
-
 @app.get("/v1/videos", response_model=List[VideoItem])
 def videos_list():
-    cfg, raw, paths = _get_cfg_paths()
-    items = list_videos(paths.videos_dir)
+    context = get_api_context()
+    items = list_videos(context.paths.videos_dir)
     return [VideoItem(**x) for x in items]
 
 
 @app.post("/v1/videos/upload", response_model=VideoItem)
 def videos_upload(file: UploadFile = File(...)):
-    cfg, raw, paths = _get_cfg_paths()
+    context = get_api_context()
+    paths = context.paths
     if not file.filename:
         raise HTTPException(status_code=400, detail="Missing filename")
     suffix = Path(file.filename).suffix.lower()
@@ -216,8 +158,8 @@ def videos_upload(file: UploadFile = File(...)):
 
 @app.delete("/v1/videos/{video_id}")
 def videos_delete(video_id: str):
-    cfg, raw, paths = _get_cfg_paths()
-    vdir = Path(paths.videos_dir) / video_id
+    context = get_api_context()
+    vdir = Path(context.paths.videos_dir) / video_id
     if not vdir.exists():
         raise HTTPException(status_code=404, detail=f"Video not found: {video_id}")
     try:
@@ -230,13 +172,13 @@ def videos_delete(video_id: str):
 
 @app.get("/v1/videos/{video_id}/outputs", response_model=VideoOutputs)
 def video_outputs(video_id: str, lang: str, variant: Optional[str] = None):
-    cfg, raw, paths = _get_cfg_paths()
+    context = get_api_context()
     lang = (lang or "").strip().lower()
     variant = (variant or "").strip().lower() or None
     if not lang:
         raise HTTPException(status_code=400, detail="Missing language")
 
-    out = read_video_outputs(Path(paths.videos_dir), video_id, lang, variant=variant)
+    out = read_video_outputs(Path(context.paths.videos_dir), video_id, lang, variant=variant)
     if (
         not out.get("manifest")
         and not out.get("batch_manifest")
@@ -250,10 +192,10 @@ def video_outputs(video_id: str, lang: str, variant: Optional[str] = None):
 
 @app.get("/v1/videos/{video_id}/batch-manifest")
 def video_batch_manifest(video_id: str):
-    cfg, raw, paths = _get_cfg_paths()
+    context = get_api_context()
     from src.utils.video_store import batch_manifest_path
 
-    payload = read_json(batch_manifest_path(Path(paths.videos_dir), video_id), default=None)
+    payload = read_json(batch_manifest_path(Path(context.paths.videos_dir), video_id), default=None)
     if not isinstance(payload, dict):
         raise HTTPException(status_code=404, detail=f"Batch manifest not found: {video_id}")
     return payload
@@ -261,10 +203,10 @@ def video_batch_manifest(video_id: str):
 
 @app.get("/v1/videos/{video_id}/metrics-summary", response_model=MetricsSummaryResponse)
 def video_metrics_summary(video_id: str, lang: str = "en", variant: Optional[str] = None):
-    cfg, raw, paths = _get_cfg_paths()
+    context = get_api_context()
     language = (lang or "").strip().lower() or "en"
     resolved_variant = (variant or "").strip().lower() or None
-    outputs = read_video_outputs(Path(paths.videos_dir), video_id, language, variant=resolved_variant)
+    outputs = read_video_outputs(Path(context.paths.videos_dir), video_id, language, variant=resolved_variant)
     if not isinstance(outputs.get("metrics"), dict):
         suffix = f", variant={resolved_variant}" if resolved_variant else ""
         raise HTTPException(status_code=404, detail=f"Metrics not found: {video_id} ({language}{suffix})")
@@ -273,7 +215,9 @@ def video_metrics_summary(video_id: str, lang: str = "en", variant: Optional[str
 
 @app.post("/v1/jobs", response_model=JobCreateResponse)
 def jobs_create(req: JobCreateRequest):
-    cfg, raw, paths = _get_cfg_paths()
+    context = get_api_context()
+    cfg = context.cfg
+    paths = context.paths
 
     from src.utils.video_store import find_video_file
 
@@ -311,14 +255,15 @@ def jobs_create(req: JobCreateRequest):
 
 @app.get("/v1/jobs/{job_id}", response_model=JobStatus)
 def jobs_status(job_id: str):
-    cfg, raw, paths = _get_cfg_paths()
-    job = _read_job(paths, job_id)
+    context = get_api_context()
+    job = _read_job(context.paths, job_id)
     return JobStatus(**job)
 
 
 @app.post("/v1/jobs/{job_id}/cancel", response_model=JobCancelResponse)
 def jobs_cancel(job_id: str):
-    cfg, raw, paths = _get_cfg_paths()
+    context = get_api_context()
+    paths = context.paths
     job = _read_job(paths, job_id)
     if job.get("state") in {"done", "failed", "canceled"}:
         return JobCancelResponse(job_id=job_id, state=str(job.get("state")))
@@ -331,8 +276,8 @@ def jobs_cancel(job_id: str):
 
 @app.get("/v1/queue", response_model=QueueListResponse)
 def queue_list():
-    cfg, raw, paths = _get_cfg_paths()
-    snapshot = _queue_snapshot(paths)
+    context = get_api_context()
+    snapshot = _queue_snapshot(context.paths)
     running_payload = snapshot.get("running")
     return QueueListResponse(
         status=QueueStatus(**dict(snapshot.get("status") or {})),
@@ -343,41 +288,43 @@ def queue_list():
 
 @app.post("/v1/queue/pause", response_model=QueueStatus)
 def queue_pause():
-    cfg, raw, paths = _get_cfg_paths()
-    stt = _set_queue_paused(paths, True)
+    context = get_api_context()
+    stt = _set_queue_paused(context.paths, True)
     return QueueStatus(**stt)
 
 
 @app.post("/v1/queue/resume", response_model=QueueStatus)
 def queue_resume():
-    cfg, raw, paths = _get_cfg_paths()
-    stt = _set_queue_paused(paths, False)
+    context = get_api_context()
+    stt = _set_queue_paused(context.paths, False)
     return QueueStatus(**stt)
 
 
 @app.post("/v1/queue/move", response_model=QueueMoveResponse)
 def queue_move(req: QueueMoveRequest):
-    cfg, raw, paths = _get_cfg_paths()
-    result = _move_job_in_queue(paths, req.job_id, req.direction, int(req.steps or 1))
+    context = get_api_context()
+    result = _move_job_in_queue(context.paths, req.job_id, req.direction, int(req.steps or 1))
     return QueueMoveResponse(ok=True, **result)
 
 
 @app.delete("/v1/queue/{job_id}")
 def queue_remove(job_id: str):
-    cfg, raw, paths = _get_cfg_paths()
-    return _cancel_queued_job(paths, job_id)
+    context = get_api_context()
+    return _cancel_queued_job(context.paths, job_id)
 
 
 @app.get("/v1/index/status", response_model=IndexStatus)
 def index_status():
-    cfg, raw, paths = _get_cfg_paths()
-    stt = read_json(paths.index_state_path, default={}) or {}
+    context = get_api_context()
+    stt = read_json(context.paths.index_state_path, default={}) or {}
     return IndexStatus(**stt)
 
 
 @app.post("/v1/index/rebuild", response_model=IndexRebuildResponse)
 def index_rebuild():
-    cfg, raw, paths = _get_cfg_paths()
+    context = get_api_context()
+    cfg = context.cfg
+    paths = context.paths
     try:
         from src.search.builder import search_config_fingerprint
 
@@ -392,7 +339,8 @@ def index_rebuild():
 
 @app.post("/v1/search", response_model=SearchResponse)
 def search(req: SearchRequest):
-    cfg, raw, paths = _get_cfg_paths()
+    context = get_api_context()
+    cfg = context.cfg
     lang = _resolve_request_language(cfg, req.language)
     _guard_query_text(cfg, req.query, endpoint="Search")
 
@@ -426,144 +374,14 @@ def search(req: SearchRequest):
 
 @app.post("/v1/reports", response_model=ReportResponse)
 def reports(req: ReportRequest):
-    started_at = time.perf_counter()
-    cfg, raw, paths = _get_cfg_paths()
-    lang = _resolve_request_language(cfg, req.language)
-
-    if not (str(req.query or "").strip() or str(req.video_id or "").strip()):
-        raise HTTPException(status_code=400, detail="Report request requires a query or video_id.")
-    if str(req.query or "").strip():
-        _guard_query_text(cfg, str(req.query or ""), endpoint="Reports")
-
-    supporting_hits: List[Any] = []
-    if str(req.query or "").strip():
-        supporting_hits = _search_hits(
-            cfg,
-            query=str(req.query or "").strip(),
-            language=lang,
-            variant=req.variant,
-            top_k=max(1, int(req.top_k)),
-            video_id=req.video_id,
-            filters={"variant": req.variant} if req.variant else None,
-            dedupe=True,
-        )
-    elif req.video_id:
-        outputs = read_video_outputs(Path(paths.videos_dir), str(req.video_id), lang, variant=req.variant)
-        supporting_hits = _annotation_hits(
-            video_id=str(req.video_id),
-            language=lang,
-            annotations=list(outputs.get("annotations") or []),
-            variant=req.variant,
-            top_k=max(1, int(req.top_k)),
-        )
-
-    fallback_report = _report_text_from_hits(supporting_hits, req.video_id)
-    report_text, mode, _context = _generate_grounded_text(
-        cfg,
-        task="grounded report",
-        user_input=str(req.query or req.video_id or "report"),
-        hits=supporting_hits,
-        fallback_text=fallback_report,
-    )
-    report_text = _translate_output_text(cfg, report_text, target_lang=lang, target_name="reports")
-
-    return ReportResponse(
-        language=lang,
-        variant=req.variant,
-        report=_guard_output_text(cfg, report_text),
-        mode=mode,
-        latency_sec=float(time.perf_counter() - started_at),
-        hit_count=int(len(supporting_hits)),
-        citations=[_hit_to_citation(hit) for hit in supporting_hits],
-        supporting_hits=[_hit_to_schema(hit) for hit in supporting_hits],
-    )
+    return build_report_response(req, get_api_context())
 
 
 @app.post("/v1/qa", response_model=QaResponse)
 def qa(req: QaRequest):
-    started_at = time.perf_counter()
-    cfg, raw, paths = _get_cfg_paths()
-    lang = _resolve_request_language(cfg, req.language)
-    question = str(req.question or "").strip()
-    if not question:
-        raise HTTPException(status_code=400, detail="Question is required.")
-    _guard_query_text(cfg, question, endpoint="QA")
-    if bool(getattr(cfg.guard, "enabled", False)) and bool(getattr(cfg.guard, "query_gate", False)) and len(question) < 3:
-        raise HTTPException(status_code=400, detail="Question is too short for QA.")
-
-    hits = _search_hits(
-        cfg,
-        query=question,
-        language=lang,
-        variant=req.variant,
-        top_k=max(1, int(req.top_k)),
-        video_id=req.video_id,
-        filters={"variant": req.variant} if req.variant else None,
-        dedupe=True,
-    )
-
-    fallback_answer = _qa_text_from_hits(question, hits)
-    answer_text, mode, context = _generate_grounded_text(
-        cfg,
-        task="grounded question answering",
-        user_input=question,
-        hits=hits,
-        fallback_text=fallback_answer,
-    )
-    answer_text = _translate_output_text(cfg, answer_text, target_lang=lang, target_name="qa")
-
-    return QaResponse(
-        language=lang,
-        variant=req.variant,
-        answer=_guard_output_text(cfg, answer_text),
-        mode=mode,
-        context=context,
-        latency_sec=float(time.perf_counter() - started_at),
-        hit_count=int(len(hits)),
-        citations=[_hit_to_citation(hit) for hit in hits],
-        supporting_hits=[_hit_to_schema(hit) for hit in hits],
-    )
+    return build_qa_response(req, get_api_context())
 
 
 @app.post("/v1/rag", response_model=RagResponse)
 def rag(req: RagRequest):
-    started_at = time.perf_counter()
-    cfg, raw, paths = _get_cfg_paths()
-    lang = _resolve_request_language(cfg, req.language)
-    query = str(req.query or "").strip()
-    if not query:
-        raise HTTPException(status_code=400, detail="RAG query is required.")
-    _guard_query_text(cfg, query, endpoint="RAG")
-
-    hits = _search_hits(
-        cfg,
-        query=query,
-        language=lang,
-        variant=req.variant,
-        top_k=max(1, int(req.top_k)),
-        video_id=req.video_id,
-        filters={"variant": req.variant} if req.variant else None,
-        dedupe=True,
-    )
-
-    fallback_answer = _qa_text_from_hits(query, hits)
-    answer_text, mode, context = _generate_grounded_text(
-        cfg,
-        task="grounded retrieval augmented answer",
-        user_input=query,
-        hits=hits,
-        fallback_text=fallback_answer,
-    )
-    answer_text = _translate_output_text(cfg, answer_text, target_lang=lang, target_name="qa")
-
-    return RagResponse(
-        language=lang,
-        variant=req.variant,
-        answer=_guard_output_text(cfg, answer_text),
-        mode=mode,
-        context=context,
-        latency_sec=float(time.perf_counter() - started_at),
-        hit_count=int(len(hits)),
-        citations=[_hit_to_citation(hit) for hit in hits],
-        supporting_hits=[_hit_to_schema(hit) for hit in hits],
-    )
+    return build_rag_response(req, get_api_context())

@@ -146,6 +146,8 @@ footer {
 .chat-panel-marker,
 .media-panel-marker,
 .storage-side-marker,
+.chat-input-marker,
+.chat-new-marker,
 .chat-clear-marker,
 .search-controls-row-marker,
 .stage-layout-marker,
@@ -217,6 +219,8 @@ footer {
   margin-top: 0.2rem;
 }
 
+
+
 .brand-row {
   display: flex;
   align-items: center;
@@ -269,35 +273,42 @@ footer {
   gap: 0.55rem;
 }
 
+[data-testid="stVerticalBlock"]:has(> div[data-testid="stElementContainer"] .chat-input-marker) {
+  padding-top: 5px;
+}
+
+[data-testid="stVerticalBlock"]:has(> div[data-testid="stElementContainer"] .chat-new-marker),
 [data-testid="stVerticalBlock"]:has(> div[data-testid="stElementContainer"] .chat-clear-marker) {
-  align-items: flex-end;
-  margin-bottom: -3.58rem;
-  position: relative;
-  z-index: 4;
-  padding-top: 0.9rem;
-  padding-right: 0.82rem;
+  align-items: stretch;
+  justify-content: flex-end;
+  padding-top: 5px;
 }
 
+[data-testid="stVerticalBlock"]:has(> div[data-testid="stElementContainer"] .chat-new-marker) [data-testid="stButton"],
 [data-testid="stVerticalBlock"]:has(> div[data-testid="stElementContainer"] .chat-clear-marker) [data-testid="stButton"] {
-  width: auto !important;
+  width: 100% !important;
 }
 
+[data-testid="stVerticalBlock"]:has(> div[data-testid="stElementContainer"] .chat-new-marker) [data-testid="stButton"] button,
 [data-testid="stVerticalBlock"]:has(> div[data-testid="stElementContainer"] .chat-clear-marker) [data-testid="stButton"] button {
-  min-height: 57px;
-  width: 57px;
+  min-height: 40px;
+  width: 100%;
   padding: 0;
-  border: 0 !important;
-  border-radius: 999px !important;
-  background: transparent !important;
+  border-radius: 12px !important;
+  border: 1px solid var(--line) !important;
+  background: linear-gradient(180deg, rgba(20, 27, 58, 0.98) 0%, rgba(11, 15, 38, 0.98) 100%) !important;
   box-shadow: none !important;
-  color: var(--muted) !important;
-  font-size: 1.92rem !important;
+  color: var(--text) !important;
+  font-size: 1rem !important;
+  font-weight: 700 !important;
+  text-align: center;
 }
 
+[data-testid="stVerticalBlock"]:has(> div[data-testid="stElementContainer"] .chat-new-marker) [data-testid="stButton"] button:hover,
 [data-testid="stVerticalBlock"]:has(> div[data-testid="stElementContainer"] .chat-clear-marker) [data-testid="stButton"] button:hover {
-  transform: none;
-  border: 0 !important;
-  background: rgba(96, 116, 255, 0.12) !important;
+  transform: translateY(-1px);
+  border-color: rgba(124, 92, 255, 0.38) !important;
+  background: linear-gradient(180deg, rgba(26, 33, 68, 0.98) 0%, rgba(13, 18, 44, 0.98) 100%) !important;
   color: var(--text) !important;
 }
 
@@ -392,6 +403,8 @@ footer {
 .overview-grid-gap {
   height: 1.22rem;
 }
+
+
 
 .feature-card {
   position: relative;
@@ -745,6 +758,8 @@ footer {
   margin-top: 0.1rem;
 }
 
+
+
 .queue-overwrite-offset {
   height: 0.52rem;
 }
@@ -889,12 +904,15 @@ footer {
   line-height: 1.56;
 }
 
+
+
 .chat-empty {
-  min-height: 280px;
+  min-height: 340px;
   display: flex;
   flex-direction: column;
   justify-content: center;
   padding: 1rem 1rem 0.75rem 1rem;
+  margin-top: 0.42rem;
   margin-bottom: 0.5rem;
   border-radius: 24px;
   border: 1px solid rgba(154, 166, 255, 0.12);
@@ -911,10 +929,11 @@ footer {
   display: flex;
   flex-direction: column;
   gap: 0.9rem;
-  min-height: 280px;
-  max-height: 620px;
+  min-height: 340px;
+  max-height: 700px;
   overflow-y: auto;
   padding: 1rem 1rem 0.75rem 1rem;
+  margin-top: 0.42rem;
   margin-bottom: 0.5rem;
   border-radius: 24px;
   border: 1px solid rgba(154, 166, 255, 0.12);
@@ -1072,6 +1091,8 @@ footer {
 .assistant-info-copy {
   line-height: 1.5;
 }
+
+
 
 .footer-divider {
   display: block;

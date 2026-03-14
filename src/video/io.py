@@ -14,7 +14,7 @@ import json
 import shutil
 import subprocess
 import time
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -27,6 +27,67 @@ from src.utils.video_store import cache_dir as video_cache_dir
 from src.utils.video_store import find_video_file
 
 SMALL_SIZE: Tuple[int, int] = (64, 64)
+FaceBox = Tuple[int, int, int, int]
+
+
+@dataclass
+class _VideoIoSettings:
+    jpeg_q_frames: int
+    jpeg_q_small: int
+    face_detect_every_saved: int
+    face_detect_force_on_scenecut: bool
+    face_blur_strength: int
+    face_conf_threshold: float
+
+
+@dataclass
+class _VideoProcessingState:
+    frame_idx: int = 0
+    prev_small_kept: Optional[np.ndarray] = None
+    warmup_diffs: List[float] = field(default_factory=list)
+    warmup_done: bool = False
+    adaptive_threshold: float = 0.0
+    last_face_boxes: List[FaceBox] = field(default_factory=list)
+    last_face_detect_saved_idx: int = -10_000
+
+
+@dataclass
+class _VideoProcessingStats:
+    num_raw_frames: int
+    num_sampled_frames: int = 0
+    num_saved_frames: int = 0
+    num_dark_skipped: int = 0
+    num_lazy_skipped: int = 0
+    num_blur_flagged: int = 0
+    num_blur_skipped: int = 0
+    num_scene_cuts: int = 0
+    raw_read_frames: int = 0
+
+
+@dataclass
+class _VideoPreparationContext:
+    video_id: str
+    video_path: Path
+    prepared_root: Path
+    frames_dir: Path
+    small_dir: Optional[Path]
+    decode_source_path: Path
+    decode_meta: Dict[str, Any]
+    source_fps: float
+    fps: float
+    target_fps: float
+    step_frames: int
+    duration_sec: float
+    num_raw_frames: int
+    model_input_size: Tuple[int, int]
+    base_threshold: float
+    dark_threshold: float
+    blur_threshold: float
+    max_saved: Optional[int]
+    face_detector: Any
+    face_detector_type: str
+    clahe: Any
+    io_settings: _VideoIoSettings
 
 
 def _cfg_video_io_get(config: PipelineConfig, key: str, default: Any) -> Any:
@@ -62,22 +123,8 @@ def prepare_video(
 
     paths_cfg = config.paths
     video_cfg = config.video
-
-    if video_path is None:
-        video_path = find_video_file(Path(paths_cfg.videos_dir), video_id)
-        if video_path is None:
-            video_path = Path(paths_cfg.videos_dir) / video_id / "raw" / f"{video_id}.mp4"
-    video_path = video_path.resolve()
-    if not video_path.exists():
-        raise FileNotFoundError(f"Video not found: {video_path}")
-
-    jpeg_q_frames = int(_cfg_video_io_get(config, "jpeg_quality_frames", 82))
-    jpeg_q_small = int(_cfg_video_io_get(config, "jpeg_quality_small", 75))
-
-    face_detect_every_saved = int(_cfg_video_io_get(config, "face_detect_every_saved", 6))
-    face_detect_force_on_scenecut = bool(_cfg_video_io_get(config, "face_detect_force_on_scenecut", True))
-    face_blur_strength = int(_cfg_video_io_get(config, "face_blur_strength", 31))
-    face_conf_threshold = float(_cfg_video_io_get(config, "face_conf_threshold", 0.5))
+    video_path = _resolve_video_path(video_id, Path(paths_cfg.videos_dir), video_path)
+    io_settings = _load_video_io_settings(config)
 
     video_fp = _file_fingerprint(video_path)
     cfg_fp = _video_cfg_fingerprint(config)
@@ -104,7 +151,70 @@ def prepare_video(
         save_small=bool(video_cfg.save_small_frames),
     )
 
-    start_time = time.perf_counter()
+    preprocess_started = time.perf_counter()
+    context = _build_video_preparation_context(
+        video_id=video_id,
+        video_path=video_path,
+        config=config,
+        prepared_root=prepared_root,
+        frames_dir=frames_dir,
+        small_dir=small_dir,
+        io_settings=io_settings,
+    )
+    frames, state, stats = _process_video_frames(context)
+    preprocess_time_sec = float(time.perf_counter() - preprocess_started)
+    early_stop = _warn_if_early_stop(video_path, stats)
+
+    video_meta = _build_video_meta(
+        context=context,
+        frames=frames,
+        state=state,
+        stats=stats,
+        preprocess_time_sec=preprocess_time_sec,
+        early_stop=early_stop,
+        video_fp=video_fp,
+        cfg_fp=cfg_fp,
+    )
+
+    _write_meta_json(video_meta)
+    return video_meta
+
+
+def _resolve_video_path(video_id: str, videos_dir: Path, video_path: Optional[Path]) -> Path:
+    if video_path is None:
+        video_path = find_video_file(videos_dir, video_id)
+        if video_path is None:
+            video_path = videos_dir / video_id / "raw" / f"{video_id}.mp4"
+    resolved = Path(video_path).resolve()
+    if not resolved.exists():
+        raise FileNotFoundError(f"Video not found: {resolved}")
+    return resolved
+
+
+def _load_video_io_settings(config: PipelineConfig) -> _VideoIoSettings:
+    return _VideoIoSettings(
+        jpeg_q_frames=int(_cfg_video_io_get(config, "jpeg_quality_frames", 82)),
+        jpeg_q_small=int(_cfg_video_io_get(config, "jpeg_quality_small", 75)),
+        face_detect_every_saved=int(_cfg_video_io_get(config, "face_detect_every_saved", 6)),
+        face_detect_force_on_scenecut=bool(_cfg_video_io_get(config, "face_detect_force_on_scenecut", True)),
+        face_blur_strength=int(_cfg_video_io_get(config, "face_blur_strength", 31)),
+        face_conf_threshold=float(_cfg_video_io_get(config, "face_conf_threshold", 0.5)),
+    )
+
+
+def _build_video_preparation_context(
+    *,
+    video_id: str,
+    video_path: Path,
+    config: PipelineConfig,
+    prepared_root: Path,
+    frames_dir: Path,
+    small_dir: Optional[Path],
+    io_settings: _VideoIoSettings,
+) -> _VideoPreparationContext:
+    paths_cfg = config.paths
+    video_cfg = config.video
+
     decode_started = time.perf_counter()
     decode_source_path, decode_meta = _prepare_decode_source(
         source_path=video_path,
@@ -114,9 +224,41 @@ def prepare_video(
         pixel_format=str(getattr(video_cfg, "pixel_format", "yuv420p") or "yuv420p"),
     )
     decode_meta["time_sec"] = float(time.perf_counter() - decode_started)
-    video_info = _get_video_info(str(decode_source_path))
 
+    video_info = _get_video_info(str(decode_source_path))
     source_fps = float(video_info["fps"])
+    fps = _normalize_video_fps(video_path, source_fps)
+    target_fps = float(video_cfg.target_fps)
+    step_frames = max(1, int(round(fps / target_fps))) if target_fps > 0 else 1
+    face_detector, face_detector_type = _build_face_detector(video_cfg, paths_cfg)
+
+    return _VideoPreparationContext(
+        video_id=video_id,
+        video_path=video_path,
+        prepared_root=prepared_root,
+        frames_dir=frames_dir,
+        small_dir=small_dir,
+        decode_source_path=decode_source_path,
+        decode_meta=decode_meta,
+        source_fps=source_fps,
+        fps=fps,
+        target_fps=target_fps,
+        step_frames=step_frames,
+        duration_sec=float(video_info["duration_sec"]),
+        num_raw_frames=int(video_info["total_frames"]),
+        model_input_size=tuple(video_cfg.model_input_size),
+        base_threshold=float(video_cfg.min_change_threshold),
+        dark_threshold=float(video_cfg.dark_threshold),
+        blur_threshold=float(video_cfg.blur_threshold),
+        max_saved=int(video_cfg.max_frames) if video_cfg.max_frames is not None else None,
+        face_detector=face_detector,
+        face_detector_type=face_detector_type,
+        clahe=cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)),
+        io_settings=io_settings,
+    )
+
+
+def _normalize_video_fps(video_path: Path, source_fps: float) -> float:
     fps = source_fps
     clamped = False
     if fps < 1:
@@ -126,242 +268,344 @@ def prepare_video(
         fps = 30.0
         clamped = True
     fps = float(round(fps))
-
     if clamped:
         print(
             f"[prepare_video] Unstable FPS {source_fps:.3f} for {video_path}, "
             f"using fallback {fps:.1f}"
         )
+    return fps
 
-    target_fps = float(video_cfg.target_fps)
-    step_frames = max(1, int(round(fps / target_fps))) if target_fps > 0 else 1
 
-    if bool(video_cfg.face_blur):
-        face_detector = _load_face_detector_dnn(
-            paths_cfg.dnn_face_proto,
-            paths_cfg.dnn_face_model,
-        )
-        face_detector_type = "dnn"
-    else:
-        face_detector = None
-        face_detector_type = "none"
+def _build_face_detector(video_cfg: Any, paths_cfg: Any) -> Tuple[Any, str]:
+    if not bool(video_cfg.face_blur):
+        return None, "none"
+    detector = _load_face_detector_dnn(
+        paths_cfg.dnn_face_proto,
+        paths_cfg.dnn_face_model,
+    )
+    return detector, "dnn"
 
-    cap = cv2.VideoCapture(str(decode_source_path))
+
+def _process_video_frames(
+    context: _VideoPreparationContext,
+) -> Tuple[List[FrameInfo], _VideoProcessingState, _VideoProcessingStats]:
+    cap = cv2.VideoCapture(str(context.decode_source_path))
     if not cap.isOpened():
-        raise RuntimeError(f"Could not open video {decode_source_path}")
+        raise RuntimeError(f"Could not open video {context.decode_source_path}")
 
     frames: List[FrameInfo] = []
-    num_raw_frames = int(video_info["total_frames"])
-    num_sampled_frames = 0
-    num_saved_frames = 0
-    num_dark_skipped = 0
-    num_lazy_skipped = 0
-    num_blur_flagged = 0
-    num_blur_skipped = 0
-    num_scene_cuts = 0
-    raw_read_frames = 0
+    state = _VideoProcessingState(adaptive_threshold=context.base_threshold * 0.5)
+    stats = _VideoProcessingStats(num_raw_frames=context.num_raw_frames)
 
-    prev_small_kept: Optional[np.ndarray] = None
-    frame_idx = 0
+    try:
+        while True:
+            ok = cap.grab()
+            if not ok:
+                break
 
-    base_threshold = float(video_cfg.min_change_threshold)
-    dark_threshold = float(video_cfg.dark_threshold)
-    blur_threshold = float(video_cfg.blur_threshold)
-    max_saved = int(video_cfg.max_frames) if video_cfg.max_frames is not None else None
-    model_input_size = tuple(video_cfg.model_input_size)
+            stats.raw_read_frames += 1
 
-    warmup_diffs: List[float] = []
-    warmup_done = False
-    adaptive_threshold = base_threshold * 0.5
-
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-
-    last_face_boxes: List[Tuple[int, int, int, int]] = []
-    last_face_detect_saved_idx = -10_000
-
-    while True:
-        ok = cap.grab()
-        if not ok:
-            break
-
-        raw_read_frames += 1
-
-        if frame_idx % step_frames != 0:
-            frame_idx += 1
-            continue
-
-        ok, frame = cap.retrieve()
-        if not ok:
-            frame_idx += 1
-            continue
-
-        timestamp = frame_idx / fps
-        num_sampled_frames += 1
-
-        small_gray = _downscale_for_analysis(frame)
-        blur_score = _blur_variance_score(small_gray)
-        blur_flag = blur_score < blur_threshold
-        if blur_flag:
-            num_blur_flagged += 1
-            if blur_score < max(1.0, blur_threshold * 0.35):
-                num_blur_skipped += 1
-                frame_idx += 1
+            if state.frame_idx % context.step_frames != 0:
+                state.frame_idx += 1
                 continue
 
-        is_dark = _is_dark_frame(small_gray, brightness_threshold=dark_threshold)
-        if is_dark:
-            num_dark_skipped += 1
-            mean_brightness = float(np.mean(small_gray))
-            if mean_brightness < dark_threshold * 0.4:
-                frame_idx += 1
+            ok, frame = cap.retrieve()
+            if not ok:
+                state.frame_idx += 1
                 continue
 
-            lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
-            l, a, b = cv2.split(lab)
-            l = clahe.apply(l)
-            lab = cv2.merge((l, a, b))
-            frame = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+            timestamp = state.frame_idx / context.fps
+            stats.num_sampled_frames += 1
 
-        if not warmup_done:
-            if prev_small_kept is not None:
-                warmup_diffs.append(_compute_frame_change_cpu(prev_small_kept, small_gray))
-            prev_small_kept = small_gray
-
-            if len(warmup_diffs) >= 8:
-                scene_motion = float(np.mean(warmup_diffs)) if warmup_diffs else 0.0
-                adaptive_threshold = max(
-                    base_threshold * 0.25,
-                    min(base_threshold * 0.7, scene_motion * 1.2),
-                )
-                warmup_done = True
-
-            frame_idx += 1
-            continue
-
-        lazy_ok = True
-        is_scene_cut = False
-        if prev_small_kept is not None:
-            diff = _compute_frame_change_cpu(prev_small_kept, small_gray)
-            if diff < adaptive_threshold:
-                lazy_ok = False
-            if diff > adaptive_threshold * 8.0:
-                num_scene_cuts += 1
-                is_scene_cut = True
-
-        if not lazy_ok:
-            num_lazy_skipped += 1
-            frame_idx += 1
-            continue
-
-        if face_detector is not None:
-            need_detect = (num_saved_frames - last_face_detect_saved_idx) >= face_detect_every_saved
-            if face_detect_force_on_scenecut and is_scene_cut:
-                need_detect = True
-
-            if need_detect:
-                try:
-                    last_face_boxes = _detect_faces_dnn(face_detector, frame, conf_threshold=face_conf_threshold)
-                    last_face_detect_saved_idx = num_saved_frames
-                except Exception:
-                    last_face_boxes = []
-
-            if last_face_boxes:
-                frame = _blur_boxes(frame, last_face_boxes, blur_strength=face_blur_strength)
-
-        resized = _letterbox_resize(frame, target_size=model_input_size)
-
-        frame_name = f"frame_{frame_idx:06d}.jpg"
-        frame_path = frames_dir / frame_name
-        _save_frame(resized, frame_path, quality=jpeg_q_frames)
-
-        small_path: Optional[Path] = None
-        if small_dir is not None:
-            small_path = small_dir / frame_name
-            _save_small_frame(small_gray, small_path, quality=jpeg_q_small)
-
-        frames.append(
-            FrameInfo(
-                video_id=video_id,
-                frame_index=len(frames),
-                timestamp_sec=float(timestamp),
-                path=frame_path,
-                small_path=small_path,
-                extra={
-                    "blur_score": float(blur_score),
-                    "blur_flag": bool(blur_flag),
-                    "scene_cut": bool(is_scene_cut),
-                },
+            small_gray = _downscale_for_analysis(frame)
+            blur_score, blur_flag, blur_skip = _assess_blur_frame(
+                small_gray,
+                context.blur_threshold,
             )
+            if blur_flag:
+                stats.num_blur_flagged += 1
+            if blur_skip:
+                stats.num_blur_skipped += 1
+                state.frame_idx += 1
+                continue
+
+            frame, is_dark, dark_skip = _restore_dark_frame(
+                frame,
+                small_gray,
+                context.dark_threshold,
+                context.clahe,
+            )
+            if is_dark:
+                stats.num_dark_skipped += 1
+            if dark_skip:
+                state.frame_idx += 1
+                continue
+
+            if _consume_warmup_frame(state, small_gray, context.base_threshold):
+                state.frame_idx += 1
+                continue
+
+            lazy_ok, is_scene_cut = _evaluate_motion_gate(
+                prev_small_kept=state.prev_small_kept,
+                small_gray=small_gray,
+                adaptive_threshold=state.adaptive_threshold,
+                stats=stats,
+            )
+            if not lazy_ok:
+                stats.num_lazy_skipped += 1
+                state.frame_idx += 1
+                continue
+
+            frame = _maybe_blur_faces(
+                frame=frame,
+                context=context,
+                state=state,
+                stats=stats,
+                is_scene_cut=is_scene_cut,
+            )
+
+            frames.append(
+                _save_prepared_frame(
+                    context=context,
+                    saved_index=len(frames),
+                    frame_idx=state.frame_idx,
+                    timestamp=timestamp,
+                    frame=frame,
+                    small_gray=small_gray,
+                    blur_score=blur_score,
+                    blur_flag=blur_flag,
+                    is_scene_cut=is_scene_cut,
+                )
+            )
+
+            state.prev_small_kept = small_gray
+            stats.num_saved_frames += 1
+
+            if context.max_saved is not None and stats.num_saved_frames >= context.max_saved:
+                break
+
+            state.frame_idx += 1
+    finally:
+        cap.release()
+
+    return frames, state, stats
+
+
+def _assess_blur_frame(small_gray: np.ndarray, blur_threshold: float) -> Tuple[float, bool, bool]:
+    blur_score = _blur_variance_score(small_gray)
+    blur_flag = blur_score < blur_threshold
+    blur_skip = blur_flag and blur_score < max(1.0, blur_threshold * 0.35)
+    return blur_score, blur_flag, blur_skip
+
+
+def _restore_dark_frame(
+    frame: np.ndarray,
+    small_gray: np.ndarray,
+    dark_threshold: float,
+    clahe: Any,
+) -> Tuple[np.ndarray, bool, bool]:
+    is_dark = _is_dark_frame(small_gray, brightness_threshold=dark_threshold)
+    if not is_dark:
+        return frame, False, False
+
+    mean_brightness = float(np.mean(small_gray))
+    if mean_brightness < dark_threshold * 0.4:
+        return frame, True, True
+
+    lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    l = clahe.apply(l)
+    lab = cv2.merge((l, a, b))
+    brightened = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+    return brightened, True, False
+
+
+def _consume_warmup_frame(
+    state: _VideoProcessingState,
+    small_gray: np.ndarray,
+    base_threshold: float,
+) -> bool:
+    if state.warmup_done:
+        return False
+
+    if state.prev_small_kept is not None:
+        state.warmup_diffs.append(_compute_frame_change_cpu(state.prev_small_kept, small_gray))
+    state.prev_small_kept = small_gray
+
+    if len(state.warmup_diffs) >= 8:
+        scene_motion = float(np.mean(state.warmup_diffs)) if state.warmup_diffs else 0.0
+        state.adaptive_threshold = max(
+            base_threshold * 0.25,
+            min(base_threshold * 0.7, scene_motion * 1.2),
         )
+        state.warmup_done = True
 
-        prev_small_kept = small_gray
-        num_saved_frames += 1
+    return True
 
-        if max_saved is not None and num_saved_frames >= max_saved:
-            break
 
-        frame_idx += 1
+def _evaluate_motion_gate(
+    *,
+    prev_small_kept: Optional[np.ndarray],
+    small_gray: np.ndarray,
+    adaptive_threshold: float,
+    stats: _VideoProcessingStats,
+) -> Tuple[bool, bool]:
+    lazy_ok = True
+    is_scene_cut = False
+    if prev_small_kept is None:
+        return lazy_ok, is_scene_cut
 
-    cap.release()
-    preprocess_time_sec = time.perf_counter() - start_time
+    diff = _compute_frame_change_cpu(prev_small_kept, small_gray)
+    if diff < adaptive_threshold:
+        lazy_ok = False
+    if diff > adaptive_threshold * 8.0:
+        stats.num_scene_cuts += 1
+        is_scene_cut = True
+    return lazy_ok, is_scene_cut
 
-    early_stop = False
-    if num_raw_frames > 0 and raw_read_frames < int(0.9 * num_raw_frames):
-        early_stop = True
-        print(
-            f"[prepare_video] Warning: read only {raw_read_frames}/{num_raw_frames} frames "
-            f"for {video_path} (~{100.0 * raw_read_frames / max(1, num_raw_frames):.1f}%)."
-        )
 
-    video_meta = VideoMeta(
-        video_id=video_id,
-        original_path=video_path,
-        original_fps=float(fps),
-        duration_sec=float(video_info["duration_sec"]),
-        processed_fps=target_fps,
+def _maybe_blur_faces(
+    *,
+    frame: np.ndarray,
+    context: _VideoPreparationContext,
+    state: _VideoProcessingState,
+    stats: _VideoProcessingStats,
+    is_scene_cut: bool,
+) -> np.ndarray:
+    if context.face_detector is None:
+        return frame
+
+    need_detect = (stats.num_saved_frames - state.last_face_detect_saved_idx) >= context.io_settings.face_detect_every_saved
+    if context.io_settings.face_detect_force_on_scenecut and is_scene_cut:
+        need_detect = True
+
+    if need_detect:
+        try:
+            state.last_face_boxes = _detect_faces_dnn(
+                context.face_detector,
+                frame,
+                conf_threshold=context.io_settings.face_conf_threshold,
+            )
+            state.last_face_detect_saved_idx = stats.num_saved_frames
+        except Exception:
+            state.last_face_boxes = []
+
+    if not state.last_face_boxes:
+        return frame
+
+    return _blur_boxes(
+        frame,
+        state.last_face_boxes,
+        blur_strength=context.io_settings.face_blur_strength,
+    )
+
+
+def _save_prepared_frame(
+    *,
+    context: _VideoPreparationContext,
+    saved_index: int,
+    frame_idx: int,
+    timestamp: float,
+    frame: np.ndarray,
+    small_gray: np.ndarray,
+    blur_score: float,
+    blur_flag: bool,
+    is_scene_cut: bool,
+) -> FrameInfo:
+    resized = _letterbox_resize(frame, target_size=context.model_input_size)
+    frame_name = f"frame_{frame_idx:06d}.jpg"
+    frame_path = context.frames_dir / frame_name
+    _save_frame(resized, frame_path, quality=context.io_settings.jpeg_q_frames)
+
+    small_path: Optional[Path] = None
+    if context.small_dir is not None:
+        small_path = context.small_dir / frame_name
+        _save_small_frame(small_gray, small_path, quality=context.io_settings.jpeg_q_small)
+
+    return FrameInfo(
+        video_id=context.video_id,
+        frame_index=saved_index,
+        timestamp_sec=float(timestamp),
+        path=frame_path,
+        small_path=small_path,
+        extra={
+            "blur_score": float(blur_score),
+            "blur_flag": bool(blur_flag),
+            "scene_cut": bool(is_scene_cut),
+        },
+    )
+
+
+def _warn_if_early_stop(video_path: Path, stats: _VideoProcessingStats) -> bool:
+    if stats.num_raw_frames <= 0:
+        return False
+    if stats.raw_read_frames >= int(0.9 * stats.num_raw_frames):
+        return False
+
+    print(
+        f"[prepare_video] Warning: read only {stats.raw_read_frames}/{stats.num_raw_frames} frames "
+        f"for {video_path} (~{100.0 * stats.raw_read_frames / max(1, stats.num_raw_frames):.1f}%)."
+    )
+    return True
+
+
+def _build_video_meta(
+    *,
+    context: _VideoPreparationContext,
+    frames: List[FrameInfo],
+    state: _VideoProcessingState,
+    stats: _VideoProcessingStats,
+    preprocess_time_sec: float,
+    early_stop: bool,
+    video_fp: str,
+    cfg_fp: str,
+) -> VideoMeta:
+    return VideoMeta(
+        video_id=context.video_id,
+        original_path=context.video_path,
+        original_fps=float(context.fps),
+        duration_sec=float(context.duration_sec),
+        processed_fps=context.target_fps,
         num_frames=len(frames),
-        prepared_dir=prepared_root,
-        frame_dir=frames_dir,
-        small_frame_dir=small_dir,
+        prepared_dir=context.prepared_root,
+        frame_dir=context.frames_dir,
+        small_frame_dir=context.small_dir,
         frames=frames,
         extra={
             "frame_stats": {
-                "source_fps": source_fps,
-                "num_raw_frames": num_raw_frames,
-                "raw_read_frames": raw_read_frames,
-                "num_sampled_frames": num_sampled_frames,
-                "num_saved_frames": num_saved_frames,
-                "num_dark_skipped": num_dark_skipped,
-                "num_lazy_skipped": num_lazy_skipped,
-                "num_blur_flagged": num_blur_flagged,
-                "num_blur_skipped": num_blur_skipped,
-                "num_scene_cuts": num_scene_cuts,
+                "source_fps": context.source_fps,
+                "num_raw_frames": stats.num_raw_frames,
+                "raw_read_frames": stats.raw_read_frames,
+                "num_sampled_frames": stats.num_sampled_frames,
+                "num_saved_frames": stats.num_saved_frames,
+                "num_dark_skipped": stats.num_dark_skipped,
+                "num_lazy_skipped": stats.num_lazy_skipped,
+                "num_blur_flagged": stats.num_blur_flagged,
+                "num_blur_skipped": stats.num_blur_skipped,
+                "num_scene_cuts": stats.num_scene_cuts,
                 "early_stop": early_stop,
             },
-            "sampling": {"step_frames": int(step_frames)},
-            "adaptive_threshold": float(adaptive_threshold),
+            "sampling": {"step_frames": int(context.step_frames)},
+            "adaptive_threshold": float(state.adaptive_threshold),
             "preprocess_time_sec": float(preprocess_time_sec),
-            "face_detector_type": face_detector_type,
+            "face_detector_type": context.face_detector_type,
             "cache": {
                 "hit": False,
                 "video_fingerprint": video_fp,
                 "video_cfg_fingerprint": cfg_fp,
             },
-            "decode": decode_meta,
+            "decode": context.decode_meta,
             "video_io": {
-                "jpeg_quality_frames": jpeg_q_frames,
-                "jpeg_quality_small": jpeg_q_small,
-                "face_detect_every_saved": face_detect_every_saved,
-                "face_detect_force_on_scenecut": face_detect_force_on_scenecut,
-                "face_blur_strength": face_blur_strength,
-                "face_conf_threshold": face_conf_threshold,
-                "blur_threshold": blur_threshold,
+                "jpeg_quality_frames": context.io_settings.jpeg_q_frames,
+                "jpeg_quality_small": context.io_settings.jpeg_q_small,
+                "face_detect_every_saved": context.io_settings.face_detect_every_saved,
+                "face_detect_force_on_scenecut": context.io_settings.face_detect_force_on_scenecut,
+                "face_blur_strength": context.io_settings.face_blur_strength,
+                "face_conf_threshold": context.io_settings.face_conf_threshold,
+                "blur_threshold": context.blur_threshold,
             },
         },
     )
-
-    _write_meta_json(video_meta)
-    return video_meta
 
 
 def _file_fingerprint(p: Path) -> str:

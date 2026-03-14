@@ -1,3 +1,4 @@
+# app/main.py
 """
 Streamlit entrypoint for SmartCampus V2T.
 
@@ -17,9 +18,16 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app import ui as U
 from app.api_client import BackendClient
+from app.lib.i18n import get_T, load_ui_text
+from app.lib.media import load_and_apply_css
 from app.state import UIState
+from app.view.analytics import video_analytics_tab
+from app.view.overview import overview_tab
+from app.view.reports import reports_metrics_tab
+from app.view.search import search_tab
+from app.view.shared import footer, render_header, render_i18n_metrics, soft_note
+from app.view.storage import storage_tab
 from src.core.runtime import config_cache_token, load_pipeline_config
 
 TAB_IDS = ["home", "processing", "video", "search", "reports"]
@@ -110,7 +118,7 @@ def main() -> None:
     st.markdown(EARLY_SHELL_CSS, unsafe_allow_html=True)
 
     cfg = get_cfg()
-    U.load_and_apply_css(Path(cfg.ui.styles_path))
+    load_and_apply_css(Path(cfg.ui.styles_path))
 
     langs = cfg.ui.langs or ["ru", "kz", "en"]
     ui_text_path = Path(cfg.ui.ui_text_path)
@@ -118,7 +126,7 @@ def main() -> None:
         ui_text_mtime = float(ui_text_path.stat().st_mtime_ns)
     except Exception:
         ui_text_mtime = 0.0
-    ui_text = U.load_ui_text(str(ui_text_path), ui_text_mtime, ",".join(langs))
+    ui_text = load_ui_text(str(ui_text_path), ui_text_mtime, ",".join(langs))
 
     UIState().bind_defaults()
 
@@ -140,12 +148,12 @@ def main() -> None:
     client = BackendClient(base_url=base_url)
     tab = _get_tab_from_query(default_tab="home")
 
-    T = U.get_T(ui_text, st.session_state.get("ui_lang", default_lang))
+    T = get_T(ui_text, st.session_state.get("ui_lang", default_lang))
     labels = _tab_labels(str(st.session_state.get("ui_lang", default_lang)))
     if not isinstance(labels, list) or len(labels) != len(TAB_IDS):
         labels = ["Overview", "Storage", "Video Analytics", "Search", "Reports"]
 
-    tab = U.render_header(
+    tab = render_header(
         T=T,
         labels=labels,
         ids=TAB_IDS,
@@ -156,22 +164,22 @@ def main() -> None:
 
     health_payload = client.health()
     if not (isinstance(health_payload, dict) and health_payload.get("ok")):
-        U.soft_note(f"Backend is not reachable at {base_url}", kind="warn")
+        soft_note(f"Backend is not reachable at {base_url}", kind="warn")
         st.stop()
 
     if tab == "home":
-        U.overview_tab(client, cfg, ui_text)
+        overview_tab(client, cfg, ui_text)
     elif tab == "processing":
-        U.storage_tab(client, cfg, ui_text)
+        storage_tab(client, cfg, ui_text)
     elif tab == "video":
-        U.video_analytics_tab(client, cfg, ui_text)
+        video_analytics_tab(client, cfg, ui_text)
     elif tab == "reports":
-        U.reports_metrics_tab(client, cfg, ui_text)
+        reports_metrics_tab(client, cfg, ui_text)
     else:
-        U.search_tab(client, cfg, ui_text)
+        search_tab(client, cfg, ui_text)
 
-    U.footer(U.get_T(ui_text, st.session_state.get("ui_lang", default_lang)), str(st.session_state.get("ui_lang", default_lang)))
-    U.render_i18n_metrics()
+    footer(get_T(ui_text, st.session_state.get("ui_lang", default_lang)), str(st.session_state.get("ui_lang", default_lang)))
+    render_i18n_metrics()
 
 
 if __name__ == "__main__":

@@ -23,56 +23,39 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.deps import now_ts
+from scripts.common import (
+    float_or_none as _float_or_none_common,
+    read_json_dict as _read_json_dict,
+    resolve_path as _resolve_path_common,
+    safe_div as _safe_div_common,
+    slugify as _slugify,
+    write_json as _write_json_common,
+)
 from src.utils.video_store import read_segments
 
 
 def _resolve_path(arg: str) -> Path:
-    path = Path(arg)
-    if path.is_absolute():
-        return path
-    return (Path.cwd() / path).resolve()
+    return _resolve_path_common(arg)
 
 
 def _read_json(path: Path) -> Dict[str, Any]:
-    try:
-        if not path.exists():
-            return {}
-        text = path.read_text(encoding="utf-8-sig")
-        obj = json.loads(text)
-        return obj if isinstance(obj, dict) else {}
-    except Exception:
-        return {}
+    return _read_json_dict(path, default={}, encoding="utf-8-sig") or {}
 
 
 def _write_json(path: Path, payload: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    _write_json_common(path, payload)
 
 
 def _slug(text: str) -> str:
-    cleaned = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in str(text or "").strip())
-    cleaned = cleaned.strip("._-")
-    return cleaned or "default"
+    return _slugify(text, default="default")
 
 
 def _float_or_none(value: Any) -> Optional[float]:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    try:
-        text = str(value or "").strip()
-        if not text:
-            return None
-        return float(text)
-    except Exception:
-        return None
+    return _float_or_none_common(value)
 
 
 def _safe_div(num: Optional[float], den: Optional[float]) -> Optional[float]:
-    if num is None or den is None or den == 0:
-        return None
-    return float(num / den)
+    return _safe_div_common(num, den)
 
 
 def _translation_totals(metrics: Dict[str, Any]) -> Tuple[float, int, int]:

@@ -1,4 +1,4 @@
-# backend/worker_runtime.py
+# backend/jobs/worker_runtime.py
 """
 Worker runtime helpers for SmartCampus V2T backend.
 
@@ -14,14 +14,14 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from backend.deps import load_cfg_and_raw
-from backend.experimental import (
+from backend.jobs.experimental import (
     build_batch_manifest_payload,
     build_variant_child_specs,
     update_batch_variant_status,
 )
-from backend.index_runtime import write_index_state as _write_index_state
-from backend.job_control import create_job, notify_webhook, read_job, remove_lock_if_exists, set_state, write_job
-from backend.job_executors import WorkerServices
+from backend.jobs.index_runtime import write_index_state as _write_index_state
+from backend.jobs.control import create_job, read_job, remove_lock_if_exists, set_state, write_job
+from backend.jobs.runtime_common import WorkerServices, finalize_job_state
 from src.guard.service import GuardService
 from src.llm.analyze import StructuringService
 from src.llm.summary import SummaryService
@@ -98,12 +98,16 @@ def resolve_worker_context(
 def mark_job_canceled(paths: Any, job_id: str, webhook_cfg: Dict[str, Any], message: str) -> None:
     """Mark a job as canceled and release its lock."""
 
-    set_state(paths, job_id, "canceled", stage="canceled", progress=0.0, message=message)
-    try:
-        notify_webhook(webhook_cfg, "job_canceled", read_job(paths, job_id))
-    except Exception:
-        pass
-    remove_lock_if_exists(paths, job_id)
+    finalize_job_state(
+        paths,
+        job_id,
+        state="canceled",
+        stage="canceled",
+        progress=0.0,
+        message=message,
+        webhook_cfg=webhook_cfg,
+        webhook_event="job_canceled",
+    )
 
 
 def expand_experimental_job(
@@ -191,19 +195,16 @@ def handle_job_failure(
             error=str(error),
         )
 
-    set_state(
+    finalize_job_state(
         paths,
         job_id,
-        "failed",
+        state="failed",
         stage="failed",
         progress=0.0,
         message="Failed",
+        webhook_cfg=webhook_cfg,
+        webhook_event="job_failed",
         error=str(error),
     )
-    try:
-        notify_webhook(webhook_cfg, "job_failed", read_job(paths, job_id))
-    except Exception:
-        pass
-    remove_lock_if_exists(paths, job_id)
 
     _write_index_state(paths, built=False, last_error=str(error))

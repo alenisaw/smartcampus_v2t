@@ -31,6 +31,138 @@ _LLM_CACHE: Dict[str, Any] = {}
 _GUARD_CACHE: Dict[str, Any] = {}
 
 
+def _resolved_variant(cfg: Any, variant: Optional[str]) -> Optional[str]:
+    return str(variant).strip().lower() if variant else getattr(cfg, "active_variant", None)
+
+
+def _normalized_language(cfg: Any, language: Optional[str]) -> str:
+    return (language or getattr(cfg.ui, "default_lang", None) or "en").strip().lower()
+
+
+def _translation_service_key(cfg: Any) -> str:
+    return f"{cfg.translation.backend}::{cfg.config_fingerprint}"
+
+
+def _search_with_engine(
+    engine: "QueryEngine",
+    *,
+    query: str,
+    top_k: int,
+    video_id: Optional[str] = None,
+    filters: Optional[Dict[str, Any]] = None,
+    dedupe: bool = True,
+) -> List[Any]:
+    return engine.search(
+        query=str(query or "").strip(),
+        top_k=max(1, int(top_k)),
+        video_id=video_id,
+        filters=filters,
+        dedupe=bool(dedupe),
+    )
+
+
+def _fallback_languages(cfg: Any, language: str) -> List[str]:
+    return [
+        str(item).strip().lower()
+        for item in (getattr(cfg.search, "fallback_langs", []) or [])
+        if str(item).strip().lower() and str(item).strip().lower() != str(language or "").strip().lower()
+    ]
+
+
+def _translate_single_text(
+    cfg: Any,
+    text: str,
+    *,
+    src_lang: str,
+    tgt_lang: str,
+    target_name: str,
+    allow_post_edit: bool,
+    prefer_manual_cache: bool,
+) -> str:
+    content = str(text or "").strip()
+    src = str(src_lang or "").strip().lower()
+    tgt = str(tgt_lang or "").strip().lower()
+    if not content or not src or not tgt or src == tgt:
+        return content
+
+    translator = get_translation_service(cfg)
+    if translator is None:
+        return content
+
+    max_new_tokens = int(getattr(cfg.translation, "max_new_tokens", 64))
+    cache_enabled = bool(getattr(cfg.translation, "cache_enabled", False))
+    cache_dir = getattr(cfg.paths, "cache_dir", None)
+
+    if prefer_manual_cache and cache_enabled and cache_dir:
+        try:
+            cache = translator.cache(src_lang=src, tgt_lang=tgt)
+            cached_map = cache.get_many([content])
+            import hashlib
+
+            cached = cached_map.get(hashlib.sha1(content.encode("utf-8")).hexdigest())
+            if cached:
+                return str(cached)
+            translated = translator.translate(
+                [content],
+                src_lang=src,
+                tgt_lang=tgt,
+                batch_size=1,
+                max_new_tokens=max_new_tokens,
+                use_cache=False,
+            )
+            if translated:
+                translated_text = str(translated[0] or "").strip() or content
+                cache.put_many([content], [translated_text])
+                return translated_text
+        except Exception:
+            pass
+
+    try:
+        translated = translator.translate(
+            [content],
+            src_lang=src,
+            tgt_lang=tgt,
+            batch_size=1,
+            max_new_tokens=max_new_tokens,
+            use_cache=cache_enabled,
+        )
+        if translated:
+            content = str(translated[0] or "").strip() or content
+    except Exception:
+        return content
+
+    if allow_post_edit and hasattr(translator, "post_edit_many"):
+        try:
+            edited, _edited_count = translator.post_edit_many(
+                [str(text or "")],
+                [content],
+                src_lang=src,
+                tgt_lang=tgt,
+                target_name=str(target_name or ""),
+            )
+            if edited:
+                content = str(edited[0] or "").strip() or content
+        except Exception:
+            pass
+
+    return content
+
+
+def _grounded_prompt(task: str, user_input: str, context: str) -> str:
+    return (
+        "You are a grounded surveillance analytics assistant.\n"
+        f"Task: {task}.\n"
+        "Use only the context below. Do not invent facts. Preserve time ranges and segment ids when relevant.\n"
+        f"User input: {user_input}\n"
+        f"Context:\n{context}\n"
+        "Return only the final answer text."
+    )
+
+
+def _fallback_grounded_result(fallback_text: str, context: str) -> Tuple[str, str, str]:
+    return fallback_text, "deterministic", context
+
+
 def _index_version(index_dir: Path) -> float:
     p1 = index_dir / "manifest.json"
     p2 = index_dir / "meta.json"
@@ -49,14 +181,14 @@ def resolved_index_dir(cfg: Any, language: str, variant: Optional[str] = None) -
     from src.search.builder import resolve_index_dir, search_config_fingerprint
 
     cfg_fp = search_config_fingerprint(cfg)
-    resolved_variant = str(variant).strip().lower() if variant else getattr(cfg, "active_variant", None)
+    resolved_variant = _resolved_variant(cfg, variant)
     return resolve_index_dir(Path(cfg.paths.indexes_dir), cfg_fp, language=language, variant=resolved_variant), cfg_fp
 
 
 def resolve_request_language(cfg: Any, language: Optional[str]) -> str:
     """Resolve one request language against config defaults."""
 
-    return (language or getattr(cfg.ui, "default_lang", None) or "en").strip().lower()
+    return _normalized_language(cfg, language)
 
 
 def get_engine(cfg: Any, language: str, variant: Optional[str] = None) -> Optional["QueryEngine"]:
@@ -64,8 +196,8 @@ def get_engine(cfg: Any, language: str, variant: Optional[str] = None) -> Option
 
     from src.search import QueryEngine
 
-    lang = (language or getattr(cfg.ui, "default_lang", None) or "en").strip().lower()
-    resolved_variant = str(variant).strip().lower() if variant else getattr(cfg, "active_variant", None)
+    lang = _normalized_language(cfg, language)
+    resolved_variant = _resolved_variant(cfg, variant)
     idx_dir, cfg_fp = resolved_index_dir(cfg, lang, resolved_variant)
     version = _index_version(idx_dir)
     if version <= 0:
@@ -115,7 +247,7 @@ def get_translation_service(cfg: Any) -> Optional["TranslationService"]:
     backend_name = str(getattr(cfg.translation, "backend", "") or "").strip().lower()
     if backend_name != "ctranslate2":
         return None
-    key = f"{cfg.translation.backend}::{cfg.config_fingerprint}"
+    key = _translation_service_key(cfg)
     service = _TRANS_CACHE.get(key)
     if service is None:
         try:
@@ -130,60 +262,17 @@ def get_translation_service(cfg: Any) -> Optional["TranslationService"]:
 def translate_query(cfg: Any, query: str, src_lang: str, tgt_lang: str) -> str:
     """Translate search queries into fallback languages when enabled."""
 
-    if not query:
-        return query
-    src_lang = (src_lang or "").strip().lower()
-    tgt_lang = (tgt_lang or "").strip().lower()
-    if not src_lang or not tgt_lang or src_lang == tgt_lang:
-        return query
     if not bool(getattr(cfg.search, "translate_queries", False)):
         return query
-    try:
-        translator = get_translation_service(cfg)
-    except Exception:
-        return query
-    if translator is None:
-        return query
-
-    max_new_tokens = int(getattr(cfg.translation, "max_new_tokens", 64))
-    cache_enabled = bool(getattr(cfg.translation, "cache_enabled", False))
-    cache_dir = getattr(cfg.paths, "cache_dir", None)
-    if cache_enabled and cache_dir:
-        try:
-            cache = translator.cache(src_lang=src_lang, tgt_lang=tgt_lang)
-            cached_map = cache.get_many([query])
-            import hashlib
-
-            cached = cached_map.get(hashlib.sha1(query.encode("utf-8")).hexdigest())
-            if cached:
-                return cached
-            translated = translator.translate(
-                [query],
-                src_lang=src_lang,
-                tgt_lang=tgt_lang,
-                batch_size=1,
-                max_new_tokens=max_new_tokens,
-                use_cache=False,
-            )
-            if translated:
-                cache.put_many([query], [translated[0]])
-                return translated[0]
-        except Exception:
-            pass
-    try:
-        translated = translator.translate(
-            [query],
-            src_lang=src_lang,
-            tgt_lang=tgt_lang,
-            batch_size=1,
-            max_new_tokens=max_new_tokens,
-            use_cache=cache_enabled,
-        )
-        if translated:
-            return translated[0]
-    except Exception:
-        return query
-    return query
+    return _translate_single_text(
+        cfg,
+        query,
+        src_lang=src_lang,
+        tgt_lang=tgt_lang,
+        target_name="query",
+        allow_post_edit=False,
+        prefer_manual_cache=True,
+    )
 
 
 def search_hits(
@@ -200,9 +289,10 @@ def search_hits(
     """Run one search request against the resolved engine."""
 
     engine = get_engine_or_400(cfg, language, variant)
-    return engine.search(
-        query=str(query or "").strip(),
-        top_k=max(1, int(top_k)),
+    return _search_with_engine(
+        engine,
+        query=query,
+        top_k=top_k,
         video_id=video_id,
         filters=filters,
         dedupe=bool(dedupe),
@@ -239,17 +329,15 @@ def search_hits_with_fallback(
     if len(out) >= int(top_k):
         return out
 
-    fallback_langs = [str(x).strip().lower() for x in (getattr(cfg.search, "fallback_langs", []) or [])]
-    for fallback_lang in fallback_langs:
-        if not fallback_lang or fallback_lang == language:
-            continue
+    for fallback_lang in _fallback_languages(cfg, language):
         fallback_engine = get_engine(cfg, fallback_lang, variant)
         if fallback_engine is None:
             continue
         fallback_query = translate_query(cfg, str(query or "").strip(), src_lang=language, tgt_lang=fallback_lang)
-        fallback_hits = fallback_engine.search(
+        fallback_hits = _search_with_engine(
+            fallback_engine,
             query=fallback_query,
-            top_k=max(1, int(top_k)),
+            top_k=top_k,
             video_id=video_id,
             filters=filters,
             dedupe=bool(dedupe),
@@ -299,46 +387,17 @@ def annotation_hits(
 def translate_output_text(cfg: Any, text: str, *, target_lang: str, target_name: str) -> str:
     """Translate generated report/qa text to the requested language with optional post-edit."""
 
-    content = str(text or "").strip()
-    if not content:
-        return content
     tgt = str(target_lang or "").strip().lower()
     src = str(getattr(cfg.translation, "source_lang", None) or getattr(cfg.model, "language", "en")).strip().lower() or "en"
-    if not tgt or tgt == src:
-        return content
-
-    translator = get_translation_service(cfg)
-    if translator is None:
-        return content
-
-    try:
-        translated = translator.translate(
-            [content],
-            src_lang=src,
-            tgt_lang=tgt,
-            batch_size=1,
-            max_new_tokens=int(getattr(cfg.translation, "max_new_tokens", 64)),
-            use_cache=bool(getattr(cfg.translation, "cache_enabled", True)),
-        )
-        if translated:
-            content = str(translated[0] or "").strip() or content
-    except Exception:
-        return content
-
-    if hasattr(translator, "post_edit_many"):
-        try:
-            edited, _edited_count = translator.post_edit_many(
-                [str(text or "")],
-                [content],
-                src_lang=src,
-                tgt_lang=tgt,
-                target_name=str(target_name or ""),
-            )
-            if edited:
-                content = str(edited[0] or "").strip() or content
-        except Exception:
-            pass
-    return content
+    return _translate_single_text(
+        cfg,
+        text,
+        src_lang=src,
+        tgt_lang=tgt,
+        target_name=target_name,
+        allow_post_edit=True,
+        prefer_manual_cache=False,
+    )
 
 
 def get_llm_client(cfg: Any) -> Optional["LLMClient"]:
@@ -428,27 +487,20 @@ def generate_grounded_text(
 
     context = build_context_block(hits)
     if not context.strip():
-        return fallback_text, "deterministic", context
+        return _fallback_grounded_result(fallback_text, context)
 
     client = get_llm_client(cfg)
     if client is None:
-        return fallback_text, "deterministic", context
+        return _fallback_grounded_result(fallback_text, context)
 
-    prompt = (
-        f"You are a grounded surveillance analytics assistant.\n"
-        f"Task: {task}.\n"
-        "Use only the context below. Do not invent facts. Preserve time ranges and segment ids when relevant.\n"
-        f"User input: {user_input}\n"
-        f"Context:\n{context}\n"
-        "Return only the final answer text."
-    )
+    prompt = _grounded_prompt(task, user_input, context)
 
     try:
         generated = str(client.generate_text(prompt) or "").strip()
     except Exception:
-        return fallback_text, "deterministic", context
+        return _fallback_grounded_result(fallback_text, context)
     if not generated:
-        return fallback_text, "deterministic", context
+        return _fallback_grounded_result(fallback_text, context)
     return generated, "llm", context
 
 
@@ -476,17 +528,21 @@ def hit_to_schema(hit: Any) -> SearchHit:
     )
 
 
+def _hit_identity(hit: Any) -> Tuple[str, float, float, str]:
+    return (
+        str(getattr(hit, "video_id", "") or ""),
+        float(getattr(hit, "start_sec", 0.0) or 0.0),
+        float(getattr(hit, "end_sec", 0.0) or 0.0),
+        str(getattr(hit, "language", "") or ""),
+    )
+
+
 def append_unique_hits(out: List[SearchHit], seen: set, hits: List[Any], *, limit: int) -> None:
     """Append serialized hits while deduplicating by video/time/language."""
 
     max_items = max(0, int(limit))
     for hit in hits:
-        key = (
-            str(getattr(hit, "video_id", "") or ""),
-            float(getattr(hit, "start_sec", 0.0) or 0.0),
-            float(getattr(hit, "end_sec", 0.0) or 0.0),
-            str(getattr(hit, "language", "") or ""),
-        )
+        key = _hit_identity(hit)
         if key in seen:
             continue
         seen.add(key)
@@ -505,6 +561,15 @@ def hit_to_citation(hit: Any) -> Citation:
         segment_id=getattr(hit, "segment_id", None),
         variant=getattr(hit, "variant", None),
     )
+
+
+def grounded_hit_payload(hits: List[Any]) -> Dict[str, Any]:
+    """Build citations and serialized supporting hits for grounded responses."""
+
+    return {
+        "citations": [hit_to_citation(hit) for hit in hits],
+        "supporting_hits": [hit_to_schema(hit) for hit in hits],
+    }
 
 
 def report_text_from_hits(hits: List[Any], video_id: Optional[str]) -> str:

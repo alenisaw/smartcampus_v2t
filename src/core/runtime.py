@@ -254,39 +254,34 @@ def config_cache_token(
     return "|".join(chunks)
 
 
-def load_pipeline_bundle(
-    config_path: Optional[Path] = None,
-    *,
-    profile: Optional[str] = None,
-    variant: Optional[str] = None,
-) -> Tuple[PipelineConfig, Dict[str, Any]]:
-    """Load the effective config and return both typed and raw merged forms."""
+def _merge_effective_raw(profile_path: Path, active_variant: Optional[str]) -> Dict[str, Any]:
+    """Load the effective raw config for one profile and optional variant."""
 
-    profile_path, active_profile, active_variant = resolve_config_selection(
-        config_path=config_path,
-        profile=profile,
-        variant=variant,
-    )
     root_raw, _ = _load_with_extends(profile_path)
-
     if active_variant:
         variants_dir = profile_path.parents[1] / "variants"
         variant_path = (variants_dir / f"{active_variant}.yaml").resolve()
         if variant_path.exists():
             variant_raw, _ = _load_with_extends(variant_path)
             root_raw = _deep_merge(root_raw, variant_raw)
+    return copy.deepcopy(root_raw)
 
-    effective_raw = copy.deepcopy(root_raw)
-    fingerprint = _config_fingerprint(effective_raw, active_profile, active_variant)
 
-    paths_raw = effective_raw.get("paths") or {}
-    if not isinstance(paths_raw, dict):
-        raise ValueError(f"Invalid config: {profile_path} (paths must be a dict)")
+def _resolve_hw_pair(raw_value: Any, default: Tuple[int, int]) -> Tuple[int, int]:
+    """Resolve a width-height pair from raw config data."""
+
+    values = raw_value or [default[0], default[1]]
+    if not isinstance(values, (list, tuple)) or len(values) != 2:
+        values = [default[0], default[1]]
+    return int(values[0]), int(values[1])
+
+
+def _build_paths_config(profile_path: Path, paths_raw: Dict[str, Any]) -> tuple[Path, PathsConfig]:
+    """Build the filesystem path section of the typed config."""
 
     root_dir = _resolve_rel(profile_path.parent, paths_raw.get("root_dir"), "../..")
     data_dir = _resolve_rel(root_dir, paths_raw.get("data_dir"), "data")
-
-    paths = PathsConfig(
+    return root_dir, PathsConfig(
         root_dir=root_dir,
         data_dir=data_dir,
         videos_dir=_resolve_rel(root_dir, paths_raw.get("videos_dir"), "data/videos"),
@@ -306,12 +301,15 @@ def load_pipeline_bundle(
         variants_dir=(profile_path.parents[1] / "variants").resolve(),
     )
 
-    ui_raw = effective_raw.get("ui") or {}
+
+def _build_ui_config(root_dir: Path, ui_raw: Dict[str, Any]) -> UiConfig:
+    """Build the UI-facing section of the typed config."""
+
     langs = _to_list(ui_raw.get("langs"), default=["ru", "kz", "en"]) or ["ru", "kz", "en"]
     default_lang = str(ui_raw.get("default_lang", langs[0])).strip().lower() or langs[0]
     if default_lang not in langs:
         default_lang = langs[0]
-    ui = UiConfig(
+    return UiConfig(
         langs=langs,
         default_lang=default_lang,
         cache_ttl_sec=int(ui_raw.get("cache_ttl_sec", 2)),
@@ -321,27 +319,25 @@ def load_pipeline_bundle(
         logo_path=_resolve_rel(root_dir, ui_raw.get("logo_path"), "app/assets/logo.png"),
     )
 
-    backend_raw = effective_raw.get("backend") or {}
-    backend = BackendConfig(
+
+def _build_backend_config(backend_raw: Dict[str, Any]) -> BackendConfig:
+    """Build the backend HTTP section of the typed config."""
+
+    return BackendConfig(
         scheme=str(backend_raw.get("scheme", "http")).strip().lower() or "http",
         host=str(backend_raw.get("host", "127.0.0.1")).strip() or "127.0.0.1",
         port=int(backend_raw.get("port", 8000)),
     )
 
-    search_raw = effective_raw.get("search") or {}
-    search = SearchConfig(
+
+def _build_search_config(root_dir: Path, search_raw: Dict[str, Any]) -> SearchConfig:
+    """Build the retrieval section of the typed config."""
+
+    return SearchConfig(
         embed_model_name=str(search_raw.get("embed_model_name", "BAAI/bge-m3")),
-        embedding_model_id=_resolve_reference_or_path(
-            root_dir,
-            search_raw.get("embedding_model_id"),
-            "Qwen/Qwen3-VL-Embedding-2B",
-        ),
+        embedding_model_id=_resolve_reference_or_path(root_dir, search_raw.get("embedding_model_id"), "Qwen/Qwen3-VL-Embedding-2B"),
         embedding_backend=str(search_raw.get("embedding_backend", "auto")).strip().lower() or "auto",
-        reranker_model_id=_resolve_reference_or_path(
-            root_dir,
-            search_raw.get("reranker_model_id"),
-            "Qwen/Qwen3-VL-Reranker-2B",
-        ),
+        reranker_model_id=_resolve_reference_or_path(root_dir, search_raw.get("reranker_model_id"), "Qwen/Qwen3-VL-Reranker-2B"),
         reranker_backend=str(search_raw.get("reranker_backend", "auto")).strip().lower() or "auto",
         query_prefix=str(search_raw.get("query_prefix", "query: ")),
         passage_prefix=str(search_raw.get("passage_prefix", "passage: ")),
@@ -365,25 +361,23 @@ def load_pipeline_bundle(
         dense_input_mode=str(search_raw.get("dense_input_mode", "text")).strip().lower() or "text",
     )
 
-    video_raw = effective_raw.get("video") or {}
-    video_io_raw = effective_raw.get("video_io") or {}
 
-    def video_io_value(key: str, default: Any) -> Any:
-        return video_io_raw[key] if key in video_io_raw else video_raw.get(key, default)
+def _video_io_value(video_raw: Dict[str, Any], video_io_raw: Dict[str, Any], key: str, default: Any) -> Any:
+    """Resolve one video IO setting with `video_io` taking precedence over `video`."""
 
-    decode_resolution_raw = video_raw.get("decode_resolution") or [1280, 720]
-    if len(decode_resolution_raw) != 2:
-        decode_resolution_raw = [1280, 720]
+    return video_io_raw[key] if key in video_io_raw else video_raw.get(key, default)
 
-    model_input_size_raw = video_raw.get("model_input_size") or [256, 256]
-    if len(model_input_size_raw) != 2:
-        model_input_size_raw = [256, 256]
 
-    video = VideoConfig(
+def _build_video_config(video_raw: Dict[str, Any], video_io_raw: Dict[str, Any]) -> VideoConfig:
+    """Build the video preprocessing section of the typed config."""
+
+    decode_resolution = _resolve_hw_pair(video_raw.get("decode_resolution"), (1280, 720))
+    model_input_size = _resolve_hw_pair(video_raw.get("model_input_size"), (256, 256))
+    return VideoConfig(
         target_fps=float(video_raw.get("target_fps", video_raw.get("analysis_fps", 3.0))),
         analysis_fps=float(video_raw.get("analysis_fps", video_raw.get("target_fps", 3.0))),
-        model_input_size=(int(model_input_size_raw[0]), int(model_input_size_raw[1])),
-        decode_resolution=(int(decode_resolution_raw[0]), int(decode_resolution_raw[1])),
+        model_input_size=model_input_size,
+        decode_resolution=decode_resolution,
         pixel_format=str(video_raw.get("pixel_format", "yuv420p")),
         min_change_threshold=float(video_raw.get("min_change_threshold", 0.03)),
         dark_threshold=float(video_raw.get("dark_threshold", 30.0)),
@@ -393,31 +387,21 @@ def load_pipeline_bundle(
         face_blur=_to_bool(video_raw.get("face_blur", True)),
         face_detector_type=str(video_raw.get("face_detector_type", "dnn")),
         max_frames=video_raw.get("max_frames"),
-        jpeg_quality_frames=int(video_io_value("jpeg_quality_frames", 82)),
-        jpeg_quality_small=int(video_io_value("jpeg_quality_small", 75)),
-        face_detect_every_saved=int(video_io_value("face_detect_every_saved", 6)),
-        face_detect_force_on_scenecut=_to_bool(video_io_value("face_detect_force_on_scenecut", True)),
-        face_blur_strength=int(video_io_value("face_blur_strength", 31)),
-        face_conf_threshold=float(video_io_value("face_conf_threshold", 0.5)),
+        jpeg_quality_frames=int(_video_io_value(video_raw, video_io_raw, "jpeg_quality_frames", 82)),
+        jpeg_quality_small=int(_video_io_value(video_raw, video_io_raw, "jpeg_quality_small", 75)),
+        face_detect_every_saved=int(_video_io_value(video_raw, video_io_raw, "face_detect_every_saved", 6)),
+        face_detect_force_on_scenecut=_to_bool(_video_io_value(video_raw, video_io_raw, "face_detect_force_on_scenecut", True)),
+        face_blur_strength=int(_video_io_value(video_raw, video_io_raw, "face_blur_strength", 31)),
+        face_conf_threshold=float(_video_io_value(video_raw, video_io_raw, "face_conf_threshold", 0.5)),
         anonymization_enabled=_to_bool(video_raw.get("anonymization_enabled", video_raw.get("face_blur", True))),
     )
 
-    clips_raw = effective_raw.get("clips") or {}
-    clips = ClipsConfig(
-        window_sec=float(clips_raw.get("window_sec", 4.0)),
-        stride_sec=float(clips_raw.get("stride_sec", 2.0)),
-        min_clip_frames=int(clips_raw.get("min_clip_frames", 2)),
-        max_clip_frames=int(clips_raw.get("max_clip_frames", 16)),
-        keyframe_policy=str(clips_raw.get("keyframe_policy", "middle")),
-    )
 
-    model_raw = effective_raw.get("model") or {}
-    model = ModelConfig(
-        model_name_or_path=_resolve_model_name_or_path(
-            root_dir,
-            model_raw.get("model_name_or_path"),
-            paths.qwen_vl_dir,
-        ),
+def _build_model_config(root_dir: Path, paths: PathsConfig, model_raw: Dict[str, Any]) -> ModelConfig:
+    """Build the vision-language model section of the typed config."""
+
+    return ModelConfig(
+        model_name_or_path=_resolve_model_name_or_path(root_dir, model_raw.get("model_name_or_path"), paths.qwen_vl_dir),
         device=str(model_raw.get("device", "cuda")),
         dtype=str(model_raw.get("dtype", "fp16")),
         language=str(model_raw.get("language", "en")).strip().lower() or "en",
@@ -433,8 +417,13 @@ def load_pipeline_bundle(
         timeout_sec=int(model_raw.get("timeout_sec", 60)),
     )
 
-    llm_raw = effective_raw.get("llm") or {}
-    llm = LlmConfig(
+
+def _build_llm_config(root_dir: Path, llm_raw: Dict[str, Any]) -> LlmConfig:
+    """Build the semantic LLM section of the typed config."""
+
+    transformers_raw = llm_raw.get("transformers") or {}
+    vllm_raw = llm_raw.get("vllm") or {}
+    return LlmConfig(
         backend=str(llm_raw.get("backend", "transformers")).strip().lower() or "transformers",
         model_id=_resolve_reference_or_path(root_dir, llm_raw.get("model_id"), "Qwen/Qwen3-4B-Instruct-2507"),
         max_new_tokens=int(llm_raw.get("max_new_tokens", 512)),
@@ -442,23 +431,29 @@ def load_pipeline_bundle(
         temperature=float(llm_raw.get("temperature", 0.0)),
         top_p=float(llm_raw.get("top_p", 1.0)),
         timeout_sec=int(llm_raw.get("timeout_sec", 60)),
-        transformers_dtype=str((llm_raw.get("transformers") or {}).get("dtype", "float16")),
-        transformers_device_map=str((llm_raw.get("transformers") or {}).get("device_map", "auto")),
-        transformers_compile=_to_bool((llm_raw.get("transformers") or {}).get("compile", False)),
-        vllm_base_url=str((llm_raw.get("vllm") or {}).get("base_url", "http://127.0.0.1:8001/v1")),
-        vllm_timeout_sec=int((llm_raw.get("vllm") or {}).get("timeout_sec", 30)),
+        transformers_dtype=str(transformers_raw.get("dtype", "float16")),
+        transformers_device_map=str(transformers_raw.get("device_map", "auto")),
+        transformers_compile=_to_bool(transformers_raw.get("compile", False)),
+        vllm_base_url=str(vllm_raw.get("base_url", "http://127.0.0.1:8001/v1")),
+        vllm_timeout_sec=int(vllm_raw.get("timeout_sec", 30)),
     )
 
-    guard_raw = effective_raw.get("guard") or {}
-    guard = GuardConfig(
+
+def _build_guard_config(root_dir: Path, guard_raw: Dict[str, Any]) -> GuardConfig:
+    """Build the guard/policy section of the typed config."""
+
+    return GuardConfig(
         enabled=_to_bool(guard_raw.get("enabled", False)),
         query_gate=_to_bool(guard_raw.get("query_gate", False)),
         output_gate=_to_bool(guard_raw.get("output_gate", False)),
         model_id=_resolve_reference_or_path(root_dir, guard_raw.get("model_id"), "Qwen/Qwen3Guard-Gen-0.6B"),
     )
 
-    runtime_raw = effective_raw.get("runtime") or {}
-    runtime = RuntimeConfig(
+
+def _build_runtime_config(runtime_raw: Dict[str, Any]) -> RuntimeConfig:
+    """Build the runtime/performance section of the typed config."""
+
+    return RuntimeConfig(
         seed=int(runtime_raw.get("seed", 42)),
         num_workers=int(runtime_raw.get("num_workers", 4)),
         log_level=str(runtime_raw.get("log_level", "INFO")),
@@ -475,10 +470,13 @@ def load_pipeline_bundle(
         metrics_store_samples=_to_bool(runtime_raw.get("metrics_store_samples", True)),
     )
 
-    translation_raw = effective_raw.get("translation") or {}
+
+def _build_translation_config(root_dir: Path, translation_raw: Dict[str, Any]) -> TranslationConfig:
+    """Build the translation section of the typed config."""
+
     ct2_raw = translation_raw.get("ctranslate2") or {}
     routes_raw = translation_raw.get("routes") or {}
-    translation = TranslationConfig(
+    return TranslationConfig(
         backend=str(translation_raw.get("backend", "ctranslate2")).strip().lower() or "ctranslate2",
         model_name_or_path=str(translation_raw.get("model_name_or_path", "ct2://router")),
         device=str(translation_raw.get("device", "cpu")),
@@ -506,13 +504,20 @@ def load_pipeline_bundle(
         ru_kk_model_id=_resolve_reference_or_path(root_dir, routes_raw.get("ru_kk_model_id"), "deepvk/kazRush-ru-kk"),
     )
 
-    jobs_raw = effective_raw.get("jobs") or {}
-    queue_raw = effective_raw.get("queue") or {}
-    locks_raw = effective_raw.get("locks") or {}
-    worker_raw = effective_raw.get("worker") or {}
-    index_raw = effective_raw.get("index") or {}
-    webhook_raw = effective_raw.get("webhook") or {}
-    experiment_raw = effective_raw.get("experiment") or {}
+
+def _build_execution_configs(
+    root_dir: Path,
+    *,
+    jobs_raw: Dict[str, Any],
+    queue_raw: Dict[str, Any],
+    locks_raw: Dict[str, Any],
+    worker_raw: Dict[str, Any],
+    index_raw: Dict[str, Any],
+    webhook_raw: Dict[str, Any],
+    experiment_raw: Dict[str, Any],
+    active_profile: str,
+) -> tuple[JobsConfig, QueueConfig, LocksConfig, WorkerConfig, IndexRuntimeConfig, WebhookConfig, ExperimentConfig]:
+    """Build jobs, queue, worker, index, webhook, and experiment config sections."""
 
     jobs = JobsConfig(dir=_resolve_rel(root_dir, jobs_raw.get("dir"), "data/jobs"))
     queue = QueueConfig(dir=_resolve_rel(root_dir, queue_raw.get("dir"), "data/queue"))
@@ -534,6 +539,102 @@ def load_pipeline_bundle(
         mode=str(experiment_raw.get("mode", active_profile)).strip().lower() or active_profile,
         compare_on_single_video=_to_bool(experiment_raw.get("compare_on_single_video", active_profile == "experimental")),
         variant_ids=_to_list(experiment_raw.get("variant_ids"), default=["exp_a", "exp_b", "exp_c"]),
+    )
+    return jobs, queue, locks, worker, index_cfg, webhook, experiment
+
+
+def _attach_runtime_context(effective_raw: Dict[str, Any], cfg: PipelineConfig) -> Dict[str, Any]:
+    """Attach resolved runtime metadata to the raw config payload."""
+
+    effective_raw.setdefault("runtime_context", {})
+    effective_raw["runtime_context"].update(
+        {
+            "active_profile": cfg.active_profile,
+            "active_variant": cfg.active_variant,
+            "config_fingerprint": cfg.config_fingerprint,
+            "config_path": str(cfg.config_path),
+        }
+    )
+    return effective_raw
+
+
+def load_pipeline_bundle(
+    config_path: Optional[Path] = None,
+    *,
+    profile: Optional[str] = None,
+    variant: Optional[str] = None,
+) -> Tuple[PipelineConfig, Dict[str, Any]]:
+    """Load the effective config and return both typed and raw merged forms."""
+
+    profile_path, active_profile, active_variant = resolve_config_selection(
+        config_path=config_path,
+        profile=profile,
+        variant=variant,
+    )
+    effective_raw = _merge_effective_raw(profile_path, active_variant)
+    fingerprint = _config_fingerprint(effective_raw, active_profile, active_variant)
+
+    paths_raw = effective_raw.get("paths") or {}
+    if not isinstance(paths_raw, dict):
+        raise ValueError(f"Invalid config: {profile_path} (paths must be a dict)")
+
+    root_dir, paths = _build_paths_config(profile_path, paths_raw)
+
+    ui_raw = effective_raw.get("ui") or {}
+    ui = _build_ui_config(root_dir, ui_raw)
+
+    backend_raw = effective_raw.get("backend") or {}
+    backend = _build_backend_config(backend_raw)
+
+    search_raw = effective_raw.get("search") or {}
+    search = _build_search_config(root_dir, search_raw)
+
+    video_raw = effective_raw.get("video") or {}
+    video_io_raw = effective_raw.get("video_io") or {}
+    video = _build_video_config(video_raw, video_io_raw)
+
+    clips_raw = effective_raw.get("clips") or {}
+    clips = ClipsConfig(
+        window_sec=float(clips_raw.get("window_sec", 4.0)),
+        stride_sec=float(clips_raw.get("stride_sec", 2.0)),
+        min_clip_frames=int(clips_raw.get("min_clip_frames", 2)),
+        max_clip_frames=int(clips_raw.get("max_clip_frames", 16)),
+        keyframe_policy=str(clips_raw.get("keyframe_policy", "middle")),
+    )
+
+    model_raw = effective_raw.get("model") or {}
+    model = _build_model_config(root_dir, paths, model_raw)
+
+    llm_raw = effective_raw.get("llm") or {}
+    llm = _build_llm_config(root_dir, llm_raw)
+
+    guard_raw = effective_raw.get("guard") or {}
+    guard = _build_guard_config(root_dir, guard_raw)
+
+    runtime_raw = effective_raw.get("runtime") or {}
+    runtime = _build_runtime_config(runtime_raw)
+
+    translation_raw = effective_raw.get("translation") or {}
+    translation = _build_translation_config(root_dir, translation_raw)
+
+    jobs_raw = effective_raw.get("jobs") or {}
+    queue_raw = effective_raw.get("queue") or {}
+    locks_raw = effective_raw.get("locks") or {}
+    worker_raw = effective_raw.get("worker") or {}
+    index_raw = effective_raw.get("index") or {}
+    webhook_raw = effective_raw.get("webhook") or {}
+    experiment_raw = effective_raw.get("experiment") or {}
+
+    jobs, queue, locks, worker, index_cfg, webhook, experiment = _build_execution_configs(
+        root_dir,
+        jobs_raw=jobs_raw,
+        queue_raw=queue_raw,
+        locks_raw=locks_raw,
+        worker_raw=worker_raw,
+        index_raw=index_raw,
+        webhook_raw=webhook_raw,
+        experiment_raw=experiment_raw,
+        active_profile=active_profile,
     )
 
     cfg = PipelineConfig(
@@ -564,17 +665,7 @@ def load_pipeline_bundle(
     ensure_dirs(cfg.paths, strict=cfg.runtime.strict_paths)
     _validate_paths(cfg)
     _apply_runtime_perf_flags(cfg.runtime)
-
-    effective_raw.setdefault("runtime_context", {})
-    effective_raw["runtime_context"].update(
-        {
-            "active_profile": cfg.active_profile,
-            "active_variant": cfg.active_variant,
-            "config_fingerprint": cfg.config_fingerprint,
-            "config_path": str(cfg.config_path),
-        }
-    )
-    return cfg, effective_raw
+    return cfg, _attach_runtime_context(effective_raw, cfg)
 
 
 def load_pipeline_config(
