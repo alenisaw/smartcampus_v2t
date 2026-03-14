@@ -24,6 +24,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.deps import get_backend_paths, load_cfg_and_raw, now_ts
+from scripts.common import read_json_dict as _read_json_dict, resolve_path as _resolve_path_common, slugify as _slugify, write_json as _write_json_common
 from src.search.builder import load_index, resolve_index_dir, search_config_fingerprint
 from src.search.engine import QueryEngine
 from src.utils.video_store import (
@@ -34,26 +35,15 @@ from src.utils.video_store import (
 
 
 def _resolve_path(arg: str) -> Path:
-    path = Path(arg)
-    if path.is_absolute():
-        return path
-    return (Path.cwd() / path).resolve()
+    return _resolve_path_common(arg)
 
 
 def _write_json(path: Path, payload: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    _write_json_common(path, payload)
 
 
 def _read_json(path: Path) -> Dict[str, Any]:
-    try:
-        if not path.exists():
-            return {}
-        text = path.read_text(encoding="utf-8-sig")
-        obj = json.loads(text)
-        return obj if isinstance(obj, dict) else {}
-    except Exception:
-        return {}
+    return _read_json_dict(path, default={}, encoding="utf-8-sig") or {}
 
 
 def _parse_csv_tokens(value: str) -> List[str]:
@@ -79,9 +69,7 @@ def _parse_ks(value: str) -> List[int]:
 
 
 def _slug(text: str) -> str:
-    cleaned = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in str(text or "").strip())
-    cleaned = cleaned.strip("._-")
-    return cleaned or "relevance_eval"
+    return _slugify(text, default="relevance_eval")
 
 
 def _interval_iou(a0: float, a1: float, b0: float, b1: float) -> float:

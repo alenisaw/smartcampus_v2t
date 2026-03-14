@@ -1,4 +1,4 @@
-# backend/job_control.py
+# backend/jobs/control.py
 """
 Job control helpers for SmartCampus V2T backend.
 
@@ -16,50 +16,17 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
-from backend.deps import atomic_write_json, new_job_id, now_ts, read_json
-
-
-def list_queue_items(queue_dir: Path) -> List[Path]:
-    """Return queue items in stable filesystem order."""
-
-    return sorted(queue_dir.glob("p*__*__*.q"))
-
-
-def parse_job_id_from_queue_item(queue_item: Path) -> Optional[str]:
-    """Extract a job id from a queue filename."""
-
-    try:
-        parts = queue_item.name.split("__")
-        if len(parts) < 3:
-            return None
-        job_part = parts[2]
-        if job_part.endswith(".q"):
-            job_part = job_part[:-2]
-        return job_part
-    except Exception:
-        return None
-
-
-def job_path(paths: Any, job_id: str) -> Path:
-    """Return the job JSON path for a job id."""
-
-    return paths.jobs_dir / f"{job_id}.json"
-
-
-def read_job(paths: Any, job_id: str) -> Dict[str, Any]:
-    """Load a job payload or raise if the file is invalid."""
-
-    path = job_path(paths, job_id)
-    job = read_json(path, default=None)
-    if not isinstance(job, dict):
-        raise RuntimeError(f"Job file missing or corrupted: {path}")
-    return job
-
-
-def write_job(paths: Any, job: Dict[str, Any]) -> None:
-    """Persist a job payload atomically."""
-
-    atomic_write_json(job_path(paths, job["job_id"]), job)
+from backend.deps import new_job_id, now_ts
+from backend.jobs.store import (
+    build_job_record as _build_job_record,
+    enqueue_job,
+    job_path,
+    list_queue_items,
+    parse_job_id_from_queue_file as parse_job_id_from_queue_item,
+    queue_status,
+    read_job,
+    write_job,
+)
 
 
 def job_state(job: Dict[str, Any]) -> str:
@@ -175,20 +142,6 @@ def set_state(
     write_job(paths, job)
 
 
-def time_tag() -> str:
-    """Return a timestamp suitable for queue filenames."""
-
-    return time.strftime("%Y%m%dT%H%M%S", time.localtime())
-
-
-def enqueue_job(paths: Any, job_id: str) -> None:
-    """Write a queue marker file for a job."""
-
-    paths.queue_dir.mkdir(parents=True, exist_ok=True)
-    queue_name = f"p010__{time_tag()}__{job_id}.q"
-    (paths.queue_dir / queue_name).write_text(job_id, encoding="utf-8")
-
-
 def create_job(
     paths: Any,
     *,
@@ -203,27 +156,16 @@ def create_job(
     """Create and enqueue a new job record."""
 
     job_id = new_job_id("job")
-    job = {
-        "job_id": job_id,
-        "video_id": video_id,
-        "job_type": job_type,
-        "profile": profile,
-        "variant": variant,
-        "language": language,
-        "source_language": source_language,
-        "state": "queued",
-        "stage": "queued",
-        "progress": 0.0,
-        "message": "Queued",
-        "created_at": now_ts(),
-        "updated_at": now_ts(),
-        "started_at": None,
-        "finished_at": None,
-        "error": None,
-        "cancel_requested": False,
-        "lease": None,
-        "extra": extra or {},
-    }
+    job = _build_job_record(
+        job_id=job_id,
+        video_id=video_id,
+        job_type=job_type,
+        profile=profile,
+        variant=variant,
+        language=language,
+        source_language=source_language,
+        extra=extra,
+    )
     write_job(paths, job)
     enqueue_job(paths, job_id)
     return job
@@ -262,5 +204,4 @@ def notify_webhook(webhook_cfg: Dict[str, Any], event: str, job: Dict[str, Any])
 def queue_paused(paths: Any) -> bool:
     """Return whether queue processing is paused."""
 
-    state = read_json(paths.queue_state_path, default={"paused": False}) or {}
-    return bool(state.get("paused", False))
+    return bool(queue_status(paths).get("paused", False))

@@ -21,7 +21,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.deps import get_backend_paths, load_cfg_and_raw, now_ts, read_json
-from backend.job_control import create_job, read_job
+from backend.jobs.control import create_job, read_job
+from scripts.common import read_json_dict as _read_json_dict, resolve_path as _resolve_path_common, slugify as _slugify, write_json as _write_json_common
 from scripts.collect_metrics import export_metrics_bundle
 from src.utils.video_store import (
     batch_manifest_path,
@@ -51,32 +52,28 @@ def _parse_csv(value: str) -> List[str]:
 def _resolve_path(arg: str) -> Path:
     """Resolve a path against the current working directory."""
 
-    path = Path(arg)
-    if path.is_absolute():
-        return path
-    return (Path.cwd() / path).resolve()
+    return _resolve_path_common(arg)
 
 
 def _write_json(path: Path, payload: Dict[str, Any]) -> None:
     """Write JSON with stable UTF-8 formatting."""
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    _write_json_common(path, payload)
 
 
 def _read_json(path: Path) -> Optional[Dict[str, Any]]:
     """Read a JSON object or return None."""
 
-    obj = read_json(path, default=None)
+    obj = _read_json_dict(path, default=None, encoding="utf-8-sig")
+    if obj is None:
+        obj = read_json(path, default=None)
     return obj if isinstance(obj, dict) else None
 
 
 def _slug(text: str) -> str:
     """Convert free text into a filesystem-safe token."""
 
-    cleaned = "".join(ch if ch.isalnum() or ch in "-._" else "_" for ch in str(text or "").strip())
-    cleaned = cleaned.strip("._-")
-    return cleaned or "experiment"
+    return _slugify(text, default="experiment")
 
 
 def _default_label() -> str:

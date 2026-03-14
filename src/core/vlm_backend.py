@@ -70,7 +70,7 @@ class QwenVLBackend:
 
         model_kwargs: dict = {}
         if hf_dtype is not None:
-            model_kwargs["torch_dtype"] = hf_dtype
+            model_kwargs["dtype"] = hf_dtype
 
         # If user requested CUDA, allow HF to place/shard model.
         if device == "cuda":
@@ -80,29 +80,7 @@ class QwenVLBackend:
         if attn_impl:
             model_kwargs["attn_implementation"] = attn_impl
 
-        try:
-            self.model = AutoModelForImageTextToText.from_pretrained(
-                model_name_or_path,
-                **model_kwargs,
-            )
-        except TypeError:
-            if "attn_implementation" in model_kwargs:
-                model_kwargs.pop("attn_implementation", None)
-                self.model = AutoModelForImageTextToText.from_pretrained(
-                    model_name_or_path,
-                    **model_kwargs,
-                )
-            else:
-                raise
-        except ValueError:
-            if "attn_implementation" in model_kwargs:
-                model_kwargs.pop("attn_implementation", None)
-                self.model = AutoModelForImageTextToText.from_pretrained(
-                    model_name_or_path,
-                    **model_kwargs,
-                )
-            else:
-                raise
+        self.model = self._load_model(model_name_or_path, model_kwargs)
         self.processor = AutoProcessor.from_pretrained(model_name_or_path)
         self.model.eval()
 
@@ -111,6 +89,35 @@ class QwenVLBackend:
             self.model.to(device)
 
         self._maybe_compile_model()
+
+    @staticmethod
+    def _load_model(model_name_or_path: str, model_kwargs: Dict[str, Any]) -> Any:
+        """Load the VLM while tolerating old transformers dtype argument names."""
+
+        attempts = [dict(model_kwargs)]
+        if "dtype" in model_kwargs:
+            fallback_kwargs = dict(model_kwargs)
+            fallback_kwargs["torch_dtype"] = fallback_kwargs.pop("dtype")
+            attempts.append(fallback_kwargs)
+
+        last_error: Optional[Exception] = None
+        for kwargs in attempts:
+            try:
+                return AutoModelForImageTextToText.from_pretrained(model_name_or_path, **kwargs)
+            except (TypeError, ValueError) as exc:
+                last_error = exc
+                if "attn_implementation" not in kwargs:
+                    continue
+                trimmed = dict(kwargs)
+                trimmed.pop("attn_implementation", None)
+                try:
+                    return AutoModelForImageTextToText.from_pretrained(model_name_or_path, **trimmed)
+                except (TypeError, ValueError) as inner_exc:
+                    last_error = inner_exc
+                    continue
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError(f"Failed to load VLM model: {model_name_or_path}")
 
     @classmethod
     def from_pipeline_config(cls, cfg: PipelineConfig) -> "QwenVLBackend":

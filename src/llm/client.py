@@ -210,14 +210,21 @@ class LLMClient:
         }
         chosen_dtype = dtype_map.get(dtype_name)
         if chosen_dtype is not None:
-            load_kwargs["torch_dtype"] = chosen_dtype
+            load_kwargs["dtype"] = chosen_dtype
 
         device_map = str(self.transformers_device_map or "").strip()
         if device_map:
             load_kwargs["device_map"] = device_map
 
         tokenizer = AutoTokenizer.from_pretrained(source, trust_remote_code=True)
-        model = AutoModelForCausalLM.from_pretrained(source, **load_kwargs)
+        try:
+            model = AutoModelForCausalLM.from_pretrained(source, **load_kwargs)
+        except TypeError:
+            if "dtype" not in load_kwargs:
+                raise
+            fallback_kwargs = dict(load_kwargs)
+            fallback_kwargs["torch_dtype"] = fallback_kwargs.pop("dtype")
+            model = AutoModelForCausalLM.from_pretrained(source, **fallback_kwargs)
 
         if bool(self.transformers_compile) and hasattr(torch, "compile"):
             try:

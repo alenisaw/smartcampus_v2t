@@ -46,11 +46,9 @@ The repository persists data, indexes, manifests, metrics, and experiment artifa
 Streamlit UI layer.
 
 - `main.py`: Streamlit entrypoint and page routing.
-- `ui.py`: facade over the modular UI.
 - `api_client.py`: REST client for the backend.
 - `state.py`: session defaults for UI state.
-- `pages/`: page-level renderers for overview, storage, video analytics, search, and reports surfaces.
-- `components/`: reusable UI components.
+- `view/`: page-oriented renderers for overview, storage, video analytics, search, and reports surfaces.
 - `lib/`: formatting, i18n, and media helpers.
 - `assets/`: CSS, translations, and brand assets.
 
@@ -59,13 +57,12 @@ Streamlit UI layer.
 Backend HTTP and worker runtime.
 
 - `api.py`: FastAPI endpoints for videos, jobs, queue, index, search, reports, QA, and RAG.
-- `job_control.py`: filesystem job records, queue helpers, and state transitions.
-- `job_executors.py`: execution logic for `process`, `translate`, and `index`.
 - `worker.py`: polling loop and job dispatch.
-- `worker_runtime.py`: context loading, service construction, and failure handling.
-- `experimental.py`: experimental fan-out helpers and batch manifest support.
 - `schemas.py`: request and response contracts.
 - `deps.py`: shared backend helpers.
+- `retrieval_runtime.py`: shared retrieval, grounded-generation, citation, and metrics-summary runtime helpers.
+- `http/`: API-facing helper modules for shared context loading and grounded response assembly.
+- `jobs/`: queue, worker, index, process, translate, metrics, and experimental execution helpers.
 
 ### `configs/`
 
@@ -260,13 +257,25 @@ The search stack supports dense input mode `text_keyframe`, which augments text 
 - `backend/api.py`
   Central HTTP surface for ingest, queue control, outputs, metrics summary, search, reports, QA, and RAG.
 
-- `backend/job_executors.py`
-  The central execution layer for `process`, `translate`, and `index`.
+- `backend/retrieval_runtime.py`
+  Shared retrieval/runtime layer for engine lookup, fallback-language search, grounded generation, hit serialization, and metrics-summary shaping.
+
+- `backend/http/common.py`, `backend/http/grounded.py`
+  API-facing support modules for shared context loading and grounded response orchestration.
+
+- `backend/jobs/process_runtime.py`
+  The main execution layer for `process` jobs.
+
+- `backend/jobs/translate_runtime.py`
+  The execution layer for translation jobs.
+
+- `backend/jobs/runtime_common.py`
+  Shared finalization helpers and common worker-side job runtime utilities.
 
 - `backend/worker.py`
   The queue poller and dispatcher.
 
-- `backend/worker_runtime.py`
+- `backend/jobs/worker_runtime.py`
   Runtime context resolver for profile/variant-specific service bundles.
 
 ### Core Pipeline
@@ -429,11 +438,11 @@ Main tabs:
 
 The UI is now organized internally into:
 
-- page renderers,
-- reusable components,
-- shared helper libraries.
+- page-oriented `app/view/` modules,
+- shared helper libraries under `app/lib/`,
+- one thin Streamlit entrypoint in `app/main.py`.
 
-This keeps Streamlit while avoiding a single monolithic UI module.
+This keeps Streamlit while avoiding both the earlier monolithic UI module and unnecessary micro-files.
 
 ## 11. Configuration Areas
 
@@ -555,14 +564,13 @@ docker compose --profile with_ct2 up --build
 
 ## 15. Current Architectural Pressure Points
 
-The codebase is functional, but several modules carry too much responsibility:
+The codebase is functional, but several modules still need discipline because they carry a lot of orchestration:
 
-- `backend/api.py`
-- `backend/job_executors.py`
+- `backend/jobs/process_runtime.py`
 - `src/search/builder.py`
 - `src/search/engine.py`
 
-These are the main candidates for internal reorganization without changing runtime behavior.
+`backend/retrieval_runtime.py` is now flatter than before and can remain one large helper module unless a future change introduces a clear new seam. The main remaining candidates for internal reorganization are the files above, plus the future addition of a real automated test layer.
 
 ## 16. Technology Stack
 

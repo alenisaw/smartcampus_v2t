@@ -15,8 +15,8 @@ import traceback
 from typing import Any, Optional
 
 from backend.deps import get_backend_paths, host_id, load_cfg_and_raw
-from backend.experimental import should_expand_experimental_job
-from backend.job_control import (
+from backend.jobs.experimental import should_expand_experimental_job
+from backend.jobs.control import (
     check_cancel,
     list_queue_items,
     parse_job_id_from_queue_item,
@@ -28,8 +28,10 @@ from backend.job_control import (
     try_lease,
     lease_expired,
 )
-from backend.job_executors import run_index_job, run_process_job, run_translate_job
-from backend.worker_runtime import (
+from backend.jobs.process_runtime import run_process_job
+from backend.jobs.runtime_common import run_index_job
+from backend.jobs.translate_runtime import run_translate_job
+from backend.jobs.worker_runtime import (
     build_worker_context,
     expand_experimental_job,
     handle_job_failure,
@@ -75,6 +77,147 @@ def _requeue_for_other_role(paths: Any, job_id: str, job_type: str) -> None:
     (paths.queue_dir / f"p{priority}__{tag}__{job_id}.q").write_text(job_id, encoding="utf-8")
 
 
+def _lease_next_job(paths: Any, owner: str, lease_sec: float) -> Optional[str]:
+    """Take the next queue item, lock it, and return the leased job id."""
+
+    items = list_queue_items(paths.queue_dir)
+    if not items:
+        return None
+
+    queue_item = items[0]
+    job_id = parse_job_id_from_queue_item(queue_item)
+    if not job_id:
+        try:
+            queue_item.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return None
+
+    if not try_create_lock(paths, job_id, owner):
+        try:
+            if lease_expired(read_job(paths, job_id)):
+                remove_lock_if_exists(paths, job_id)
+        except Exception:
+            pass
+        time.sleep(0.1)
+        return None
+
+    try:
+        queue_item.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+    if not try_lease(paths, job_id, owner, lease_sec):
+        remove_lock_if_exists(paths, job_id)
+        return None
+
+    return job_id
+
+
+def _dispatch_job(
+    *,
+    context: Any,
+    default_profile: str,
+    default_variant: Optional[str],
+    paths: Any,
+    job_id: str,
+    role: str,
+) -> Any:
+    """Resolve the effective context and execute one leased job."""
+
+    set_state(paths, job_id, "running", stage="starting", progress=0.01, message="Started")
+
+    job = read_job(paths, job_id)
+    context = resolve_worker_context(
+        context=context,
+        default_profile=default_profile,
+        default_variant=default_variant,
+        job=job,
+    )
+    cfg = context.cfg
+
+    extra = job.get("extra") or {}
+    job_type = str(job.get("job_type") or extra.get("job_type") or "process").strip().lower() or "process"
+    language = str(job.get("language") or extra.get("language") or cfg.model.language).strip().lower()
+    source_language = str(job.get("source_language") or extra.get("source_language") or "").strip().lower() or None
+    device = str(extra.get("device") or cfg.model.device)
+    force_overwrite = bool(extra.get("force_overwrite", cfg.runtime.overwrite_existing))
+    index_only = bool(extra.get("index_only", False)) or job_type == "index"
+
+    if not _job_allowed_for_role(job_type, role):
+        _requeue_for_other_role(paths, job_id, job_type)
+        set_state(
+            paths,
+            job_id,
+            "queued",
+            stage="queued",
+            progress=0.0,
+            message=f"Waiting for worker role for job_type={job_type}",
+        )
+        remove_lock_if_exists(paths, job_id)
+        time.sleep(0.1)
+        return context
+
+    if should_expand_experimental_job(job_type, cfg, cfg.active_variant):
+        expand_experimental_job(
+            cfg=cfg,
+            paths=paths,
+            job_id=job_id,
+            job=job,
+            language=language,
+            source_language=source_language,
+        )
+        return context
+
+    if check_cancel(paths, job_id):
+        mark_job_canceled(paths, job_id, context.webhook_cfg, "Canceled before start")
+        return context
+
+    if index_only:
+        run_index_job(
+            cfg=cfg,
+            paths=paths,
+            cfg_fp=context.cfg_fp,
+            job_id=job_id,
+            webhook_cfg=context.webhook_cfg,
+        )
+        return context
+
+    video_id = str(job.get("video_id") or "")
+    if not video_id:
+        raise RuntimeError("Missing video_id in job")
+
+    if job_type == "translate":
+        run_translate_job(
+            cfg=cfg,
+            paths=paths,
+            cfg_fp=context.cfg_fp,
+            job_id=job_id,
+            job=job,
+            language=language,
+            source_language=source_language,
+            force_overwrite=force_overwrite,
+            auto_index=context.auto_index,
+            webhook_cfg=context.webhook_cfg,
+            translation_service=context.services.translation_service,
+        )
+        return context
+
+    run_process_job(
+        cfg=cfg,
+        paths=paths,
+        cfg_fp=context.cfg_fp,
+        job_id=job_id,
+        job=job,
+        device=device,
+        force_overwrite=force_overwrite,
+        auto_index=context.auto_index,
+        webhook_cfg=context.webhook_cfg,
+        services=context.services,
+    )
+    return context
+
+
 def worker_main() -> None:
     """Run the main worker loop."""
 
@@ -106,133 +249,19 @@ def worker_main() -> None:
                 time.sleep(max(0.4, poll_interval))
                 continue
 
-            items = list_queue_items(paths.queue_dir)
-            if not items:
+            job_id = _lease_next_job(paths, owner, lease_sec)
+            if not job_id:
                 time.sleep(poll_interval)
                 continue
 
-            queue_item = items[0]
-            job_id = parse_job_id_from_queue_item(queue_item)
-            if not job_id:
-                try:
-                    queue_item.unlink(missing_ok=True)
-                except Exception:
-                    pass
-                continue
-
-            if not try_create_lock(paths, job_id, owner):
-                try:
-                    if lease_expired(read_job(paths, job_id)):
-                        remove_lock_if_exists(paths, job_id)
-                except Exception:
-                    pass
-                time.sleep(0.1)
-                continue
-
-            try:
-                queue_item.unlink(missing_ok=True)
-            except Exception:
-                pass
-
-            if not try_lease(paths, job_id, owner, lease_sec):
-                remove_lock_if_exists(paths, job_id)
-                continue
-
             active_job_id = job_id
-            set_state(paths, job_id, "running", stage="starting", progress=0.01, message="Started")
-
-            job = read_job(paths, job_id)
-            context = resolve_worker_context(
+            context = _dispatch_job(
                 context=context,
                 default_profile=default_profile,
                 default_variant=default_variant,
-                job=job,
-            )
-            cfg = context.cfg
-
-            extra = job.get("extra") or {}
-            job_type = str(job.get("job_type") or extra.get("job_type") or "process").strip().lower() or "process"
-            language = str(job.get("language") or extra.get("language") or cfg.model.language).strip().lower()
-            source_language = str(job.get("source_language") or extra.get("source_language") or "").strip().lower() or None
-            device = str(extra.get("device") or cfg.model.device)
-            force_overwrite = bool(extra.get("force_overwrite", cfg.runtime.overwrite_existing))
-            index_only = bool(extra.get("index_only", False)) or job_type == "index"
-
-            if not _job_allowed_for_role(job_type, role):
-                _requeue_for_other_role(paths, job_id, job_type)
-                set_state(
-                    paths,
-                    job_id,
-                    "queued",
-                    stage="queued",
-                    progress=0.0,
-                    message=f"Waiting for worker role for job_type={job_type}",
-                )
-                remove_lock_if_exists(paths, job_id)
-                active_job_id = None
-                time.sleep(0.1)
-                continue
-
-            if should_expand_experimental_job(job_type, cfg, cfg.active_variant):
-                expand_experimental_job(
-                    cfg=cfg,
-                    paths=paths,
-                    job_id=job_id,
-                    job=job,
-                    language=language,
-                    source_language=source_language,
-                )
-                active_job_id = None
-                continue
-
-            if check_cancel(paths, job_id):
-                mark_job_canceled(paths, job_id, context.webhook_cfg, "Canceled before start")
-                active_job_id = None
-                continue
-
-            if index_only:
-                run_index_job(
-                    cfg=cfg,
-                    paths=paths,
-                    cfg_fp=context.cfg_fp,
-                    job_id=job_id,
-                    webhook_cfg=context.webhook_cfg,
-                )
-                active_job_id = None
-                continue
-
-            video_id = str(job.get("video_id") or "")
-            if not video_id:
-                raise RuntimeError("Missing video_id in job")
-
-            if job_type == "translate":
-                run_translate_job(
-                    cfg=cfg,
-                    paths=paths,
-                    cfg_fp=context.cfg_fp,
-                    job_id=job_id,
-                    job=job,
-                    language=language,
-                    source_language=source_language,
-                    force_overwrite=force_overwrite,
-                    auto_index=context.auto_index,
-                    webhook_cfg=context.webhook_cfg,
-                    translation_service=context.services.translation_service,
-                )
-                active_job_id = None
-                continue
-
-            run_process_job(
-                cfg=cfg,
                 paths=paths,
-                cfg_fp=context.cfg_fp,
                 job_id=job_id,
-                job=job,
-                device=device,
-                force_overwrite=force_overwrite,
-                auto_index=context.auto_index,
-                webhook_cfg=context.webhook_cfg,
-                services=context.services,
+                role=role,
             )
             active_job_id = None
 

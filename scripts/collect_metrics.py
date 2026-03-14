@@ -22,6 +22,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from scripts.common import (
+    float_or_none as _float_or_none_common,
+    read_json_dict as _read_json_dict,
+    resolve_path as _resolve_path_common,
+    safe_div as _safe_div_common,
+    write_json as _write_json_common,
+)
 from src.utils.video_store import (
     list_output_languages,
     list_output_variants,
@@ -137,29 +144,19 @@ STAGE_AGG_FIELDS = [
 def _resolve_path(arg: str) -> Path:
     """Resolve relative paths against the current working directory."""
 
-    path = Path(arg)
-    if path.is_absolute():
-        return path
-    return (Path.cwd() / path).resolve()
+    return _resolve_path_common(arg)
 
 
 def _read_json(path: Path) -> Optional[Dict[str, Any]]:
     """Read a JSON object or return None."""
 
-    if not path.exists():
-        return None
-    try:
-        obj = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
-    return obj if isinstance(obj, dict) else None
+    return _read_json_dict(path, default=None, encoding="utf-8")
 
 
 def _write_json(path: Path, payload: Dict[str, Any]) -> None:
     """Write JSON with stable UTF-8 formatting."""
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    _write_json_common(path, payload)
 
 
 def _write_csv(path: Path, rows: List[Dict[str, Any]]) -> None:
@@ -272,17 +269,7 @@ def _write_stage_aggregate_csv(path: Path, rows: List[Dict[str, Any]], grouped_b
 def _float_or_none(value: Any) -> Optional[float]:
     """Convert scalar values to float when possible."""
 
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    try:
-        text = str(value).strip()
-        if not text:
-            return None
-        return float(text)
-    except Exception:
-        return None
+    return _float_or_none_common(value)
 
 
 def _numeric_stats(rows: List[Dict[str, Any]], field: str) -> Dict[str, Any]:
@@ -302,11 +289,7 @@ def _numeric_stats(rows: List[Dict[str, Any]], field: str) -> Dict[str, Any]:
 def _safe_div(num: Any, den: Any) -> Optional[float]:
     """Return a float ratio when both operands are valid and denominator is non-zero."""
 
-    n = _float_or_none(num)
-    d = _float_or_none(den)
-    if n is None or d is None or d == 0:
-        return None
-    return float(n / d)
+    return _safe_div_common(num, den)
 
 
 def _stage_payload(values: List[float]) -> Dict[str, Any]:
