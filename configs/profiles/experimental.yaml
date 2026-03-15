@@ -3,7 +3,7 @@ extends: main.yaml
 experiment:
   mode: experimental
   compare_on_single_video: true
-  variant_ids: [exp_a, exp_b, exp_c]
+  variant_ids: [fast, throughput, max_quality]
 
 guard:
   enabled: false
@@ -14,8 +14,16 @@ runtime:
   overwrite_existing: true
   metrics_repeats: 3
   metrics_store_samples: true
+  structuring_mode: llm
+  summary_mode: deterministic
+  summary_polish_enabled: true
+  summary_polish_priority: "025"
+  worker_output_guard_backend: rules
 
 search:
   rerank_enabled: true
   rerank_top_k: 50
   dense_input_mode: text_keyframe
+
+translation:
+  post_edit_targets: [summary, reports, qa, selected_segments]

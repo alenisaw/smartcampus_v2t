@@ -21,6 +21,8 @@ class VideoItem(BaseModel):
     mtime: Optional[float] = None
     languages: List[str] = Field(default_factory=list)
     variants: Dict[str, Any] = Field(default_factory=dict)
+    summary: Optional[str] = None
+    status: Optional[str] = None
 
 class VideoOutputs(BaseModel):
     video_id: str
@@ -30,6 +32,7 @@ class VideoOutputs(BaseModel):
     run_manifest: Optional[Dict[str, Any]] = None
     batch_manifest: Optional[Dict[str, Any]] = None
     annotations: List[Dict[str, Any]] = Field(default_factory=list)
+    clip_observations: List[Dict[str, Any]] = Field(default_factory=list)
     metrics: Optional[Dict[str, Any]] = None
     global_summary: Optional[str] = None
 

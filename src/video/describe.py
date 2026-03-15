@@ -126,6 +126,14 @@ class VideoToTextPipeline:
         self.cfg = cfg
         self.backend = QwenVLBackend.from_pipeline_config(cfg)
 
+    def release(self) -> None:
+        """Release the resident VLM backend when it is not needed anymore."""
+
+        backend = getattr(self, "backend", None)
+        if backend is None or not hasattr(backend, "release"):
+            return
+        backend.release()
+
     def preprocess_video(self, video_path: str | Path):
         """Expose preprocessing through the video-layer entrypoint."""
 

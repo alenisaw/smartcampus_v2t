@@ -10,7 +10,7 @@ Purpose:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import streamlit as st
 
@@ -171,6 +171,27 @@ def soft_note(text: str, kind: str = "info") -> None:
     st.markdown(f"<div class='{css}'>{E(text)}</div>", unsafe_allow_html=True)
 
 
+def _run_live_fragment(body: Callable[[], None], *, run_every_sec: Optional[int] = None) -> None:
+    """Render a callable inside a Streamlit fragment when periodic refresh is enabled."""
+
+    interval = max(1, int(run_every_sec or 0))
+    fragment = getattr(st, "fragment", None)
+    if callable(fragment) and interval > 0:
+        fragment(run_every=interval)(body)()
+        return
+    body()
+
+
+def _run_fragment(body: Callable[[], None]) -> None:
+    """Render a callable inside a Streamlit fragment when fragments are available."""
+
+    fragment = getattr(st, "fragment", None)
+    if callable(fragment):
+        fragment(body)()
+        return
+    body()
+
+
 def render_i18n_metrics() -> None:
     """Compatibility no-op for the entrypoint."""
 
@@ -293,6 +314,8 @@ __all__ = [
     "_video_ids",
     "_session_choice",
     "_resolve_video_context",
+    "_run_fragment",
+    "_run_live_fragment",
     "soft_note",
     "render_i18n_metrics",
     "render_header",

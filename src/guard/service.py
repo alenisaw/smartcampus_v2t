@@ -96,14 +96,18 @@ class GuardService:
             return llm_result
         return self._inspect_with_rules(text, mode=mode)
 
-    def sanitize_output(self, text: str) -> str:
+    def sanitize_output(self, text: str, *, backend_pref: str = "auto") -> str:
         """Apply output guard and redact blocked content when needed."""
 
         raw = str(text or "")
         if not self.enabled or not self.output_gate:
             return raw
 
-        decision = self.inspect(raw, mode="output")
+        normalized_pref = str(backend_pref or "auto").strip().lower() or "auto"
+        if normalized_pref == "rules":
+            decision = self._inspect_with_rules(raw, mode="output")
+        else:
+            decision = self.inspect(raw, mode="output")
         if not bool(decision.get("allowed", True)):
             return "[guard blocked output]"
 
@@ -163,3 +167,11 @@ class GuardService:
             "reason": reason,
             "backend": "rules",
         }
+
+    def release(self) -> None:
+        """Unload the optional guard model backend when it is not needed."""
+
+        client = self.client
+        if client is None or not hasattr(client, "release"):
+            return
+        client.release()

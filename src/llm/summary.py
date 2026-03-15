@@ -106,6 +106,8 @@ class SummaryService:
 
     cfg: Any
     llm_client: Optional[LLMClient] = None
+    mode: str = "deterministic"
+    polish_enabled: bool = False
 
     @classmethod
     def from_config(cls, cfg: Any) -> "SummaryService":
@@ -116,7 +118,10 @@ class SummaryService:
             client = LLMClient.from_config(cfg)
         except Exception:
             client = None
-        return cls(cfg=cfg, llm_client=client)
+        runtime_cfg = getattr(cfg, "runtime", None)
+        mode = str(getattr(runtime_cfg, "summary_mode", "deterministic")).strip().lower() or "deterministic"
+        polish_enabled = bool(getattr(runtime_cfg, "summary_polish_enabled", False))
+        return cls(cfg=cfg, llm_client=client, mode=mode, polish_enabled=polish_enabled)
 
     def build_summary(
         self,
@@ -129,8 +134,31 @@ class SummaryService:
     ) -> Dict[str, Any]:
         """Build a summary from structured segments, preferring LLM JSON output."""
 
+        fallback = self.build_deterministic_summary(
+            video_id=video_id,
+            language=language,
+            duration_sec=duration_sec,
+            segments=segments,
+            summary_text=summary_text,
+        )
+        if self.mode != "llm":
+            return fallback
+        llm_payload = self._try_llm_summary(video_id=video_id, duration_sec=duration_sec, segments=segments)
+        return _repair_summary_payload(llm_payload, fallback)
+
+    def build_deterministic_summary(
+        self,
+        *,
+        video_id: str,
+        language: str,
+        duration_sec: float,
+        segments: List[Dict[str, Any]],
+        summary_text: str = "",
+    ) -> Dict[str, Any]:
+        """Build the fast deterministic summary payload used in the main process path."""
+
         fallback_text = str(summary_text or "").strip() or _fallback_summary_text(segments)
-        fallback = build_video_summary_v2(
+        return build_video_summary_v2(
             cfg=self.cfg,
             video_id=video_id,
             language=language,
@@ -138,8 +166,39 @@ class SummaryService:
             summary_text=fallback_text,
             segments=segments,
         )
+
+    def polish_summary(
+        self,
+        *,
+        video_id: str,
+        language: str,
+        duration_sec: float,
+        segments: List[Dict[str, Any]],
+        summary_text: str = "",
+    ) -> Optional[Dict[str, Any]]:
+        """Refine an already persisted deterministic summary without blocking the main job."""
+
+        if not self.polish_enabled or self.llm_client is None:
+            return None
+        fallback = self.build_deterministic_summary(
+            video_id=video_id,
+            language=language,
+            duration_sec=duration_sec,
+            segments=segments,
+            summary_text=summary_text,
+        )
         llm_payload = self._try_llm_summary(video_id=video_id, duration_sec=duration_sec, segments=segments)
+        if llm_payload is None:
+            return None
         return _repair_summary_payload(llm_payload, fallback)
+
+    def release(self) -> None:
+        """Unload the optional text LLM when the worker no longer needs it."""
+
+        client = self.llm_client
+        if client is None or not hasattr(client, "release"):
+            return
+        client.release()
 
     def _try_llm_summary(
         self,

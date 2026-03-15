@@ -333,9 +333,14 @@ def _build_backend_config(backend_raw: Dict[str, Any]) -> BackendConfig:
 def _build_search_config(root_dir: Path, search_raw: Dict[str, Any]) -> SearchConfig:
     """Build the retrieval section of the typed config."""
 
+    embedding_model_raw = search_raw.get("embedding_model_id")
+    embedding_model_id = ""
+    if str(embedding_model_raw or "").strip():
+        embedding_model_id = _resolve_reference_or_path(root_dir, embedding_model_raw, str(embedding_model_raw))
+
     return SearchConfig(
         embed_model_name=str(search_raw.get("embed_model_name", "BAAI/bge-m3")),
-        embedding_model_id=_resolve_reference_or_path(root_dir, search_raw.get("embedding_model_id"), "Qwen/Qwen3-VL-Embedding-2B"),
+        embedding_model_id=embedding_model_id,
         embedding_backend=str(search_raw.get("embedding_backend", "auto")).strip().lower() or "auto",
         reranker_model_id=_resolve_reference_or_path(root_dir, search_raw.get("reranker_model_id"), "Qwen/Qwen3-VL-Reranker-2B"),
         reranker_backend=str(search_raw.get("reranker_backend", "auto")).strip().lower() or "auto",
@@ -468,6 +473,11 @@ def _build_runtime_config(runtime_raw: Dict[str, Any]) -> RuntimeConfig:
         torch_compile_fullgraph=_to_bool(runtime_raw.get("torch_compile_fullgraph", False)),
         metrics_repeats=max(1, int(runtime_raw.get("metrics_repeats", 1))),
         metrics_store_samples=_to_bool(runtime_raw.get("metrics_store_samples", True)),
+        structuring_mode=str(runtime_raw.get("structuring_mode", "rules")).strip().lower() or "rules",
+        summary_mode=str(runtime_raw.get("summary_mode", "deterministic")).strip().lower() or "deterministic",
+        summary_polish_enabled=_to_bool(runtime_raw.get("summary_polish_enabled", False)),
+        summary_polish_priority=str(runtime_raw.get("summary_polish_priority", "025")).strip() or "025",
+        worker_output_guard_backend=str(runtime_raw.get("worker_output_guard_backend", "rules")).strip().lower() or "rules",
     )
 
 
@@ -538,7 +548,7 @@ def _build_execution_configs(
     experiment = ExperimentConfig(
         mode=str(experiment_raw.get("mode", active_profile)).strip().lower() or active_profile,
         compare_on_single_video=_to_bool(experiment_raw.get("compare_on_single_video", active_profile == "experimental")),
-        variant_ids=_to_list(experiment_raw.get("variant_ids"), default=["exp_a", "exp_b", "exp_c"]),
+        variant_ids=_to_list(experiment_raw.get("variant_ids"), default=["fast", "throughput", "max_quality"]),
     )
     return jobs, queue, locks, worker, index_cfg, webhook, experiment
 

@@ -26,7 +26,7 @@ backend:
 search:
   embed_model_name: BAAI/bge-m3
   embedding_model_id: models/qwen3-vl-embedding-2b
-  embedding_backend: transformers
+  embedding_backend: auto
   reranker_model_id: models/qwen3-vl-reranker-2b
   reranker_backend: transformers
   query_prefix: "query: "
@@ -42,7 +42,7 @@ search:
   candidate_k_dense: 200
   fusion: rrf
   rrf_k: 60
-  rerank_enabled: true
+  rerank_enabled: false
   rerank_top_k: 30
   dedupe_mode: overlap
   dedupe_tol_sec: 1.0
@@ -131,7 +131,7 @@ translation:
   cache_version: v2
   query_time_translation: true
   offline_translation: true
-  post_edit_targets: [summary, reports, qa, selected_segments]
+  post_edit_targets: [reports, qa]
   post_edit_max_items: 64
   ctranslate2:
     device: cpu
@@ -159,6 +159,11 @@ runtime:
   torch_compile_fullgraph: false
   metrics_repeats: 1
   metrics_store_samples: true
+  structuring_mode: rules
+  summary_mode: deterministic
+  summary_polish_enabled: true
+  summary_polish_priority: "025"
+  worker_output_guard_backend: rules
 
 jobs:
   dir: data/jobs
@@ -187,4 +192,4 @@ webhook:
 experiment:
   mode: main
   compare_on_single_video: false
-  variant_ids: [exp_a, exp_b, exp_c]
+  variant_ids: [fast, throughput, max_quality]

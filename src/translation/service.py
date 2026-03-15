@@ -9,6 +9,7 @@ Purpose:
 
 from __future__ import annotations
 
+import gc
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -238,6 +239,23 @@ class TranslationService:
             self._llm_client = LLMClient.from_config(self.cfg)
         except Exception:
             self._llm_client = None
+
+    def release(self) -> None:
+        """Drop cached translation backends and optional post-edit LLM objects."""
+
+        translator_cache = getattr(self, "_translator_cache", {})
+        tokenizer_cache = getattr(self, "_tokenizer_cache", {})
+        llm_client = getattr(self, "_llm_client", None)
+
+        if isinstance(translator_cache, dict):
+            translator_cache.clear()
+        if isinstance(tokenizer_cache, dict):
+            tokenizer_cache.clear()
+        if llm_client is not None and hasattr(llm_client, "release"):
+            llm_client.release()
+        self._llm_client = None
+        self._llm_client_ready = False
+        gc.collect()
 
     def _translate_one_route(
         self,

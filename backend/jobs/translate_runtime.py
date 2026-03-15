@@ -57,6 +57,19 @@ class _TranslateJobContext:
     translation_service: Any
 
 
+def _set_translate_stage(
+    context: _TranslateJobContext,
+    *,
+    stage: str,
+    progress: float,
+    message: str,
+    state: str = "running",
+) -> None:
+    """Persist one compact translation stage update."""
+
+    set_state(context.paths, context.job_id, state, stage=stage, progress=progress, message=message)
+
+
 def _selected_translation_candidate_indices(source_segments: List[Dict[str, Any]]) -> List[int]:
     """Return source-segment indices that should receive selective post-editing."""
 
@@ -73,6 +86,7 @@ def _selected_translation_candidate_indices(source_segments: List[Dict[str, Any]
 
 def _post_edit_selected_segments(
     *,
+    context: _TranslateJobContext,
     translation_service: Any,
     texts: List[str],
     translated: List[str],
@@ -88,7 +102,21 @@ def _post_edit_selected_segments(
     selected_post_edit_edited_indices: set[int] = set()
     if not selected_candidate_indices or not hasattr(translation_service, "post_edit_many"):
         return translated, selected_post_edit_edited, selected_post_edit_edited_indices
+    if not bool(
+        getattr(translation_service, "should_post_edit", lambda **_: True)(
+            target_name="selected_segments",
+            src_lang=src_lang,
+            tgt_lang=tgt_lang,
+        )
+    ):
+        return translated, selected_post_edit_edited, selected_post_edit_edited_indices
 
+    _set_translate_stage(
+        context,
+        stage="post_edit_segments",
+        progress=0.42,
+        message="Polishing selected segments",
+    )
     selected_src = [texts[i] for i in selected_candidate_indices]
     selected_mt_before = [translated[i] for i in selected_candidate_indices]
     post_edit_started = time.perf_counter()
@@ -148,6 +176,7 @@ def _build_translated_segments(
 
 def _translate_summary_payload(
     *,
+    context: _TranslateJobContext,
     cfg: Any,
     translation_service: Any,
     video_id: str,
@@ -169,6 +198,12 @@ def _translate_summary_payload(
     if not summary_text:
         return None, summary_post_edited
 
+    _set_translate_stage(
+        context,
+        stage="translate_summary",
+        progress=0.68,
+        message="Translating summary",
+    )
     summary_mt_started = time.perf_counter()
     translated_summary = translation_service.translate(
         [str(summary_text)],
@@ -183,7 +218,19 @@ def _translate_summary_payload(
         return str(summary_text), summary_post_edited
 
     summary_text_translated = str(translated_summary[0])
-    if hasattr(translation_service, "post_edit_many"):
+    if hasattr(translation_service, "post_edit_many") and bool(
+        getattr(translation_service, "should_post_edit", lambda **_: True)(
+            target_name="summary",
+            src_lang=src_lang,
+            tgt_lang=tgt_lang,
+        )
+    ):
+        _set_translate_stage(
+            context,
+            stage="post_edit_summary",
+            progress=0.76,
+            message="Polishing summary",
+        )
         summary_post_edit_started = time.perf_counter()
         summary_post = translation_service.post_edit_many(
             [str(summary_text)],
@@ -219,6 +266,12 @@ def _translate_summary_payload(
             "summary": summary_text_translated,
         }
 
+    _set_translate_stage(
+        context,
+        stage="persist_summary",
+        progress=0.82,
+        message="Saving summary",
+    )
     write_summary_started = time.perf_counter()
     write_summary(
         summary_path(Path(cfg.paths.videos_dir), video_id, tgt_lang, variant=variant_id),
@@ -291,7 +344,12 @@ def _load_source_segments(
 
 
 def _mark_translation_running(context: _TranslateJobContext) -> None:
-    set_state(context.paths, context.job_id, "running", stage="translate", progress=0.2, message="Translating")
+    _set_translate_stage(
+        context,
+        stage="load_source",
+        progress=0.08,
+        message="Loading source outputs",
+    )
     update_outputs_manifest(
         context.videos_dir,
         context.video_id,
@@ -318,6 +376,12 @@ def _translate_segment_texts(
     source_segments: List[Dict[str, Any]],
     metric_payload: Dict[str, Any],
 ) -> tuple[List[str], List[str], int, List[int], set[int]]:
+    _set_translate_stage(
+        context,
+        stage="translate_segments",
+        progress=0.22,
+        message="Translating segments",
+    )
     texts = [str(item.get("normalized_caption") or item.get("description", "")) for item in source_segments]
     mt_started = time.perf_counter()
     translated = context.translation_service.translate(
@@ -331,6 +395,7 @@ def _translate_segment_texts(
     _record_stage(metric_payload, "translate_segments_mt", time.perf_counter() - mt_started)
 
     translated, selected_post_edit_edited, selected_post_edit_edited_indices = _post_edit_selected_segments(
+        context=context,
         translation_service=context.translation_service,
         texts=texts,
         translated=list(translated),
@@ -351,6 +416,12 @@ def _persist_translated_outputs(
     selected_post_edit_edited_indices: set[int],
     metric_payload: Dict[str, Any],
 ) -> tuple[Optional[str], bool]:
+    _set_translate_stage(
+        context,
+        stage="persist_segments",
+        progress=0.54,
+        message="Saving segments",
+    )
     write_segments_started = time.perf_counter()
     out_segments = _build_translated_segments(
         source_segments=source_segments,
@@ -365,8 +436,20 @@ def _persist_translated_outputs(
         out_segments,
     )
     _record_stage(metric_payload, "write_segments", time.perf_counter() - write_segments_started)
+    update_outputs_manifest(
+        context.videos_dir,
+        context.video_id,
+        context.tgt_lang,
+        variant=context.variant_id,
+        source_lang=context.src_lang,
+        model_name=str(context.cfg.translation.model_name_or_path),
+        status="segments_ready",
+        job_id=context.job_id,
+        note="translated_segments",
+    )
 
     summary_text, summary_post_edited = _translate_summary_payload(
+        context=context,
         cfg=context.cfg,
         translation_service=context.translation_service,
         video_id=context.video_id,
@@ -376,6 +459,8 @@ def _persist_translated_outputs(
         metric_payload=metric_payload,
     )
 
+    manifest_status = "summary_ready" if summary_text else "segments_ready"
+    manifest_note = "translated_summary" if summary_text else "translated_segments"
     update_outputs_manifest(
         context.videos_dir,
         context.video_id,
@@ -383,9 +468,9 @@ def _persist_translated_outputs(
         variant=context.variant_id,
         source_lang=context.src_lang,
         model_name=str(context.cfg.translation.model_name_or_path),
-        status="ready",
+        status=manifest_status,
         job_id=context.job_id,
-        note="translate",
+        note=manifest_note,
     )
     return summary_text, summary_post_edited
 
@@ -397,7 +482,20 @@ def _run_optional_translation_index(
     if not context.auto_index:
         return
 
-    set_state(context.paths, context.job_id, "indexing", stage="indexing", progress=0.88, message="Index update")
+    service = getattr(context, "translation_service", None)
+    if service is not None and hasattr(service, "release"):
+        try:
+            service.release()
+        except Exception:
+            pass
+
+    _set_translate_stage(
+        context,
+        state="indexing",
+        stage="indexing",
+        progress=0.9,
+        message="Index update",
+    )
     index_started = time.perf_counter()
     index_time = _run_index_build(cfg=context.cfg, cfg_fp=context.cfg_fp, language=context.tgt_lang)
     _record_stage(metric_payload, "index_build", time.perf_counter() - index_started)
@@ -446,6 +544,17 @@ def _persist_translation_metrics(
 
 
 def _finalize_translation_success(context: _TranslateJobContext) -> None:
+    update_outputs_manifest(
+        context.videos_dir,
+        context.video_id,
+        context.tgt_lang,
+        variant=context.variant_id,
+        source_lang=context.src_lang,
+        model_name=str(context.cfg.translation.model_name_or_path),
+        status="ready",
+        job_id=context.job_id,
+        note="translate",
+    )
     refresh_research_metrics(context.cfg)
     finalize_job_state(
         context.paths,

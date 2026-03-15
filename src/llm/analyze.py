@@ -193,6 +193,7 @@ class SegmentAnalysisService:
 
     cfg: Any
     llm_client: Optional[LLMClient] = None
+    mode: str = "rules"
 
     @classmethod
     def from_config(cls, cfg: Any) -> "SegmentAnalysisService":
@@ -203,7 +204,8 @@ class SegmentAnalysisService:
             client = LLMClient.from_config(cfg)
         except Exception:
             client = None
-        return cls(cfg=cfg, llm_client=client)
+        mode = str(getattr(getattr(cfg, "runtime", None), "structuring_mode", "rules")).strip().lower() or "rules"
+        return cls(cfg=cfg, llm_client=client, mode=mode)
 
     def enrich_segments(self, segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Enrich all segments using fallback rules and optional LLM extraction."""
@@ -221,7 +223,7 @@ class SegmentAnalysisService:
             or ""
         )
 
-        llm_payload = self._try_llm_structuring(payload)
+        llm_payload = self._try_llm_structuring(payload) if self.mode == "llm" else None
         if llm_payload:
             payload.update(llm_payload)
             payload["normalized_caption"] = str(

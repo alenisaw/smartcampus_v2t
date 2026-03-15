@@ -9,6 +9,7 @@ Purpose:
 
 from __future__ import annotations
 
+import gc
 from dataclasses import dataclass
 import importlib.util
 from pathlib import Path
@@ -42,6 +43,7 @@ class QwenVLBackend:
         torch_compile: bool = False,
         torch_compile_mode: str = "reduce-overhead",
         torch_compile_fullgraph: bool = False,
+        lazy_load: bool = True,
     ) -> None:
         if generation_config is None:
             generation_config = QwenVLGenerationConfig()
@@ -55,40 +57,16 @@ class QwenVLBackend:
         self.torch_compile = bool(torch_compile)
         self.torch_compile_mode = str(torch_compile_mode or "reduce-overhead")
         self.torch_compile_fullgraph = bool(torch_compile_fullgraph)
+        self.lazy_load = bool(lazy_load)
+        self.model = None
+        self.processor = None
 
         if device not in {"auto", "cuda", "cpu"}:
             device = "auto"
-
-        if dtype == "auto":
-            hf_dtype: Any = None
-        elif dtype.lower() in {"bf16", "bfloat16"}:
-            hf_dtype = torch.bfloat16
-        elif dtype.lower() in {"fp16", "float16", "half"}:
-            hf_dtype = torch.float16
-        else:
-            hf_dtype = None
-
-        model_kwargs: dict = {}
-        if hf_dtype is not None:
-            model_kwargs["dtype"] = hf_dtype
-
-        # If user requested CUDA, allow HF to place/shard model.
-        if device == "cuda":
-            model_kwargs["device_map"] = "auto"
-
-        attn_impl = self._pick_attn_implementation(self.attn_implementation)
-        if attn_impl:
-            model_kwargs["attn_implementation"] = attn_impl
-
-        self.model = self._load_model(model_name_or_path, model_kwargs)
-        self.processor = AutoProcessor.from_pretrained(model_name_or_path)
-        self.model.eval()
-
-        # If not sharded by HF, we can move explicitly.
-        if device in {"cuda", "cpu"} and not hasattr(self.model, "hf_device_map"):
-            self.model.to(device)
-
-        self._maybe_compile_model()
+        self._resolved_device = device
+        self._model_kwargs = self._build_model_kwargs(device=device, dtype=dtype)
+        if not self.lazy_load:
+            self._ensure_loaded()
 
     @staticmethod
     def _load_model(model_name_or_path: str, model_kwargs: Dict[str, Any]) -> Any:
@@ -119,6 +97,87 @@ class QwenVLBackend:
             raise last_error
         raise RuntimeError(f"Failed to load VLM model: {model_name_or_path}")
 
+    def _build_model_kwargs(self, *, device: str, dtype: str) -> Dict[str, Any]:
+        """Build stable HF load kwargs for the VLM bundle."""
+
+        if dtype == "auto":
+            hf_dtype: Any = None
+        elif str(dtype).lower() in {"bf16", "bfloat16"}:
+            hf_dtype = torch.bfloat16
+        elif str(dtype).lower() in {"fp16", "float16", "half"}:
+            hf_dtype = torch.float16
+        else:
+            hf_dtype = None
+
+        model_kwargs: Dict[str, Any] = {}
+        if hf_dtype is not None:
+            model_kwargs["dtype"] = hf_dtype
+        if device == "cuda":
+            model_kwargs["device_map"] = "auto"
+
+        attn_impl = self._pick_attn_implementation(self.attn_implementation)
+        if attn_impl:
+            model_kwargs["attn_implementation"] = attn_impl
+        return model_kwargs
+
+    def _apply_generation_defaults(self) -> None:
+        """Normalize generation config to deterministic defaults when sampling is disabled."""
+
+        generation_state = getattr(self.model, "generation_config", None)
+        if generation_state is None or bool(self.generation_config.do_sample):
+            return
+        try:
+            generation_state.do_sample = False
+            if hasattr(generation_state, "temperature"):
+                generation_state.temperature = 1.0
+            if hasattr(generation_state, "top_p"):
+                generation_state.top_p = 1.0
+            if hasattr(generation_state, "top_k"):
+                generation_state.top_k = 50
+        except Exception:
+            return
+
+    def _ensure_loaded(self) -> None:
+        """Load the VLM model and processor only when they are first needed."""
+
+        if self.model is not None and self.processor is not None:
+            return
+
+        model = self._load_model(self.model_name_or_path, dict(self._model_kwargs))
+        processor = AutoProcessor.from_pretrained(self.model_name_or_path)
+        model.eval()
+        self.model = model
+        self.processor = processor
+        self._apply_generation_defaults()
+        if self._resolved_device in {"cuda", "cpu"} and not hasattr(self.model, "hf_device_map"):
+            self.model.to(self._resolved_device)
+        self._maybe_compile_model()
+
+    def release(self) -> None:
+        """Unload the resident VLM objects and free device memory when possible."""
+
+        model = self.model
+        processor = self.processor
+        self.model = None
+        self.processor = None
+
+        try:
+            if model is not None and hasattr(model, "cpu"):
+                model.cpu()
+        except Exception:
+            pass
+
+        del model
+        del processor
+        gc.collect()
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                if hasattr(torch.cuda, "ipc_collect"):
+                    torch.cuda.ipc_collect()
+        except Exception:
+            pass
+
     @classmethod
     def from_pipeline_config(cls, cfg: PipelineConfig) -> "QwenVLBackend":
         model_cfg = cfg.model
@@ -146,6 +205,7 @@ class QwenVLBackend:
             torch_compile=bool(getattr(cfg.runtime, "torch_compile", False)),
             torch_compile_mode=str(getattr(cfg.runtime, "torch_compile_mode", "reduce-overhead")),
             torch_compile_fullgraph=bool(getattr(cfg.runtime, "torch_compile_fullgraph", False)),
+            lazy_load=True,
         )
 
     @staticmethod
@@ -272,6 +332,9 @@ class QwenVLBackend:
 
         processor = self.processor
         model = self.model
+        self._ensure_loaded()
+        processor = self.processor
+        model = self.model
 
         inputs = processor.apply_chat_template(
             messages,
@@ -282,19 +345,22 @@ class QwenVLBackend:
             padding=True,
         )
 
-        # ✅ FIX: always move input tensors to the right device
+        # FIX: always move input tensors to the right device
         target_device = self._infer_input_device(model)
         inputs = self._move_inputs_to_device(inputs, target_device)
+        if inputs.get("attention_mask") is None and inputs.get("input_ids") is not None:
+            inputs["attention_mask"] = torch.ones_like(inputs["input_ids"])
 
         generate_kwargs = dict(
             max_new_tokens=gen_cfg.max_new_tokens,
-            temperature=gen_cfg.temperature,
-            top_p=gen_cfg.top_p,
-            top_k=gen_cfg.top_k,
             do_sample=gen_cfg.do_sample,
             repetition_penalty=gen_cfg.repetition_penalty,
             use_cache=True,
         )
+        if gen_cfg.do_sample:
+            generate_kwargs["temperature"] = gen_cfg.temperature
+            generate_kwargs["top_p"] = gen_cfg.top_p
+            generate_kwargs["top_k"] = gen_cfg.top_k
 
         with torch.inference_mode():
             if target_device.type == "cuda" and self.autocast_infer:

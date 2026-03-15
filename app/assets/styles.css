@@ -805,6 +805,10 @@ footer {
   color: #f4d5c4;
 }
 
+.search-results-count {
+  margin-bottom: 20px;
+}
+
 .row-title {
   font-size: 0.98rem;
   line-height: 1.25;
@@ -829,8 +833,9 @@ footer {
 
 .row-copy.alert,
 .timeline-text.alert,
-.timeline-note {
-  color: #f2cab4;
+.timeline-note.alert,
+.timeline-event.alert {
+  color: #ff7d7d;
 }
 
 .row-status {
@@ -873,7 +878,7 @@ footer {
 
 .analytics-summary {
   font-size: 1rem;
-  font-weight: 700;
+  font-weight: 400;
   color: var(--text);
 }
 
@@ -902,6 +907,18 @@ footer {
 
 .timeline-text {
   line-height: 1.56;
+}
+
+.timeline-event {
+  margin-bottom: 0.24rem;
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  color: #dce1ff;
+}
+
+.analytics-timeline-offset {
+  height: 10px;
 }
 
 

@@ -21,21 +21,18 @@ from backend.http.grounded import build_qa_response, build_rag_response, build_r
 from backend.deps import (
     atomic_write_json,
     list_videos,
-    new_job_id,
     now_ts,
     read_json,
     read_video_outputs,
 )
 from backend.jobs.index_runtime import rebuild_index_status as _rebuild_index_status, write_index_state as _write_index_state
+from backend.jobs.control import create_job as _create_job
 from backend.jobs.queue_runtime import (
-    build_job_record as _build_job_record,
     cancel_queued_job as _cancel_queued_job,
-    enqueue_job as _enqueue_job,
     move_job_in_queue as _move_job_in_queue,
     queue_snapshot as _queue_snapshot,
     read_job_or_404 as _read_job,
     set_queue_paused as _set_queue_paused,
-    write_job as _write_job,
 )
 from backend.retrieval_runtime import (
     annotation_hits as _annotation_hits,
@@ -183,6 +180,7 @@ def video_outputs(video_id: str, lang: str, variant: Optional[str] = None):
         not out.get("manifest")
         and not out.get("batch_manifest")
         and not out.get("annotations")
+        and not out.get("clip_observations")
         and out.get("global_summary") is None
     ):
         suffix = f", variant={variant}" if variant else ""
@@ -236,9 +234,8 @@ def jobs_create(req: JobCreateRequest):
     if variant:
         extra["variant"] = variant
 
-    job_id = new_job_id("job")
-    job = _build_job_record(
-        job_id=job_id,
+    job = _create_job(
+        paths,
         video_id=req.video_id,
         job_type=job_type,
         profile=profile,
@@ -247,10 +244,7 @@ def jobs_create(req: JobCreateRequest):
         source_language=source_language,
         extra=extra,
     )
-
-    _write_job(paths, job)
-    _enqueue_job(paths, job_id)
-    return JobCreateResponse(job_id=job_id, state=job["state"], stage=job["stage"])
+    return JobCreateResponse(job_id=job["job_id"], state=job["state"], stage=job["stage"])
 
 
 @app.get("/v1/jobs/{job_id}", response_model=JobStatus)

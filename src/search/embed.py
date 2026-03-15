@@ -8,7 +8,6 @@ Purpose:
 """
 
 from __future__ import annotations
-
 import re
 import sqlite3
 from pathlib import Path
@@ -17,6 +16,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 MODEL_NAME_DEFAULT = "BAAI/bge-m3"
+_QWEN_VL_EMBEDDER_CACHE: Dict[str, Any] = {}
 
 
 def sanitize_tag(text: str) -> str:
@@ -210,6 +210,195 @@ class TransformersTextEmbedder:
         return arr[0] if len(arr) else np.zeros((0,), dtype=np.float32)
 
 
+class QwenVLTextEmbedder:
+    """Embed text with the local Qwen3-VL embedding wrapper shipped with the model."""
+
+    def __init__(
+        self,
+        model_name: str,
+        device: Optional[str] = None,
+        query_prefix: str = "query: ",
+        passage_prefix: str = "passage: ",
+    ):
+        try:
+            import torch
+        except Exception as exc:
+            raise RuntimeError("PyTorch is required for the Qwen3-VL embedding backend.") from exc
+
+        self.model_name = str(model_name)
+        self.query_prefix = str(query_prefix)
+        self.passage_prefix = str(passage_prefix)
+        self._torch = torch
+
+        model_path = Path(self.model_name)
+        if not model_path.exists():
+            raise RuntimeError(f"Qwen3-VL embedding model path not found: {self.model_name}")
+
+        cache_key = f"{model_path.resolve()}::{str(device or '').strip().lower() or 'auto'}"
+        backend = _QWEN_VL_EMBEDDER_CACHE.get(cache_key)
+        if backend is None:
+            try:
+                from transformers import AutoTokenizer
+                from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLModel, Qwen3VLPreTrainedModel
+            except Exception as exc:
+                raise RuntimeError("transformers Qwen3-VL components are required for the local embedding backend.") from exc
+
+            class _Qwen3VLForTextEmbedding(Qwen3VLPreTrainedModel):
+                _checkpoint_conversion_mapping = {}
+                accepts_loss_kwargs = False
+
+                def __init__(self, config):
+                    super().__init__(config)
+                    self.model = Qwen3VLModel(config)
+                    self.post_init()
+
+                def forward(
+                    self,
+                    input_ids=None,
+                    attention_mask=None,
+                    position_ids=None,
+                    past_key_values=None,
+                    inputs_embeds=None,
+                    pixel_values=None,
+                    pixel_values_videos=None,
+                    image_grid_thw=None,
+                    video_grid_thw=None,
+                    cache_position=None,
+                    **kwargs,
+                ):
+                    outputs = self.model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        position_ids=position_ids,
+                        past_key_values=past_key_values,
+                        inputs_embeds=inputs_embeds,
+                        pixel_values=pixel_values,
+                        pixel_values_videos=pixel_values_videos,
+                        image_grid_thw=image_grid_thw,
+                        video_grid_thw=video_grid_thw,
+                        cache_position=cache_position,
+                        **kwargs,
+                    )
+                    return outputs
+
+            load_kwargs: Dict[str, Any] = {"trust_remote_code": True}
+            device_name = str(device or "").strip().lower()
+            if device_name in {"cuda", "auto"}:
+                torch_dtype = getattr(torch, "float16", None)
+            elif device_name == "cpu":
+                torch_dtype = getattr(torch, "float32", None)
+            else:
+                torch_dtype = None
+            if torch_dtype is not None:
+                load_kwargs["dtype"] = torch_dtype
+
+            tokenizer = AutoTokenizer.from_pretrained(str(model_path), trust_remote_code=True)
+            model = _Qwen3VLForTextEmbedding.from_pretrained(str(model_path), **load_kwargs)
+            model.eval()
+            if device_name in {"cuda", "cpu"}:
+                try:
+                    model.to(device_name)
+                except Exception:
+                    pass
+            backend = {"tokenizer": tokenizer, "model": model}
+            _QWEN_VL_EMBEDDER_CACHE[cache_key] = backend
+
+        self.tokenizer = backend["tokenizer"]
+        self.model = backend["model"]
+
+    def prep_passage(self, text: str) -> str:
+        return f"{self.passage_prefix}{text}"
+
+    def prep_query(self, text: str) -> str:
+        return f"{self.query_prefix}{text}"
+
+    def _build_messages(self, text: str, instruction: str) -> List[Dict[str, str]]:
+        return [
+            {"role": "system", "content": str(instruction)},
+            {"role": "user", "content": str(text)},
+        ]
+
+    def _pool_last_token(self, hidden_state: Any, attention_mask: Any):
+        if attention_mask is None:
+            return hidden_state[:, -1]
+        flipped = attention_mask.flip(dims=[1])
+        last_positions = flipped.argmax(dim=1)
+        col = attention_mask.shape[1] - last_positions - 1
+        row = self._torch.arange(hidden_state.shape[0], device=hidden_state.device)
+        return hidden_state[row, col]
+
+    def _encode_payloads(self, payloads: List[Dict[str, Any]]):
+        texts = []
+        for item in payloads:
+            texts.append(
+                self.tokenizer.apply_chat_template(
+                    self._build_messages(str(item.get("text") or ""), str(item.get("instruction") or "Represent the user's input.")),
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+            )
+        encoded = self.tokenizer(
+            texts,
+            padding=True,
+            truncation=True,
+            max_length=4096,
+            return_tensors="pt",
+        )
+        model_device = None
+        try:
+            model_device = next(self.model.parameters()).device
+        except Exception:
+            model_device = None
+        if model_device is not None:
+            for key, value in encoded.items():
+                try:
+                    encoded[key] = value.to(model_device)
+                except Exception:
+                    pass
+        if encoded.get("attention_mask") is None and encoded.get("input_ids") is not None:
+            encoded["attention_mask"] = self._torch.ones_like(encoded["input_ids"])
+
+        with self._torch.inference_mode():
+            outputs = self.model(**encoded)
+            hidden = getattr(outputs, "last_hidden_state", None)
+            if hidden is None:
+                hidden = outputs[0]
+            pooled = self._pool_last_token(hidden, encoded.get("attention_mask"))
+            pooled = self._torch.nn.functional.normalize(pooled, p=2, dim=-1)
+        arr = pooled.detach().cpu().numpy()
+        if arr.ndim == 1:
+            arr = arr.reshape(1, -1)
+        return arr.astype(np.float32, copy=False)
+
+    def encode_passages(self, texts: List[str], batch_size: int = 8):
+        if not texts:
+            return np.zeros((0, 0), dtype=np.float32)
+        rows: List[np.ndarray] = []
+        step = max(1, int(batch_size))
+        for start in range(0, len(texts), step):
+            batch = texts[start : start + step]
+            payloads = [
+                {
+                    "text": self.prep_passage(text),
+                    "instruction": "Represent the document for retrieval.",
+                }
+                for text in batch
+            ]
+            rows.append(self._encode_payloads(payloads))
+        return np.concatenate(rows, axis=0).astype(np.float32, copy=False) if rows else np.zeros((0, 0), dtype=np.float32)
+
+    def encode_query(self, text: str):
+        arr = self._encode_payloads(
+            [
+                {
+                    "text": self.prep_query(text),
+                    "instruction": "Represent the search query for retrieval.",
+                }
+            ]
+        )
+        return arr[0] if len(arr) else np.zeros((0,), dtype=np.float32)
+
+
 def looks_like_transformers_model(model_name: str) -> bool:
     """Detect model ids or paths that should prefer the transformers embedder."""
 
@@ -222,6 +411,15 @@ def looks_like_transformers_model(model_name: str) -> bool:
     if path.exists():
         return any(path.glob("*.safetensors")) or any(path.glob("*.bin")) or any(path.glob("*.pt"))
     return False
+
+
+def looks_like_qwen_vl_embedding_model(model_name: str) -> bool:
+    """Detect the local Qwen3-VL embedding bundle that ships with a custom wrapper."""
+
+    path = Path(str(model_name or "").strip())
+    if not path.exists():
+        return False
+    return (path / "scripts" / "qwen3_vl_embedding.py").exists()
 
 
 def select_embedding_model_ref(search_cfg: Any, models_dir: Optional[Path] = None) -> str:
@@ -271,9 +469,19 @@ def build_text_embedder(
             passage_prefix=passage_prefix,
         )
 
+    def _build_qwen_vl(name: str):
+        return QwenVLTextEmbedder(
+            model_name=name,
+            device=device,
+            query_prefix=query_prefix,
+            passage_prefix=passage_prefix,
+        )
+
     if backend_name == "sentence_transformers":
         return _build_sentence(model_name)
     if backend_name == "transformers":
+        if looks_like_qwen_vl_embedding_model(model_name):
+            return _build_qwen_vl(model_name)
         try:
             return _build_transformers(model_name)
         except Exception:
@@ -281,6 +489,8 @@ def build_text_embedder(
                 return _build_sentence(fallback_model_name)
             raise
 
+    if looks_like_qwen_vl_embedding_model(model_name):
+        return _build_qwen_vl(model_name)
     if looks_like_transformers_model(model_name):
         try:
             return _build_transformers(model_name)

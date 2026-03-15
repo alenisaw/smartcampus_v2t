@@ -189,6 +189,11 @@ class RuntimeConfig:
     torch_compile_fullgraph: bool
     metrics_repeats: int
     metrics_store_samples: bool
+    structuring_mode: str
+    summary_mode: str
+    summary_polish_enabled: bool
+    summary_polish_priority: str
+    worker_output_guard_backend: str
 
 
 @dataclass

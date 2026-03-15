@@ -134,8 +134,10 @@ def list_videos(videos_dir: Path) -> List[Dict[str, Any]]:
 def read_video_outputs(videos_dir: Path, video_id: str, lang: str, variant: Optional[str] = None) -> Dict[str, Any]:
     from src.utils.video_store import (
         batch_manifest_path,
+        clip_observations_path,
         metrics_path,
         outputs_manifest_path,
+        read_clip_observations,
         read_metrics,
         read_segments,
         read_summary,
@@ -152,6 +154,7 @@ def read_video_outputs(videos_dir: Path, video_id: str, lang: str, variant: Opti
         "run_manifest": None,
         "batch_manifest": None,
         "annotations": [],
+        "clip_observations": [],
         "metrics": None,
         "global_summary": None,
     }
@@ -162,6 +165,9 @@ def read_video_outputs(videos_dir: Path, video_id: str, lang: str, variant: Opti
 
     seg_path = segments_path(Path(videos_dir), video_id, lang, variant=variant)
     out["annotations"] = read_segments(seg_path)
+    out["clip_observations"] = read_clip_observations(
+        clip_observations_path(Path(videos_dir), video_id, variant=variant)
+    )
 
     summary_obj = read_summary(summary_path(Path(videos_dir), video_id, lang, variant=variant))
     if isinstance(summary_obj, dict):

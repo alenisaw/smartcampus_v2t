@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
-from backend.deps import new_job_id, now_ts
+from backend.deps import new_job_id, now_ts, read_json
 from backend.jobs.store import (
     build_job_record as _build_job_record,
     enqueue_job,
@@ -85,6 +85,25 @@ def lease_expired(job: Dict[str, Any]) -> bool:
         return True
 
 
+def renew_lease(paths: Any, job_id: str, owner: str, lease_sec: float) -> bool:
+    """Refresh the lease for a running job when the owner still matches."""
+
+    job = read_job(paths, job_id)
+    if is_terminal(job):
+        return False
+
+    lease = job.get("lease") or {}
+    current_owner = str(lease.get("owner") or "")
+    if current_owner and current_owner != owner:
+        return False
+
+    now = now_ts()
+    job["lease"] = {"owner": owner, "expires_at": now + float(lease_sec)}
+    job["updated_at"] = now
+    write_job(paths, job)
+    return True
+
+
 def try_lease(paths: Any, job_id: str, owner: str, lease_sec: float) -> bool:
     """Acquire or refresh a job lease if it is available."""
 
@@ -137,9 +156,74 @@ def set_state(
         job["started_at"] = now_ts()
     if state in {"done", "failed", "canceled"}:
         job["finished_at"] = now_ts()
+    if state in {"queued", "done", "failed", "canceled"}:
+        job["lease"] = None
     if error is not None:
         job["error"] = {"type": "WorkerError", "message": error}
     write_job(paths, job)
+
+
+def _job_signature_matches(
+    job: Dict[str, Any],
+    *,
+    video_id: str,
+    job_type: str,
+    profile: str,
+    variant: Optional[str],
+    language: str,
+    source_language: Optional[str],
+) -> bool:
+    """Return whether the persisted job matches the requested semantic signature."""
+
+    if str(job.get("video_id") or "") != str(video_id):
+        return False
+    if str(job.get("job_type") or "").strip().lower() != str(job_type).strip().lower():
+        return False
+    if str(job.get("profile") or "").strip().lower() != str(profile).strip().lower():
+        return False
+    if (str(job.get("variant") or "").strip().lower() or None) != (str(variant or "").strip().lower() or None):
+        return False
+    if str(job.get("language") or "").strip().lower() != str(language).strip().lower():
+        return False
+    if (str(job.get("source_language") or "").strip().lower() or None) != (
+        str(source_language or "").strip().lower() or None
+    ):
+        return False
+    return True
+
+
+def find_matching_active_job(
+    paths: Any,
+    *,
+    video_id: str,
+    job_type: str,
+    profile: str,
+    variant: Optional[str],
+    language: str,
+    source_language: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Find an already active non-terminal job with the same semantic signature."""
+
+    for path in sorted(paths.jobs_dir.glob("job_*.json")):
+        job = read_json(path, default=None)
+        if not isinstance(job, dict):
+            continue
+        state = str(job.get("state") or "").strip().lower()
+        if state in {"done", "failed", "canceled"}:
+            continue
+        if state in {"running", "leased", "indexing"} and lease_expired(job):
+            continue
+        if _job_signature_matches(
+            job,
+            video_id=video_id,
+            job_type=job_type,
+            profile=profile,
+            variant=variant,
+            language=language,
+            source_language=source_language,
+        ):
+            return job
+    return None
 
 
 def create_job(
@@ -152,8 +236,21 @@ def create_job(
     language: str,
     source_language: Optional[str] = None,
     extra: Optional[Dict[str, Any]] = None,
+    priority: str = "010",
 ) -> Dict[str, Any]:
     """Create and enqueue a new job record."""
+
+    existing = find_matching_active_job(
+        paths,
+        video_id=video_id,
+        job_type=job_type,
+        profile=profile,
+        variant=variant,
+        language=language,
+        source_language=source_language,
+    )
+    if existing is not None:
+        return existing
 
     job_id = new_job_id("job")
     job = _build_job_record(
@@ -167,7 +264,7 @@ def create_job(
         extra=extra,
     )
     write_job(paths, job)
-    enqueue_job(paths, job_id)
+    enqueue_job(paths, job_id, priority=priority)
     return job
 
 
