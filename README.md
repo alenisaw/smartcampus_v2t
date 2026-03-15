@@ -18,6 +18,7 @@ Canonical storage and indexing language is English. Additional language views ar
 ## Documentation Map
 
 - Project guide: [docs/project_guide.md](docs/project_guide.md)
+- Project guide, Russian version: [docs/project_guide.ru.md](docs/project_guide.ru.md)
 
 ## Repository Layout
 
@@ -91,7 +92,7 @@ python scripts/smoke_services.py --api http://127.0.0.1:8000 --ui http://127.0.0
 
 - `configs/profiles/main.yaml`: default runtime
 - `configs/profiles/experimental.yaml`: experiment-oriented runtime
-- `configs/variants/exp_a.yaml`, `exp_b.yaml`, `exp_c.yaml`: explicit experimental overrides
+- `configs/variants/fast.yaml`, `throughput.yaml`, `max_quality.yaml`: explicit experimental overrides
 
 ## API Surface
 
@@ -101,10 +102,3 @@ python scripts/smoke_services.py --api http://127.0.0.1:8000 --ui http://127.0.0
 - Queue: `/v1/queue`, `/v1/queue/pause`, `/v1/queue/resume`, `/v1/queue/move`, `/v1/queue/{job_id}`
 - Index: `/v1/index/status`, `/v1/index/rebuild`
 - Retrieval and grounded generation: `/v1/search`, `/v1/reports`, `/v1/qa`, `/v1/rag`
-
-## Notes
-
-- The repository is built around runtime artifacts under `data/`.
-- The active source architecture is `src/core + src/video + src/llm + src/guard + src/search + src/translation`.
-- Raw VLM clip observations are now persisted under `data/videos/<video_id>/outputs/clip_observations.json` and feed the later semantic stages.
-- The detailed architecture, runtime flows, configs, artifact model, and operations guide live in [docs/project_guide.md](docs/project_guide.md).

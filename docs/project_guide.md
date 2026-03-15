@@ -1,592 +1,759 @@
 # SmartCampus V2T Project Guide
 
-## 1. Project Summary
+Russian version: [docs/project_guide.ru.md](project_guide.ru.md)
 
-SmartCampus V2T is a local end-to-end video analytics system that converts stored video into structured textual artifacts and retrieval-ready indexes. The system is designed around a practical operator workflow:
+## 1. Document Scope
 
-1. upload or register a video,
-2. run the processing pipeline,
-3. inspect summaries and per-segment results,
-4. search indexed segments,
-5. generate grounded reports,
-6. query the processed corpus through QA and RAG,
-7. export metrics and experiment results for research.
+This guide describes the SmartCampus V2T repository as it exists in code today. It is meant to be the main technical reference for:
 
-The repository contains three main runtime surfaces:
+- the overall purpose of the system,
+- the runtime surfaces that make up the application,
+- the functional responsibilities of the frontend, backend, worker, and core pipeline,
+- the configuration model,
+- the queue and job system,
+- the storage and artifact layout,
+- retrieval, grounded generation, and multilingual behavior,
+- the local operations and research tooling that ship with the repository.
 
-- a Streamlit operator interface,
-- a FastAPI backend,
-- a worker-based filesystem queue for asynchronous processing.
+This repository is not just a model wrapper, not just a Streamlit demo, and not just a set of scripts. It is a local end-to-end video analytics system that ingests stored video, turns it into structured semantic artifacts, derives multilingual views, builds retrieval indexes, and exposes grounded search and reporting workflows on top of those artifacts.
 
-The pipeline is already assembled end to end. The codebase includes preprocessing, clip building, VLM observation, semantic segment analysis, summary generation, machine translation, selective post-edit, hybrid retrieval, experiment utilities, and research metrics export.
+The current system is intentionally local-first. It favors inspectable filesystem state, explicit runtime configuration, and stable local entrypoints over distributed infrastructure.
 
-## 2. High-Level Architecture
+## 2. System Positioning
+
+SmartCampus V2T is composed of three main runtime surfaces:
+
+| Runtime surface | Entrypoint | Main role | Typical user or caller |
+| --- | --- | --- | --- |
+| Streamlit operator UI | `app/main.py` | interactive operator console | local user, demo operator, reviewer |
+| FastAPI backend | `backend/api.py` | stable HTTP surface over library, jobs, queue, retrieval, and reports | Streamlit UI, smoke scripts, local automation |
+| Background worker | `backend/worker.py` | asynchronous execution of process, translate, and index jobs | queue-driven internal runtime |
+
+These surfaces share one configuration model and one local artifact layout. The UI does not execute the heavy pipeline directly. Instead, it talks to the backend, the backend persists and exposes state, and the worker performs long-running processing in the background.
+
+## 3. Functional Coverage
+
+The repository currently implements the following major capabilities:
+
+| Capability | What it does | Main outputs | Primary code areas |
+| --- | --- | --- | --- |
+| Video library management | stores uploaded videos as managed local library entries | raw video files, per-video manifest | `app/view/storage.py`, `backend/api.py`, `src/utils/video_store.py` |
+| Video normalization | prepares videos for stable analysis | prepared frames, cached metadata | `src/video/io.py` |
+| Clip observation | runs the vision-language stage over temporal clips | clip observations in English | `src/video/describe.py`, `src/core/vlm_backend.py` |
+| Semantic structuring | converts raw clip observations into structured segments | segment rows with semantic fields | `src/llm/analyze.py`, `src/guard/*` |
+| Summary generation | produces one video-level summary | summary payload per language | `src/llm/summary.py` |
+| Translation | creates derived Russian and Kazakh views | translated segments and summaries | `backend/jobs/translate_runtime.py`, `src/translation/service.py` |
+| Index building | builds retrieval-ready sparse and dense state | index files, manifests, status | `src/search/builder.py`, `backend/jobs/index_runtime.py` |
+| Search | retrieves relevant events using text plus metadata filters | ranked search hits | `src/search/engine.py`, `backend/retrieval_runtime.py` |
+| Grounded reports | produces evidence-backed short reports | report text, citations, supporting hits | `backend/http/grounded.py` |
+| Grounded QA | answers questions against indexed evidence | answer text, citations, supporting hits | `backend/http/grounded.py` |
+| Grounded RAG assistant | supports assistant-style answers tied to retrieved evidence | answer text, context, citations, supporting hits | `backend/http/grounded.py`, `app/view/search.py` |
+| Metrics and experiment tooling | exports metrics, runs experiment matrices, evaluates relevance | CSV, JSON, zip bundles, comparison reports | `scripts/*` |
+
+One architectural rule is especially important:
+
+| Rule | Meaning |
+| --- | --- |
+| English-first canonical storage | the canonical structured artifacts are produced in English first |
+| Derived multilingual views | `ru` and `kz` outputs are derived from the English source artifacts |
+| Retrieval and grounding stay evidence-based | reports, QA, and assistant answers are expected to remain tied to retrieved video evidence rather than free-form generation |
+
+## 4. End-to-End Lifecycle
+
+The normal end-to-end lifecycle looks like this:
+
+1. A video is uploaded into the local library.
+2. The backend creates a `process` job and puts it into the filesystem queue.
+3. The worker leases the job and resolves the effective profile and variant.
+4. The video is normalized and prepared into analysis-ready frames.
+5. Clip windows and keyframes are built.
+6. The VLM generates raw English clip observations.
+7. Guard and schema helpers repair and sanitize generated payloads.
+8. The semantic layer turns the observations into structured segments.
+9. A video-level summary is generated.
+10. Artifacts, metrics, and manifests are persisted under `data/videos/<video_id>/`.
+11. Optional translation jobs derive `ru` and `kz` outputs.
+12. Optional index updates refresh the retrieval layer.
+13. The UI and API expose analytics, search, reports, QA, and RAG over the stored results.
+
+The same flow can be summarized as:
 
 ```text
-Streamlit UI
-  -> FastAPI API
-  -> filesystem queue + persisted jobs
-  -> worker runtime
-  -> video decode + clip builder + keyframe policy
-  -> VLM clip observation
+video upload
+  -> job creation
+  -> queue lease by worker
+  -> video preparation
+  -> clip building
+  -> VLM observation
   -> guard/schema repair
   -> semantic segment analysis
-  -> video summary generation
-  -> translation + selective post-edit
-  -> hybrid index build
+  -> summary generation
+  -> artifact persistence
+  -> translation fan-out
+  -> index build/update
   -> search / reports / QA / RAG
 ```
 
-The repository persists data, indexes, manifests, metrics, and experiment artifacts under `data/`.
+The lifecycle is deliberately asynchronous. Upload and job creation are quick UI/backend operations. Heavy processing happens later in the worker.
 
-## 3. Repository Structure
+## 5. Repository Structure
 
-### `app/`
+### 5.1 Top-level layout
 
-Streamlit UI layer.
+| Directory | Responsibility | Notes |
+| --- | --- | --- |
+| `app/` | Streamlit frontend | page modules, shared UI helpers, client logic |
+| `backend/` | FastAPI backend and worker orchestration | API entrypoint, retrieval runtime, job runtime helpers |
+| `src/` | core domain logic | runtime config, video pipeline, LLM logic, translation, search |
+| `configs/` | runtime profiles and variants | profile YAML, experimental overrides |
+| `scripts/` | local operations and research tooling | smoke checks, metrics, evaluation, experiment matrix |
+| `data/` | runtime state and artifacts | videos, jobs, queue, indexes, research outputs |
+| `docs/` | repository documentation | this guide and related docs |
+| `.agent/` | private project memory | working notes, decisions, state snapshots |
 
-- `main.py`: Streamlit entrypoint and page routing.
-- `api_client.py`: REST client for the backend.
-- `state.py`: session defaults for UI state.
-- `view/`: page-oriented renderers for overview, storage, video analytics, search, and reports surfaces.
-- `lib/`: formatting, i18n, and media helpers.
-- `assets/`: CSS, translations, and brand assets.
+### 5.2 Frontend layout
 
-### `backend/`
+| Path | Responsibility |
+| --- | --- |
+| `app/main.py` | one Streamlit entrypoint and top-level routing |
+| `app/api_client.py` | UI-facing client for backend HTTP routes |
+| `app/state.py` | shared UI session defaults |
+| `app/view/overview.py` | product and system overview page |
+| `app/view/storage.py` | library, upload, queue, and launch workflows |
+| `app/view/analytics.py` | playback, summary, metrics, and timeline surface |
+| `app/view/search.py` | search filters, results, and grounded assistant |
+| `app/view/reports.py` | grounded reporting surface |
+| `app/view/shared.py` | shared UI helpers, localized copy helpers, common components |
+| `app/lib/i18n.py` | UI text loading and translator helpers |
+| `app/lib/media.py` | CSS loading and local media helpers |
+| `app/assets/` | CSS, logo, and UI text assets |
 
-Backend HTTP and worker runtime.
+### 5.3 Backend layout
 
-- `api.py`: FastAPI endpoints for videos, jobs, queue, index, search, reports, QA, and RAG.
-- `worker.py`: polling loop and job dispatch.
-- `schemas.py`: request and response contracts.
-- `deps.py`: shared backend helpers.
-- `retrieval_runtime.py`: shared retrieval, grounded-generation, citation, and metrics-summary runtime helpers.
-- `http/`: API-facing helper modules for shared context loading and grounded response assembly.
-- `jobs/`: queue, worker, index, process, translate, metrics, and experimental execution helpers.
+| Path | Responsibility |
+| --- | --- |
+| `backend/api.py` | stable HTTP route registration |
+| `backend/worker.py` | main worker loop and dispatch |
+| `backend/deps.py` | shared config/path/dependency helpers for backend entrypoints |
+| `backend/retrieval_runtime.py` | retrieval, fallback, grounding, citation, and metrics helpers |
+| `backend/schemas.py` | request and response contracts |
+| `backend/http/common.py` | shared API helpers, upload normalization, grounded-response helpers |
+| `backend/http/grounded.py` | report, QA, and RAG response construction |
+| `backend/jobs/*` | queue, persistence, job execution, worker support, metrics, experimental fan-out |
 
-### `configs/`
+### 5.4 Core domain layout
 
-Runtime configuration source of truth.
+| Path | Responsibility |
+| --- | --- |
+| `src/core/*` | typed config, config loading, runtime flags, artifact types, VLM backend integration |
+| `src/video/*` | video preparation, clip generation, observation pipeline prompts and logic |
+| `src/llm/*` | semantic structuring and summary generation |
+| `src/guard/*` | safety gates and schema cleanup |
+| `src/translation/*` | translation routing, caching, and post-edit flow |
+| `src/search/*` | index builder, query engine, ranking, embedding, corpus helpers |
+| `src/utils/video_store.py` | canonical per-video storage layout and artifact persistence helpers |
 
-- `profiles/`: base runtime profiles.
-- `variants/`: experiment-specific overrides.
+## 6. Frontend / Operator Console
 
-Runtime selection uses one profile plus an optional variant override.
+### 6.1 UI bootstrap path
 
-### `src/`
+`app/main.py` is the only Streamlit entrypoint. At startup it:
 
-Core application logic.
+1. loads the effective config through `src/core/runtime.py`,
+2. applies CSS from `app/assets/styles.css`,
+3. loads localized UI text from `app/assets/ui_text.json`,
+4. binds default session state,
+5. builds the backend base URL from typed config,
+6. pings backend health,
+7. renders the global header,
+8. dispatches to the selected page module.
 
-- `core/`: typed runtime config plus config-loading entrypoints.
-- `video/`: decode entrypoints, clip building, and VLM observation.
-- `llm/`: semantic segment analysis and video summary generation.
-- `guard/`: policy checks and schema guards.
-- `translation/`: MT routing, cache, and selective post-edit.
-- `search/`: hybrid indexing and querying.
+### 6.2 Top-level pages
 
-### `scripts/`
+| Page | Module | User-facing purpose | Typical backend dependencies |
+| --- | --- | --- | --- |
+| Overview | `app/view/overview.py` | explains the system, its features, and processing stages | health only |
+| Storage | `app/view/storage.py` | upload videos, browse library, create jobs, manage queue | videos, jobs, queue |
+| Video Analytics | `app/view/analytics.py` | inspect one processed video, review summary, metrics, and timeline | outputs, metrics |
+| Search | `app/view/search.py` | run hybrid search, inspect hits, use the assistant | search, index rebuild, rag |
+| Reports | `app/view/reports.py` | generate concise grounded reports for one video or query | reports, outputs |
 
-Operational and research tooling.
+### 6.3 Page-by-page functional detail
 
-- `smoke_services.py`: API/UI smoke checks.
-- `collect_metrics.py`: export research-ready metrics bundles.
-- `run_experiment_matrix.py`: run profile/variant experiment matrices.
-- `eval_relevance.py`: offline retrieval evaluation with query-label datasets.
-- `build_comparison_report.py`: latest-per-config comparison reports.
+| Page | Main controls | Main outputs shown to user |
+| --- | --- | --- |
+| Overview | localized feature cards, stage switcher | product description, feature summary, stage walkthrough |
+| Storage | library filters, upload widget, profile selector, variant selector, queue controls | video cards, upload state, queue snapshot, processing actions |
+| Video Analytics | selected video, selected language, selected variant, timeline seek buttons | video playback, summary, readiness status, metrics rows, event timeline |
+| Search | query box, language selector, variant selector, event and risk filters, anomaly-only toggle, dedupe toggle, assistant input | search hits, metadata chips, evidence-linked assistant replies |
+| Reports | selected video, language, variant, report query | report text, citations, supporting evidence rows, metrics summary rows |
 
-### `data/`
+### 6.4 UI-to-backend interaction model
 
-Local runtime artifacts.
+| UI action | Backend route |
+| --- | --- |
+| load library | `GET /v1/videos` |
+| upload video | `POST /v1/videos/upload` |
+| delete video | `DELETE /v1/videos/{video_id}` |
+| fetch outputs for analytics/reports | `GET /v1/videos/{video_id}/outputs` |
+| fetch metrics summary | `GET /v1/videos/{video_id}/metrics-summary` |
+| create process or translate job | `POST /v1/jobs` |
+| read job status | `GET /v1/jobs/{job_id}` |
+| cancel job | `POST /v1/jobs/{job_id}/cancel` |
+| inspect queue | `GET /v1/queue` |
+| pause or resume queue | `POST /v1/queue/pause`, `POST /v1/queue/resume` |
+| reorder or remove queued jobs | `POST /v1/queue/move`, `DELETE /v1/queue/{job_id}` |
+| rebuild retrieval index | `POST /v1/index/rebuild` |
+| search | `POST /v1/search` |
+| grounded reports | `POST /v1/reports` |
+| grounded QA or assistant | `POST /v1/qa`, `POST /v1/rag` |
 
-- uploaded videos,
-- derived outputs,
-- queue and job records,
-- locks,
-- indexes,
-- caches,
-- research bundles and experiment artifacts.
+## 7. Backend HTTP Surface
 
-### `docs/`
+### 7.1 Health routes
 
-Project documentation.
+| Method | Route | Purpose |
+| --- | --- | --- |
+| `GET` | `/healthz` | non-versioned liveness |
+| `GET` | `/v1/health` | versioned health |
+| `GET` | `/v1/healthz` | versioned liveness |
 
-- `project_guide.md`: detailed architecture and operations guide.
+### 7.2 Video routes
 
-## 4. Runtime Model
+| Method | Route | Purpose | Main response |
+| --- | --- | --- | --- |
+| `GET` | `/v1/videos` | list managed videos | `List[VideoItem]` |
+| `POST` | `/v1/videos/upload` | upload and normalize one source file | `VideoItem` |
+| `DELETE` | `/v1/videos/{video_id}` | delete the local video tree | `{ ok: true }` |
+| `GET` | `/v1/videos/{video_id}/outputs` | read one language/variant output bundle | `VideoOutputs` |
+| `GET` | `/v1/videos/{video_id}/batch-manifest` | read experimental parent/child manifest | raw JSON payload |
+| `GET` | `/v1/videos/{video_id}/metrics-summary` | read normalized processing summary | `MetricsSummaryResponse` |
 
-### Profiles and Variants
+### 7.3 Job and queue routes
 
-The runtime is controlled by:
+| Method | Route | Purpose | Main response |
+| --- | --- | --- | --- |
+| `POST` | `/v1/jobs` | create and enqueue a job | `JobCreateResponse` |
+| `GET` | `/v1/jobs/{job_id}` | read job state | `JobStatus` |
+| `POST` | `/v1/jobs/{job_id}/cancel` | request cancellation | `JobCancelResponse` |
+| `GET` | `/v1/queue` | return queue snapshot | `QueueListResponse` |
+| `POST` | `/v1/queue/pause` | pause execution | `QueueStatus` payload |
+| `POST` | `/v1/queue/resume` | resume execution | `QueueStatus` payload |
+| `POST` | `/v1/queue/move` | reorder queued job | `QueueMoveResponse` |
+| `DELETE` | `/v1/queue/{job_id}` | remove a queued job and mark it canceled | raw JSON payload |
+
+### 7.4 Retrieval and grounded-generation routes
+
+| Method | Route | Purpose | Main response |
+| --- | --- | --- | --- |
+| `GET` | `/v1/index/status` | read current index build state | `IndexStatus` |
+| `POST` | `/v1/index/rebuild` | rebuild or refresh index | `IndexRebuildResponse` |
+| `POST` | `/v1/search` | hybrid search over processed artifacts | `SearchResponse` |
+| `POST` | `/v1/reports` | grounded report generation | `ReportResponse` |
+| `POST` | `/v1/qa` | grounded question answering | `QaResponse` |
+| `POST` | `/v1/rag` | grounded assistant response | `RagResponse` |
+
+### 7.5 Key request contracts
+
+#### Search request
+
+| Field | Meaning |
+| --- | --- |
+| `query` | main natural-language search input |
+| `top_k` | result limit |
+| `video_id` | restrict search to one video |
+| `language` | retrieval language |
+| `variant` | experimental variant namespace |
+| `dedupe` | deduplicate overlapping hits |
+| `start_sec`, `end_sec` | filter by time range |
+| `min_duration_sec`, `max_duration_sec` | filter by segment duration |
+| `event_type` | semantic event filter |
+| `risk_level` | risk filter |
+| `tags` | tag filter |
+| `objects` | object filter |
+| `people_count_bucket` | coarse people-count filter |
+| `motion_type` | motion filter |
+| `anomaly_only` | require anomaly-marked hits |
+
+#### Search hit payload
+
+| Field | Meaning |
+| --- | --- |
+| `video_id` | owning video |
+| `language` | language of the indexed artifact |
+| `start_sec`, `end_sec` | temporal boundaries |
+| `description` | human-readable segment description |
+| `score`, `sparse_score`, `dense_score` | ranking values |
+| `segment_id` | segment identifier when present |
+| `event_type`, `risk_level` | structured semantics |
+| `tags`, `objects` | semantic lists |
+| `people_count_bucket`, `motion_type` | additional structured metadata |
+| `anomaly_flag` | anomaly marker |
+| `variant` | variant namespace if not base |
+
+#### Grounded generation requests
+
+| Request model | Required input | Optional scoping |
+| --- | --- | --- |
+| `ReportRequest` | `query` or `video_id` | `language`, `variant`, `top_k` |
+| `QaRequest` | `question` | `video_id`, `language`, `variant`, `top_k` |
+| `RagRequest` | `query` | `video_id`, `language`, `variant`, `top_k` |
+
+#### Output bundle response
+
+`VideoOutputs` provides one language/variant-scoped output bundle. It can contain:
+
+| Field | Meaning |
+| --- | --- |
+| `manifest` | readiness/status payload |
+| `run_manifest` | config and execution metadata |
+| `batch_manifest` | experiment fan-out metadata |
+| `annotations` | structured segments returned to the UI |
+| `metrics` | raw metrics payload |
+| `global_summary` | final summary text |
+
+## 8. Queue, Jobs, and Worker Model
+
+### 8.1 Why the system uses a filesystem queue
+
+The project does not depend on an external broker such as Redis, RabbitMQ, or Celery. Queue state is persisted in local files. This keeps the system easy to run on a single machine, easy to inspect during development, and easy to demonstrate without extra infrastructure.
+
+### 8.2 Main backend job modules
+
+| Module | Role |
+| --- | --- |
+| `backend/jobs/store.py` | low-level job record and queue file primitives |
+| `backend/jobs/control.py` | locking, leasing, state transitions, cancellation checks |
+| `backend/jobs/queue_runtime.py` | queue snapshot, reorder, running-job discovery |
+| `backend/jobs/worker_runtime.py` | resolve effective config and service bundle per job |
+| `backend/jobs/process_runtime.py` | full process job execution |
+| `backend/jobs/translate_runtime.py` | translation job execution |
+| `backend/jobs/runtime_common.py` | shared finalize/index helpers |
+| `backend/jobs/index_runtime.py` | index status persistence |
+| `backend/jobs/experimental.py` | experimental fan-out helpers |
+
+### 8.3 Supported job types
+
+| Job type | Purpose | Typical creator |
+| --- | --- | --- |
+| `process` | run the full pipeline for one video | UI or backend API |
+| `translate` | derive a target-language view from English artifacts | process runtime or API |
+| `index` | rebuild retrieval indexes without reprocessing video | API or local maintenance |
+
+### 8.4 Job lifecycle states
+
+| State | Meaning |
+| --- | --- |
+| `queued` | job is waiting in the queue |
+| `running` | worker has leased the job and is executing it |
+| `done` | job completed successfully |
+| `failed` | job ended with an unrecovered error |
+| `cancel_requested` | cancellation was requested while work may still be in progress |
+| `canceled` | job was canceled and finalized |
+
+### 8.5 Worker roles
+
+`SMARTCAMPUS_WORKER_ROLE` can limit what a worker is allowed to execute.
+
+| Worker role | Allowed work |
+| --- | --- |
+| `all` | all job types |
+| `gpu` | `process` jobs |
+| `mt` | `translate` jobs |
+| `cpu` | `index` jobs |
+
+This allows local separation of heavy GPU-bound work, translation work, and index work when needed.
+
+### 8.6 Experimental fan-out behavior
+
+The worker can expand one parent experimental job into multiple child jobs when the active config indicates experiment mode. In practice:
+
+1. a parent job is created under an experiment-capable profile,
+2. the worker detects that the job should expand,
+3. child jobs are created for each configured variant,
+4. an experimental batch manifest is written,
+5. the parent job is marked done as an expansion step rather than as a normal process run.
+
+This is how comparative profile or variant runs are orchestrated without changing the public API surface.
+
+## 9. Configuration Model
+
+### 9.1 Effective config selection
+
+The effective runtime configuration is built in `src/core/runtime.py` and typed in `src/core/config.py`.
+
+Config resolution supports:
 
 - one active profile,
-- zero or one active variant override.
+- zero or one active variant,
+- YAML `extends` inheritance,
+- environment-level selection,
+- typed post-processing into a strongly typed config object.
 
-Profiles:
+### 9.2 Main selectors
+
+| Variable | Role |
+| --- | --- |
+| `SMARTCAMPUS_PROFILE` | select the active profile |
+| `SMARTCAMPUS_VARIANT` | select the active variant |
+| `SMARTCAMPUS_WORKER_ROLE` | restrict worker execution role |
+
+### 9.3 Typed config blocks
+
+| Config block | What it controls |
+| --- | --- |
+| `paths` | project root, `data/`, `models/`, `indexes/`, assets, config folders |
+| `ui` | UI languages, asset paths, CSS path, UI text path |
+| `backend` | backend host, scheme, and port |
+| `search` | embedding, reranking, fusion, dedupe, fallback languages, dense input mode |
+| `video` | decode, resize, frame gating, face blur, anonymization, save policy |
+| `clips` | clip windowing, stride, keyframe policy |
+| `model` | VLM model path, device, dtype, batch policy, inference limits |
+| `llm` | semantic/summarization backend and generation settings |
+| `guard` | query and output safety gating |
+| `runtime` | seed, threading, TF32, matmul precision, compile flags, metrics sampling |
+| `translation` | MT backend, routes, batch size, cache, query-time translation, post-edit policy |
+| `jobs` | job record directory |
+| `queue` | queue directory |
+| `locks` | worker lock directory |
+| `worker` | poll interval, lease interval, concurrency policy |
+| `index` | index auto-update policy |
+| `webhook` | outbound notification behavior |
+| `experiment` | compare mode and known variant ids |
 
-- `main`: default runtime profile.
-- `experimental`: experiment-oriented profile with variant fan-out support.
+### 9.4 Active profiles in the repository
 
-Variants:
+| Profile | Role |
+| --- | --- |
+| `configs/profiles/main.yaml` | default working runtime |
+| `configs/profiles/experimental.yaml` | experiment-oriented profile with overwrite and repeated metrics enabled |
 
-- `exp_a`
-- `exp_b`
-- `exp_c`
+### 9.5 Variants
 
-The effective configuration is the merged result of:
+Variant files under `configs/variants/` provide explicit overrides. They are used for controlled comparisons and can receive their own output namespaces and index state.
 
-1. selected profile,
-2. optional `extends` chain inside YAML,
-3. optional variant override.
+## 10. Core Processing Pipeline
 
-Typed config objects are exposed through `src/core/config.py`. Loading and merging logic lives in `src/core/runtime.py`.
+The `process` job is the main pipeline path. It is orchestrated in `backend/jobs/process_runtime.py` but uses services and logic from `src/`.
 
-### Worker Roles
+### 10.1 Stage map
 
-Workers can be restricted by role:
+| Stage | Main code | Input | Output |
+| --- | --- | --- | --- |
+| context resolution | `backend/jobs/worker_runtime.py` | job record, active profile/variant | effective config and service bundle |
+| video preparation | `src/video/io.py` | raw video file | prepared frames and video metadata |
+| clip building | `src/video/clips.py` | prepared video frames | clip windows and keyframes |
+| clip observation | `src/video/describe.py`, `src/core/vlm_backend.py` | clip/keyframe payloads | raw English observations |
+| schema repair and guarding | `src/guard/service.py`, `src/guard/schemas.py` | raw generated payloads | normalized, safe payloads |
+| segment structuring | `src/llm/analyze.py` | raw observations | structured segment rows |
+| summary generation | `src/llm/summary.py` | structured segments | video summary |
+| persistence | `src/utils/video_store.py` | all generated artifacts | saved manifests, rows, summary, metrics |
+| optional indexing | `src/search/builder.py` | stored segments | updated index state |
+| optional translation | `backend/jobs/translate_runtime.py` | English outputs | `ru`/`kz` derived outputs |
 
-- `gpu` -> `process`
-- `mt` -> `translate`
-- `cpu` -> `index`
-- `all` -> all job types
+### 10.2 Video preparation behavior
 
-Role selection is controlled through `SMARTCAMPUS_WORKER_ROLE`.
+`src/video/io.py` is one of the most important domain modules. It is responsible for:
+
+- resolving the source video path,
+- normalizing fps and decode behavior,
+- resizing and letterboxing frames,
+- filtering dark or low-information frames,
+- measuring blur and motion,
+- applying optional face anonymization,
+- saving prepared frames and optionally smaller helper frames,
+- writing and reusing cache metadata.
 
-### Canonical Language Model
+This stage is what lets later VLM and semantic steps operate on a more stable and consistent representation of the source video.
 
-The system stores and indexes a canonical English artifact view. Additional `ru` and `kz` outputs are generated as derived views. This keeps indexing and storage normalized while still exposing multilingual operator outputs.
+### 10.3 Observation and semantic stages
+
+The system separates two conceptual layers:
+
+| Layer | Purpose |
+| --- | --- |
+| VLM observation | describe what is visually present in clip windows |
+| semantic structuring | turn the observation layer into segments with event types, tags, risk, people buckets, motion, and anomaly cues |
 
-## 5. Processing Pipeline
+This separation is important because the retrieval and reporting layers depend on structured segment data, not only on raw captions.
 
-### 5.1 Process Job
+### 10.4 Summary stage
 
-The `process` job is the main end-to-end path.
+The summary stage creates a video-level summary from the structured segments. The summary is stored independently from the segment rows so it can be used in analytics and report views without re-running the entire segment list.
 
-1. The worker resolves the effective config for the job.
-2. The source video is located in `data/videos/<video_id>/raw/`.
-3. Decode normalization is applied with explicit fps, resolution, and pixel format handling.
-4. Frame quality filters are applied for dark frames, low-motion frames, and blur flags.
-5. Clip windows are produced from the processed frame stream.
-6. Keyframes are selected according to the configured keyframe policy.
-7. The VLM generates strict English clip observations (`description`, `anomaly_flag`, `anomaly_confidence`, `anomaly_notes`).
-8. Clip observations are sanitized and merged into larger segments when adjacent windows are semantically close.
-9. Segment schema payloads are built and enriched by the semantic LLM layer.
-10. A video summary is generated from structured segments, not from the VLM stage.
-11. Artifacts and manifests are written to disk.
-12. Optional index updates and translation fan-out are triggered.
-13. Metrics are persisted.
+## 11. Translation Layer
 
-Key implementation points:
+Translation is intentionally downstream of the English pipeline. The system first builds canonical English artifacts, then derives localized views.
 
-- decode entrypoint: `src/video/io.py`
-- clip building: `src/video/clips.py`
-- VLM observation: `src/video/describe.py`
-- segment analysis: `src/llm/analyze.py`
-- summary generation: `src/llm/summary.py`
-- guard/schema repair: `src/guard/service.py`, `src/guard/schemas.py`
+### 11.1 Translation flow
 
-### 5.2 Translate Job
+| Step | Description |
+| --- | --- |
+| load source artifacts | read English segments and summaries |
+| route selection | resolve the MT route for the requested language pair |
+| segment translation | translate segment descriptions and related fields |
+| selective post-edit | optionally improve specific outputs such as summaries, reports, QA, or selected segments |
+| output persistence | write translated segment and summary artifacts |
+| optional target-language indexing | rebuild or update retrieval state for the target language |
 
-The `translate` job consumes existing source outputs.
+### 11.2 Translation runtime settings
 
-1. Source segments and summary are loaded.
-2. MT routes are selected from config.
-3. Segment and summary translation is executed.
-4. Selective LLM post-edit is applied to configured targets.
-5. Translated artifacts are persisted.
-6. Optional target-language index updates are performed.
-7. Translation metadata and timings are stored in metrics.
+The active main profile currently uses:
 
-Implementation point:
+| Setting area | Current intent |
+| --- | --- |
+| backend | `ctranslate2` |
+| source language | English |
+| target languages | Russian and Kazakh |
+| query-time translation | enabled |
+| offline translation | enabled |
+| post-edit targets | summaries, reports, QA, selected segments |
 
-- `src/translation/service.py`
+### 11.3 Why English remains canonical
 
-### 5.3 Index Job
+This design avoids having multiple primary sources of truth and keeps the indexing path coherent. It also makes experiment comparison easier because translated views can be regenerated from the same English base artifacts.
 
-The `index` job rebuilds or refreshes retrieval indexes from stored outputs.
+## 12. Indexing and Retrieval
 
-1. Segment files are discovered for the target language and variant.
-2. Searchable text and dense input text are built.
-3. BM25 and dense representations are stored.
-4. Metadata and manifest files are updated.
-5. Index state is written for API and UI inspection.
+### 12.1 Index builder responsibilities
 
-Implementation point:
+`src/search/builder.py` is responsible for:
 
-- `src/search/builder.py`
+- scanning the stored segment sources,
+- normalizing searchable text,
+- producing sparse and dense retrieval inputs,
+- updating manifests and config fingerprints,
+- writing index metadata and embeddings,
+- supporting no-change detection and incremental-style refresh logic.
 
-## 6. Key Runtime Concepts
+### 12.2 Query engine responsibilities
 
-### Decode Normalization
+`src/search/engine.py` is responsible for:
 
-The system explicitly controls:
+- loading the active index and config,
+- executing sparse retrieval,
+- executing dense retrieval,
+- combining results through fusion,
+- optionally reranking,
+- deduplicating overlapping hits,
+- returning ranked hits with structured metadata.
 
-- fps,
-- resize,
-- pixel format.
+### 12.3 Retrieval stack
 
-This stabilizes downstream behavior across runs and source files.
+| Module | Responsibility |
+| --- | --- |
+| `src/search/corpus.py` | derive searchable and dense text from segment artifacts |
+| `src/search/embed.py` | embedding backend selection and embedding cache behavior |
+| `src/search/rank.py` | fusion, reranking, dedupe |
+| `src/search/store.py` | retrieval persistence helpers |
+| `src/search/types.py` | internal retrieval types |
 
-### Keyframe Policy
+### 12.4 Search filters exposed by the system
 
-Clip keyframes are selectable through config. Current policies include:
+| Filter family | Fields |
+| --- | --- |
+| scope | `video_id`, `language`, `variant` |
+| ranking | `top_k`, `dedupe` |
+| temporal | `start_sec`, `end_sec`, `min_duration_sec`, `max_duration_sec` |
+| semantics | `event_type`, `risk_level`, `tags`, `objects`, `people_count_bucket`, `motion_type` |
+| anomaly behavior | `anomaly_only` |
 
-- `first`
-- `middle`
-- `last`
-- `sharpest`
+### 12.5 Language and fallback behavior
 
-### Selective Post-Edit
+`backend/retrieval_runtime.py` owns the request-side retrieval logic. It handles:
 
-Translation does not send every segment through LLM post-edit. Instead, configured subsets are post-edited. This keeps quality improvements focused on the outputs that matter most while controlling cost and latency.
+- request language normalization,
+- variant-aware index resolution,
+- query translation when configured,
+- fallback search in alternate languages,
+- LLM and guard service loading for grounded generation,
+- hit conversion into API schema objects,
+- citation and supporting-hit construction.
 
-### Hybrid Retrieval
+## 13. Grounded Reports, QA, and RAG
 
-Search combines:
+Grounded response generation is implemented by `backend/http/grounded.py` on top of `backend/retrieval_runtime.py`.
 
-- sparse BM25,
-- dense embedding search,
-- metadata filters,
-- reranking.
+### 13.1 Modes
 
-The search stack supports dense input mode `text_keyframe`, which augments text retrieval with lightweight keyframe-derived visual tokens.
+| Mode | Entry route | Purpose |
+| --- | --- | --- |
+| report | `/v1/reports` | produce a short evidence-backed report |
+| QA | `/v1/qa` | answer a direct question over retrieved evidence |
+| RAG assistant | `/v1/rag` | return an assistant-style grounded answer plus context |
 
-## 7. Main Files And Their Roles
+### 13.2 Shared grounded behavior
 
-### API and Job Surfaces
+All grounded modes share the following core behavior:
 
-- `backend/api.py`
-  Central HTTP surface for ingest, queue control, outputs, metrics summary, search, reports, QA, and RAG.
+- query guarding before retrieval,
+- retrieval of supporting evidence,
+- context assembly from retrieved hits,
+- optional LLM generation when available,
+- deterministic fallback text generation when full generation is unavailable,
+- output translation into the requested language,
+- output guarding,
+- citation and supporting-hit payload assembly.
 
-- `backend/retrieval_runtime.py`
-  Shared retrieval/runtime layer for engine lookup, fallback-language search, grounded generation, hit serialization, and metrics-summary shaping.
+### 13.3 Grounding principle
 
-- `backend/http/common.py`, `backend/http/grounded.py`
-  API-facing support modules for shared context loading and grounded response orchestration.
+The point of this layer is not only to generate text. The point is to generate text that stays tied to concrete retrieved video evidence. That is why the API responses return citations and supporting hits alongside the final text.
 
-- `backend/jobs/process_runtime.py`
-  The main execution layer for `process` jobs.
+## 14. Artifact and Storage Model
 
-- `backend/jobs/translate_runtime.py`
-  The execution layer for translation jobs.
+All runtime state is stored under `data/`.
 
-- `backend/jobs/runtime_common.py`
-  Shared finalization helpers and common worker-side job runtime utilities.
-
-- `backend/worker.py`
-  The queue poller and dispatcher.
-
-- `backend/jobs/worker_runtime.py`
-  Runtime context resolver for profile/variant-specific service bundles.
-
-### Core Pipeline
-
-- `src/video/describe.py`
-  Main VLM observation pipeline for clip-level descriptions and anomaly signals.
-
-- `src/video/io.py`
-  Decode normalization entrypoint and frame preparation access.
-
-- `src/llm/analyze.py`
-  Structured segment enrichment, event classification, risk classification, and internal retrieval tags.
-
-- `src/llm/summary.py`
-  Video-level summary generation from structured segments.
-
-### Search
-
-- `src/search/builder.py`
-  Index build/update logic and embedder integration.
-
-- `src/search/engine.py`
-  Query-time hybrid retrieval and rerank flow.
-
-### Translation
-
-- `src/translation/service.py`
-  Translation routing, cache handling, and selective post-edit.
-
-## 8. Artifact Model
-
-The local artifact layout is centered under `data/`.
+### 14.1 Per-video layout
 
 ```text
-data/
-  videos/<video_id>/
-    raw/
-    cache/
-    outputs/
-      clip_observations.json
-      segments/
-      summaries/
-      metrics.json
-      manifest.json
-      run_manifest.json
-      variants/<variant_id>/...
-  indexes/
+data/videos/<video_id>/
+  manifest.json
+  raw/
+    <original-or-normalized-video-file>
   cache/
-  jobs/
-  queue/
-  locks/
-  research/
+    ...
+  outputs/
+    clip_observations.json
+    manifest.json
+    metrics.json
+    run_manifest.json
+    experimental_manifest.json
+    segments/
+      en.jsonl.zst or en.jsonl.gz
+      ru.jsonl.zst or ru.jsonl.gz
+      kz.jsonl.zst or kz.jsonl.gz
+    summaries/
+      en.json
+      ru.json
+      kz.json
+    variants/
+      <variant_id>/
+        clip_observations.json
+        manifest.json
+        metrics.json
+        run_manifest.json
+        segments/
+        summaries/
 ```
 
-### Important Output Files
+### 14.2 Important per-video files
 
-- `manifest.json`
-  Language-level output status and artifact availability.
+| File | Meaning |
+| --- | --- |
+| `manifest.json` at video root | basic library entry metadata |
+| `raw/*` | uploaded or normalized source video |
+| `outputs/clip_observations.json` | raw VLM output before final structuring |
+| `outputs/segments/<lang>.*` | structured segment rows for one language |
+| `outputs/summaries/<lang>.json` | summary payload for one language |
+| `outputs/metrics.json` | timings, counters, and execution metadata |
+| `outputs/manifest.json` | output readiness and status information |
+| `outputs/run_manifest.json` | run metadata such as profile, variant, config fingerprint, and references |
+| `outputs/experimental_manifest.json` | experiment parent/child tracking |
 
-- `run_manifest.json`
-  Effective profile, variant, config fingerprint, and artifact paths.
+### 14.3 Global runtime state
 
-- `metrics.json`
-  Runtime metrics for the process or translation path, including stage timings.
+| Path | Purpose |
+| --- | --- |
+| `data/jobs/` | persisted job records |
+| `data/queue/` | queue files that define execution order |
+| `data/locks/` | worker lease and lock state |
+| `data/indexes/` | retrieval indexes |
+| `data/cache/` | shared caches outside per-video trees |
+| `data/thumbs/` | UI thumbnails |
+| `data/research/` | experiment outputs and metrics bundles |
 
-- `clip_observations.json`
-  Raw VLM observations per clip before semantic consolidation and video-level summary.
+## 15. Metrics, Research, and Experiment Tooling
 
-- `batch_manifest.json`
-  Experimental parent/child fan-out manifest for variant runs.
+The repository contains dedicated scripts for operating and evaluating the system beyond the UI.
 
-## 9. Metrics And Research Exports
+### 15.1 Scripts
 
-Metrics now expose:
+| Script | Purpose |
+| --- | --- |
+| `scripts/smoke_services.py` | quick smoke check for API and UI availability |
+| `scripts/collect_metrics.py` | export normalized metrics bundles from stored outputs |
+| `scripts/run_experiment_matrix.py` | orchestrate repeated runs across profiles, variants, and selected videos |
+| `scripts/eval_relevance.py` | evaluate retrieval quality offline from experiment outputs |
+| `scripts/build_comparison_report.py` | produce compact comparison summaries for experiment runs |
+| `scripts/check_ui_sanity.py` | manual structural validation of the UI layer |
+| `scripts/check_backend_sanity.py` | manual structural validation of backend imports and duplicate definitions |
 
-- stage-level timings,
-- throughput-style derived metrics,
-- translation totals,
-- indexing totals,
-- stage aggregates across runs,
-- config-level comparison outputs.
+### 15.2 Typical research outputs
 
-### Metrics Bundle
+Metrics and experiment flows can produce:
 
-Generate a research bundle:
+| Output | Meaning |
+| --- | --- |
+| `metrics_runs.csv` | per-run metrics overview |
+| `metrics_stage_runs.csv` | per-stage metrics rows for each run |
+| `metrics_stage_aggregate.csv` | aggregated stage metrics |
+| `metrics_snapshot.json` | normalized metrics snapshot |
+| `metrics_by_video.json` | metrics grouped by video |
+| `metrics_by_profile_variant.json` | metrics grouped by config combination |
+| `system_metrics.json` | overall system summary |
+| comparison CSV and JSON | compact cross-run comparison outputs |
 
-```powershell
-python scripts/collect_metrics.py
-```
+## 16. Startup and Deployment Model
 
-Bundle outputs are written under `data/research/metrics_bundle/`.
-
-Important files:
-
-- `metrics_runs.csv`
-- `metrics_stage_runs.csv`
-- `metrics_stage_aggregate.csv`
-- `metrics_snapshot.json`
-- `metrics_by_video.json`
-- `metrics_by_profile_variant.json`
-- `system_metrics.json`
-
-### Experiment Matrix
-
-Run a local experiment matrix:
-
-```powershell
-python scripts/run_experiment_matrix.py --video-ids 20 --profiles main,experimental
-```
-
-The script:
-
-- submits jobs,
-- waits for terminal outputs,
-- snapshots run artifacts,
-- refreshes the metrics bundle,
-- optionally runs relevance evaluation,
-- builds a comparison report.
-
-### Relevance Evaluation
-
-Run offline retrieval evaluation:
-
-```powershell
-python scripts/eval_relevance.py --labels data/research/relevance/queries_labels.json --profiles main --video-ids 20
-```
-
-The evaluator computes:
-
-- `P@K`
-- `Recall@K`
-- `nDCG@K`
-- `MRR`
-
-### Config-Level Comparison
-
-Build a comparison report:
-
-```powershell
-python scripts/build_comparison_report.py --experiment-manifest data/research/experiments/<label>/experiment.json
-```
-
-Storage behavior:
-
-- the same config key overwrites its previous latest result,
-- a new config key creates a new file,
-- a global comparison report is built over the latest saved config rows.
-
-## 10. Frontend Surface
-
-The UI remains on Streamlit and is structured as an operator console rather than a public product site.
-
-Main tabs:
-
-- overview: system explanation and pipeline storytelling
-- storage: video library, upload, queue, and process execution
-- video analytics: inspection of one processed video
-- search: retrieval plus grounded assistant
-- reports / metrics: generated reports, summaries, and metrics
-
-The UI is now organized internally into:
-
-- page-oriented `app/view/` modules,
-- shared helper libraries under `app/lib/`,
-- one thin Streamlit entrypoint in `app/main.py`.
-
-This keeps Streamlit while avoiding both the earlier monolithic UI module and unnecessary micro-files.
-
-## 11. Configuration Areas
-
-The most important config surfaces are:
-
-- `paths`
-  Filesystem roots for runtime artifacts and models.
-
-- `video`
-  Decode resolution, fps, filters, anonymization, JPEG settings.
-
-- `clips`
-  Windowing and keyframe selection policy.
-
-- `model`
-  VLM model path, dtype, batch size, decode settings.
-
-- `llm`
-  Summary and structuring backend settings.
-
-- `translation`
-  MT backends, language routes, cache behavior, post-edit targets.
-
-- `search`
-  Dense model, reranker, fusion weights, dedupe, dense input mode.
-
-- `runtime`
-  overwrite behavior, metrics controls, reproducibility flags.
-
-- `worker`
-  queue polling, leasing, and concurrency behavior.
-
-## 12. Running The System
-
-### Local Multi-Process Run
-
-Terminal 1:
+### 16.1 Manual local startup
 
 ```powershell
 python -m uvicorn backend.api:app --host 127.0.0.1 --port 8000
-```
-
-Terminal 2:
-
-```powershell
 python -m backend.worker
-```
-
-Terminal 3:
-
-```powershell
 python -m streamlit run app/main.py --server.port 8501
 ```
 
-### Convenience Start
+### 16.2 One-command local startup
 
 ```powershell
 run_all.bat
 ```
 
-### Docker
+`run_all.bat` is the convenience local launcher. Manual sanity scripts remain available, but they are not mandatory for startup.
+
+### 16.3 Docker startup
 
 ```powershell
 docker compose up --build
 ```
 
-Optional profiles:
+Optional compose profiles currently include:
 
 ```powershell
 docker compose --profile with_vllm up --build
 docker compose --profile with_ct2 up --build
 ```
 
-## 13. API Surface Summary
+## 17. Architectural Characteristics
 
-### Health
+The current system has several defining characteristics that matter when reading or extending the codebase:
 
-- `/healthz`
-- `/v1/health`
-- `/v1/healthz`
+| Characteristic | Practical consequence |
+| --- | --- |
+| local-first design | runtime state is inspectable directly on disk |
+| filesystem queue | job orchestration stays simple and demo-friendly |
+| English-first canonical artifacts | translation is derived rather than primary |
+| grounded retrieval layer | generated responses are designed to stay tied to evidence |
+| shared config for UI, backend, and worker | one profile/variant model drives the whole local stack |
+| page-oriented UI layout | frontend logic is grouped by operator workflow rather than by widget type |
+| domain-oriented `src/` layout | video, LLM, translation, search, and config logic are kept in separate domains |
 
-### Videos
+## 18. Practical Summary
 
-- `GET /v1/videos`
-- `POST /v1/videos/upload`
-- `DELETE /v1/videos/{video_id}`
-- `GET /v1/videos/{video_id}/outputs`
-- `GET /v1/videos/{video_id}/batch-manifest`
-- `GET /v1/videos/{video_id}/metrics-summary`
+SmartCampus V2T is a complete local video analytics stack. In concrete terms, it:
 
-### Jobs And Queue
+- manages a local video library,
+- processes video into structured semantic artifacts,
+- generates summaries and multilingual views,
+- builds retrieval indexes,
+- exposes analytics, search, reports, QA, and assistant workflows,
+- supports experiment comparison and metrics export,
+- keeps runtime state local and inspectable.
 
-- `POST /v1/jobs`
-- `GET /v1/jobs/{job_id}`
-- `POST /v1/jobs/{job_id}/cancel`
-- `GET /v1/queue`
-- `POST /v1/queue/pause`
-- `POST /v1/queue/resume`
-- `POST /v1/queue/move`
-- `DELETE /v1/queue/{job_id}`
+If a new developer needs a starting mental model, the shortest accurate description is:
 
-### Index
-
-- `GET /v1/index/status`
-- `POST /v1/index/rebuild`
-
-### Retrieval And Grounded Generation
-
-- `POST /v1/search`
-- `POST /v1/reports`
-- `POST /v1/qa`
-- `POST /v1/rag`
-
-## 14. Operational Notes
-
-- The repository is artifact-heavy by design.
-- `data/` is ignored by git and acts as the runtime workspace.
-- `__pycache__/` is ignored by git and should not be treated as source structure.
-
-## 15. Current Architectural Pressure Points
-
-The codebase is functional, but several modules still need discipline because they carry a lot of orchestration:
-
-- `backend/jobs/process_runtime.py`
-- `src/search/builder.py`
-- `src/search/engine.py`
-
-`backend/retrieval_runtime.py` is now flatter than before and can remain one large helper module unless a future change introduces a clear new seam. The main remaining candidates for internal reorganization are the files above, plus the future addition of a real automated test layer.
-
-## 16. Technology Stack
-
-- API: FastAPI, Pydantic, Uvicorn
-- UI: Streamlit
-- Models: PyTorch, Transformers, Qwen family
-- Video: FFmpeg, OpenCV
-- Translation: CTranslate2, sentencepiece, sacremoses
-- Retrieval: BM25 plus dense embeddings plus rerank
-- Storage: JSON artifacts and SQLite-based caches where applicable
-- Containers: Docker, Docker Compose
-
-## 17. Development Guidance
-
-- Treat the current profile and variant system as the runtime source of truth.
-- Keep runtime behavior stable during structural refactors.
-- Prefer explicit, typed, low-magic code.
-- Keep manifests and metrics consistent with artifact writes.
-- Use the scripts in `scripts/` for research and operational work instead of creating parallel ad hoc entrypoints.
+1. `app/` is the operator console.
+2. `backend/` is the HTTP and job orchestration layer.
+3. `src/` is the actual video, LLM, translation, and search logic.
+4. `data/` is the runtime source of truth for artifacts and queue state.
+5. Processing starts in the queue, becomes structured artifacts, then becomes searchable and explainable evidence.

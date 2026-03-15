@@ -34,6 +34,7 @@ from backend.jobs.stage_metrics import (
     record_stage as _record_stage,
 )
 from src.core.artifacts import build_segment_schema_v2
+from src.search.embed import select_embedding_model_ref
 from src.video.clips import build_clips_from_video_meta
 from src.video.io import preprocess_video
 from src.utils.video_store import (
@@ -81,10 +82,11 @@ def _guard_summary_payload(cfg: Any, payload: Optional[Dict[str, Any]], guard_se
         return payload
 
     guarded = dict(payload)
+    backend_pref = str(getattr(getattr(cfg, "runtime", None), "worker_output_guard_backend", "rules") or "rules")
     for key in ("global_summary", "summary"):
         text = str(guarded.get(key) or "")
         if text:
-            guarded[key] = guard_service.sanitize_output(text)
+            guarded[key] = guard_service.sanitize_output(text, backend_pref=backend_pref)
     return guarded
 
 
@@ -281,7 +283,28 @@ def _enqueue_translation_jobs(
             language=tgt_lang,
             source_language=base_lang,
             extra={**job_extra, "force_overwrite": force_overwrite},
+            priority="020",
         )
+
+
+def _enqueue_summary_polish_job(context: _ProcessJobContext) -> None:
+    """Schedule optional summary refinement after the main process job is already complete."""
+
+    service = context.services.summary_service
+    if not bool(getattr(service, "polish_enabled", False)):
+        return
+
+    create_job(
+        context.paths,
+        video_id=context.video_id,
+        job_type="summary_polish",
+        profile=context.cfg.active_profile,
+        variant=context.variant_id,
+        language=context.base_lang,
+        source_language=None,
+        extra={"profile": context.cfg.active_profile, "variant": context.variant_id},
+        priority=str(getattr(context.cfg.runtime, "summary_polish_priority", "025") or "025"),
+    )
 
 
 def _cancel_job_and_release(paths: Any, job_id: str, webhook_cfg: Dict[str, Any], message: str) -> None:
@@ -503,7 +526,7 @@ def _persist_process_outputs(
     clip_keyframes: List[Any],
     metric_payload: Dict[str, Any],
 ) -> Path:
-    set_state(context.paths, context.job_id, "running", stage="saving", progress=0.85, message="Saving outputs")
+    set_state(context.paths, context.job_id, "running", stage="persist_observations", progress=0.55, message="Persisting clip observations")
     preprocessing_meta, metrics_meta = _prepare_process_metadata(
         context.cfg,
         video_meta=video_meta,
@@ -522,6 +545,17 @@ def _persist_process_outputs(
             observation_rows,
         )
         _record_stage(metric_payload, "write_clip_observations", time.perf_counter() - observations_write_started)
+        update_outputs_manifest(
+            context.videos_dir,
+            context.video_id,
+            context.base_lang,
+            variant=context.variant_id,
+            source_lang=None,
+            model_name=str(context.cfg.model.model_name_or_path),
+            status="observed",
+            job_id=context.job_id,
+            note="clip_observations_ready",
+        )
 
     segment_payloads = _build_process_segment_payloads(
         context.cfg,
@@ -534,6 +568,7 @@ def _persist_process_outputs(
     )
     _record_stage(metric_payload, "build_segment_schema", time.perf_counter() - build_segments_started)
 
+    set_state(context.paths, context.job_id, "running", stage="structuring", progress=0.66, message="Structuring segments")
     structuring_started = time.perf_counter()
     segment_payloads = context.services.structuring_service.enrich_segments(segment_payloads)
     structuring_elapsed = time.perf_counter() - structuring_started
@@ -547,13 +582,26 @@ def _persist_process_outputs(
             mm["structuring_time_sec"] = avg_structuring_time
             segment["metrics_meta"] = mm
 
+    set_state(context.paths, context.job_id, "running", stage="persist_segments", progress=0.78, message="Saving segments")
     write_segments_started = time.perf_counter()
     base_segments_path = segments_path(context.videos_dir, context.video_id, context.base_lang, variant=context.variant_id)
     write_segments(base_segments_path, segment_payloads)
     _record_stage(metric_payload, "write_segments", time.perf_counter() - write_segments_started)
+    update_outputs_manifest(
+        context.videos_dir,
+        context.video_id,
+        context.base_lang,
+        variant=context.variant_id,
+        source_lang=None,
+        model_name=str(context.cfg.model.model_name_or_path),
+        status="segments_ready",
+        job_id=context.job_id,
+        note="segments_ready",
+    )
 
+    set_state(context.paths, context.job_id, "running", stage="summary", progress=0.86, message="Building summary")
     summary_started = time.perf_counter()
-    summary_payload = context.services.summary_service.build_summary(
+    summary_payload = context.services.summary_service.build_deterministic_summary(
         video_id=context.video_id,
         language=context.base_lang,
         duration_sec=float(getattr(video_meta, "duration_sec", 0.0) or 0.0),
@@ -586,7 +634,12 @@ def _persist_process_outputs(
             "model_ids": {
                 "vision": str(context.cfg.model.model_name_or_path),
                 "llm": str(context.cfg.llm.model_id),
-                "embedding": str(context.cfg.search.embedding_model_id),
+                "embedding": str(
+                    select_embedding_model_ref(
+                        context.cfg.search,
+                        models_dir=Path(context.cfg.paths.models_dir),
+                    )
+                ),
                 "reranker": str(context.cfg.search.reranker_model_id),
                 "translation_backend": str(context.cfg.translation.backend),
             },
@@ -621,6 +674,14 @@ def _persist_process_outputs(
 def _run_optional_index(context: _ProcessJobContext, metric_payload: Dict[str, Any]) -> Optional[float]:
     if not context.auto_index:
         return None
+
+    for service_name in ("pipeline", "summary_service", "guard_service"):
+        service = getattr(context.services, service_name, None)
+        if service is not None and hasattr(service, "release"):
+            try:
+                service.release()
+            except Exception:
+                pass
 
     set_state(context.paths, context.job_id, "indexing", stage="indexing", progress=0.92, message="Index update")
     index_started = time.perf_counter()
@@ -774,3 +835,4 @@ def run_process_job(
         index_time=index_time,
     )
     _finalize_process_success(context, metrics_target)
+    _enqueue_summary_polish_job(context)

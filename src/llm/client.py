@@ -10,6 +10,7 @@ Purpose:
 from __future__ import annotations
 
 import json
+import gc
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -108,6 +109,43 @@ class LLMClient:
         text = self.generate_text(prompt)
         return self._parse_json_object(text)
 
+    def cache_key(self) -> str:
+        """Return the stable local cache key for the transformers backend."""
+
+        return str(self.local_model_dir or self.model_id)
+
+    def is_loaded(self) -> bool:
+        """Return whether the local transformers backend is currently resident."""
+
+        return self.cache_key() in _TRANSFORMERS_CACHE
+
+    def release(self) -> None:
+        """Unload the resident local transformers backend for this client."""
+
+        cached = _TRANSFORMERS_CACHE.pop(self.cache_key(), None)
+        if cached is None:
+            return
+
+        tokenizer, model = cached
+        try:
+            if model is not None and hasattr(model, "cpu"):
+                model.cpu()
+        except Exception:
+            pass
+
+        del tokenizer
+        del model
+        gc.collect()
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                if hasattr(torch.cuda, "ipc_collect"):
+                    torch.cuda.ipc_collect()
+        except Exception:
+            pass
+
     def _generate_text_vllm(self, prompt: str) -> str:
         """Call a vLLM OpenAI-compatible endpoint."""
 
@@ -140,6 +178,8 @@ class LLMClient:
             "temperature": float(self.temperature),
             "top_p": float(self.top_p),
         }
+        if float(self.timeout_sec or 0) > 0:
+            generation_kwargs["max_time"] = float(self.timeout_sec)
         if not generation_kwargs["do_sample"]:
             generation_kwargs.pop("temperature", None)
             generation_kwargs.pop("top_p", None)
@@ -151,16 +191,28 @@ class LLMClient:
                 add_generation_prompt=True,
                 tokenize=True,
                 return_tensors="pt",
+                return_dict=True,
             )
+            model_inputs = {}
             model_device = _model_device(model)
-            if hasattr(encoded, "to"):
-                try:
-                    if model_device is not None:
-                        encoded = encoded.to(model_device)
-                except Exception:
-                    pass
-            model_inputs = {"input_ids": encoded}
-            input_length = int(encoded.shape[-1])
+            encoded_map = dict(encoded) if isinstance(encoded, dict) else {}
+            for key, value in encoded_map.items():
+                if hasattr(value, "to"):
+                    try:
+                        if model_device is not None:
+                            value = value.to(model_device)
+                    except Exception:
+                        pass
+                model_inputs[key] = value
+            input_ids = model_inputs.get("input_ids")
+            attention_mask = model_inputs.get("attention_mask")
+            if attention_mask is None and input_ids is not None:
+                attention_mask = torch.ones_like(input_ids)
+                model_inputs["attention_mask"] = attention_mask
+            if attention_mask is not None:
+                input_length = int(attention_mask[0].sum().item())
+            else:
+                input_length = int(input_ids.shape[-1]) if input_ids is not None else 0
         else:
             encoded_map = tokenizer(str(prompt), return_tensors="pt")
             model_inputs = {}
@@ -174,6 +226,10 @@ class LLMClient:
                         pass
                 model_inputs[key] = value
             input_ids = model_inputs.get("input_ids")
+            attention_mask = model_inputs.get("attention_mask")
+            if attention_mask is None and input_ids is not None:
+                attention_mask = torch.ones_like(input_ids)
+                model_inputs["attention_mask"] = attention_mask
             input_length = int(input_ids.shape[-1]) if input_ids is not None else 0
 
         with torch.inference_mode():

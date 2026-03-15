@@ -1,0 +1,36 @@
+runtime:
+  structuring_mode: rules
+  summary_mode: deterministic
+  summary_polish_enabled: false
+
+video:
+  target_fps: 2.5
+  analysis_fps: 2.5
+  decode_resolution: [1024, 576]
+  max_frames: 3200
+  min_change_threshold: 0.03
+  dark_threshold: 30.0
+  blur_threshold: 35.0
+  lazy_motion_threshold: 0.02
+
+clips:
+  window_sec: 4.0
+  stride_sec: 2.5
+  max_clip_frames: 12
+  keyframe_policy: middle
+
+model:
+  batch_size: 5
+  max_batch_frames: 80
+  max_new_tokens: 96
+
+search:
+  rerank_enabled: false
+  rerank_top_k: 16
+  candidate_k_sparse: 120
+  candidate_k_dense: 120
+  dense_input_mode: text
+  embedding_dim: 768
+
+translation:
+  post_edit_targets: [summary]

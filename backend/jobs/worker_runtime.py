@@ -43,6 +43,98 @@ class WorkerContext:
     services: WorkerServices
 
 
+def _cuda_memory_snapshot() -> Optional[Dict[str, float]]:
+    """Return a compact CUDA memory snapshot when CUDA is available."""
+
+    try:
+        import torch
+    except Exception:
+        return None
+
+    try:
+        if not torch.cuda.is_available():
+            return None
+        free_bytes, total_bytes = torch.cuda.mem_get_info()
+    except Exception:
+        return None
+
+    used_bytes = max(0, int(total_bytes) - int(free_bytes))
+    gib = float(1024**3)
+    return {
+        "free_bytes": float(free_bytes),
+        "total_bytes": float(total_bytes),
+        "used_bytes": float(used_bytes),
+        "free_gib": float(free_bytes) / gib,
+        "used_gib": float(used_bytes) / gib,
+        "free_ratio": (float(free_bytes) / float(total_bytes)) if float(total_bytes) > 0 else 0.0,
+    }
+
+
+def _cuda_headroom_ok(*, min_free_gib: float = 2.5, min_free_ratio: float = 0.18) -> bool:
+    """Return whether CUDA has enough free headroom to keep idle models resident."""
+
+    snapshot = _cuda_memory_snapshot()
+    if snapshot is None:
+        return True
+    return bool(
+        float(snapshot.get("free_gib", 0.0)) >= float(min_free_gib)
+        and float(snapshot.get("free_ratio", 0.0)) >= float(min_free_ratio)
+    )
+
+
+def _release_service(service: Any) -> None:
+    """Release one service cache if it exposes a release hook."""
+
+    if service is None or not hasattr(service, "release"):
+        return
+    try:
+        service.release()
+    except Exception:
+        return
+
+
+def _release_inactive_services(services: WorkerServices, *, keep: set[str]) -> None:
+    """Release cached models for services that are not needed for the active job."""
+
+    service_map = {
+        "pipeline": getattr(services, "pipeline", None),
+        "summary_service": getattr(services, "summary_service", None),
+        "guard_service": getattr(services, "guard_service", None),
+        "translation_service": getattr(services, "translation_service", None),
+    }
+    for name, service in service_map.items():
+        if name in keep:
+            continue
+        _release_service(service)
+
+
+def _prepare_services_for_job(services: WorkerServices, job_type: str) -> None:
+    """Trim resident model caches before a job when VRAM headroom is tight."""
+
+    if _cuda_headroom_ok():
+        return
+
+    jt = str(job_type or "").strip().lower()
+    keep: set[str]
+    if jt == "process":
+        keep = {"pipeline"}
+    elif jt == "summary_polish":
+        keep = {"summary_service", "guard_service"}
+    elif jt == "translate":
+        keep = {"translation_service"}
+    else:
+        keep = set()
+    _release_inactive_services(services, keep=keep)
+
+
+def _cleanup_services_after_job(services: WorkerServices) -> None:
+    """Release idle model caches after a job when VRAM headroom is limited."""
+
+    if _cuda_headroom_ok():
+        return
+    _release_inactive_services(services, keep=set())
+
+
 def _build_services(cfg: Any) -> WorkerServices:
     """Build the service bundle for the current effective config."""
 

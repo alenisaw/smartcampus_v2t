@@ -219,6 +219,46 @@ def list_output_variants(videos_dir: Path, video_id: str) -> List[str]:
     return [item.name for item in sorted(root.iterdir()) if item.is_dir()]
 
 
+def _latest_manifest_status(manifest: Any) -> Optional[str]:
+    """Return the latest per-language manifest status for one output manifest."""
+
+    if not isinstance(manifest, dict):
+        return None
+    languages = manifest.get("languages")
+    if not isinstance(languages, dict):
+        return None
+
+    latest_status: Optional[str] = None
+    latest_ts = -1.0
+    for payload in languages.values():
+        if not isinstance(payload, dict):
+            continue
+        try:
+            updated_at = float(payload.get("updated_at") or 0.0)
+        except Exception:
+            updated_at = 0.0
+        if updated_at >= latest_ts:
+            latest_ts = updated_at
+            latest_status = str(payload.get("status") or "").strip().lower() or None
+    return latest_status
+
+
+def _load_summary_preview(videos_dir: Path, video_id: str, variant: Optional[str] = None) -> str:
+    """Load a short summary preview from the first available summary artifact."""
+
+    folder = summaries_dir(videos_dir, video_id, variant=variant)
+    if not folder.exists():
+        return ""
+    for path in sorted(folder.glob("*.json")):
+        payload = read_summary(path)
+        if not isinstance(payload, dict):
+            continue
+        text = str(payload.get("global_summary") or payload.get("summary") or "").strip()
+        if text:
+            return text
+    return ""
+
+
 def list_videos(videos_dir: Path) -> List[Dict[str, Any]]:
     """List videos with base and variant output metadata."""
 
@@ -242,6 +282,8 @@ def list_videos(videos_dir: Path) -> List[Dict[str, Any]]:
             "path": str(raw_file),
             "languages": list_output_languages(videos_dir, video_id),
             "variants": {},
+            "summary": _load_summary_preview(videos_dir, video_id),
+            "status": _latest_manifest_status(_read_json(outputs_manifest_path(videos_dir, video_id), default=None)) or "raw",
         }
 
         try:
@@ -252,8 +294,11 @@ def list_videos(videos_dir: Path) -> List[Dict[str, Any]]:
             pass
 
         for variant in list_output_variants(videos_dir, video_id):
+            variant_manifest = _read_json(outputs_manifest_path(videos_dir, video_id, variant=variant), default=None)
             item["variants"][variant] = {
                 "languages": list_output_languages(videos_dir, video_id, variant=variant),
+                "summary": _load_summary_preview(videos_dir, video_id, variant=variant),
+                "status": _latest_manifest_status(variant_manifest) or "raw",
             }
 
         out.append(item)

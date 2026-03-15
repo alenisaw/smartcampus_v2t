@@ -105,7 +105,14 @@ def variant_label(token: Optional[str]) -> str:
     """Human-readable variant label."""
 
     variant = variant_from_token(token)
-    return "BASE" if variant is None else variant.upper()
+    if variant is None:
+        return "BASE"
+    aliases = {
+        "fast": "Fast",
+        "throughput": "Throughput",
+        "max_quality": "Max Quality",
+    }
+    return aliases.get(variant, humanize_token(variant))
 
 
 def video_variant_tokens(video_item: Optional[Dict[str, Any]]) -> List[str]:
@@ -230,3 +237,16 @@ def available_variant_ids(cfg: Any) -> List[str]:
     if variants_dir.exists():
         return sorted([path.stem.lower() for path in variants_dir.glob("*.yaml")])
     return []
+
+
+def available_profile_ids(cfg: Any) -> List[str]:
+    """List configured profile ids with a stable, user-facing order."""
+
+    profiles_dir = Path(getattr(getattr(cfg, "paths", None), "profiles_dir", ""))
+    discovered = sorted([path.stem.lower() for path in profiles_dir.glob("*.yaml")]) if profiles_dir.exists() else []
+    preferred = ["main", "experimental"]
+    ordered = [profile for profile in preferred if profile in discovered]
+    for profile in discovered:
+        if profile not in ordered:
+            ordered.append(profile)
+    return ordered or preferred
