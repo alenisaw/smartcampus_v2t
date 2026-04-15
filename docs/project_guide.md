@@ -670,7 +670,9 @@ The repository contains dedicated scripts for operating and evaluating the syste
 
 | Script | Purpose |
 | --- | --- |
-| `scripts/smoke_services.py` | quick smoke check for API and UI availability |
+| `scripts/runtime/smoke_services.py` | quick smoke check for API and UI availability |
+| `scripts/runtime/inspect_runtime.py` | print the resolved runtime profile, variant, and key execution knobs |
+| `scripts/runtime/profile_vlm_path.py` | profile preprocess, clip build, and packed VLM inference on one video |
 | `scripts/collect_metrics.py` | export normalized metrics bundles from stored outputs |
 | `scripts/run_experiment_matrix.py` | orchestrate repeated runs across profiles, variants, and selected videos |
 | `scripts/eval_relevance.py` | evaluate retrieval quality offline from experiment outputs |
@@ -723,6 +725,14 @@ Optional compose profiles currently include:
 docker compose --profile with_vllm up --build
 docker compose --profile with_ct2 up --build
 ```
+
+The recommended text-LLM-through-`vLLM` stack is:
+
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.vllm.yml up --build -d
+```
+
+`.env` is optional and should stay untracked. Runtime behavior should stay in `configs/profiles/*.yaml` and `configs/variants/*.yaml`; Docker-level overrides like `VLLM_*` can be set directly in the shell when needed.
 
 ## 17. Architectural Characteristics
 

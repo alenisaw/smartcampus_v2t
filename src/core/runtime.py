@@ -342,6 +342,11 @@ def _build_search_config(root_dir: Path, search_raw: Dict[str, Any]) -> SearchCo
         embed_model_name=str(search_raw.get("embed_model_name", "BAAI/bge-m3")),
         embedding_model_id=embedding_model_id,
         embedding_backend=str(search_raw.get("embedding_backend", "auto")).strip().lower() or "auto",
+        ann_backend=str(search_raw.get("ann_backend", "auto")).strip().lower() or "auto",
+        ann_index_type=str(search_raw.get("ann_index_type", "hnsw")).strip().lower() or "hnsw",
+        ann_hnsw_m=int(search_raw.get("ann_hnsw_m", 32)),
+        ann_ef_construction=int(search_raw.get("ann_ef_construction", 80)),
+        ann_ef_search=int(search_raw.get("ann_ef_search", 64)),
         reranker_model_id=_resolve_reference_or_path(root_dir, search_raw.get("reranker_model_id"), "Qwen/Qwen3-VL-Reranker-2B"),
         reranker_backend=str(search_raw.get("reranker_backend", "auto")).strip().lower() or "auto",
         query_prefix=str(search_raw.get("query_prefix", "query: ")),
@@ -411,6 +416,7 @@ def _build_model_config(root_dir: Path, paths: PathsConfig, model_raw: Dict[str,
         dtype=str(model_raw.get("dtype", "fp16")),
         language=str(model_raw.get("language", "en")).strip().lower() or "en",
         batch_size=int(model_raw.get("batch_size", 1)),
+        max_batch_clips=int(model_raw.get("max_batch_clips", model_raw.get("batch_size", 1))),
         max_new_tokens=int(model_raw.get("max_new_tokens", 128)),
         temperature=float(model_raw.get("temperature", 0.0)),
         top_p=float(model_raw.get("top_p", 1.0)),
@@ -419,6 +425,7 @@ def _build_model_config(root_dir: Path, paths: PathsConfig, model_raw: Dict[str,
         do_sample=_to_bool(model_raw.get("do_sample", False)),
         attn_implementation=str(model_raw.get("attn_implementation", "auto")),
         max_batch_frames=int(model_raw.get("max_batch_frames", 64)),
+        batch_frame_tolerance=int(model_raw.get("batch_frame_tolerance", 2)),
         timeout_sec=int(model_raw.get("timeout_sec", 60)),
     )
 
@@ -441,6 +448,8 @@ def _build_llm_config(root_dir: Path, llm_raw: Dict[str, Any]) -> LlmConfig:
         transformers_compile=_to_bool(transformers_raw.get("compile", False)),
         vllm_base_url=str(vllm_raw.get("base_url", "http://127.0.0.1:8001/v1")),
         vllm_timeout_sec=int(vllm_raw.get("timeout_sec", 30)),
+        vllm_served_model_name=str(vllm_raw.get("served_model_name", "")),
+        vllm_api_key=str(vllm_raw.get("api_key", "")),
     )
 
 

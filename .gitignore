@@ -17,6 +17,7 @@ build/
 .venv/
 venv/
 env/
+.env
 
 # Editor and OS noise
 .idea/

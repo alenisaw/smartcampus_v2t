@@ -18,10 +18,13 @@ from pathlib import Path
 from statistics import mean, pstdev
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+import numpy as np
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from backend.deps import load_cfg_and_raw
 from scripts.common import (
     float_or_none as _float_or_none_common,
     read_json_dict as _read_json_dict,
@@ -29,11 +32,17 @@ from scripts.common import (
     safe_div as _safe_div_common,
     write_json as _write_json_common,
 )
+from src.core.timeline_metrics import intrinsic_timeline_metrics, segment_embeddings_from_members
+from src.search.embed import EmbeddingCache, build_text_embedder, select_embedding_model_ref
 from src.utils.video_store import (
     list_output_languages,
     list_output_variants,
     metrics_path,
+    read_clip_observations,
+    read_segments,
     run_manifest_path,
+    segments_path,
+    clip_observations_path,
 )
 
 
@@ -63,12 +72,26 @@ TRACKED_FIELDS = [
     "translation_summary_post_edited_count",
     "index_total_time_sec",
     "index_languages_count",
+    "batch_count",
+    "batch_clips_avg",
+    "batch_padding_ratio",
+    "batch_oom_retry_count",
+    "model_frames_per_sec",
+    "model_clips_per_sec",
     "throughput_frames_per_sec",
     "throughput_clips_per_sec",
     "video_seconds_per_compute_second",
     "preprocess_share_pct",
     "model_share_pct",
     "postprocess_share_pct",
+    "final_segments",
+    "compression_ratio",
+    "dd",
+    "mean_segment_duration",
+    "tcs",
+    "srr",
+    "sns",
+    "sdi",
 ]
 
 CSV_FIELDS = [
@@ -104,12 +127,26 @@ CSV_FIELDS = [
     "translation_summary_post_edited_count",
     "index_total_time_sec",
     "index_languages_count",
+    "batch_count",
+    "batch_clips_avg",
+    "batch_padding_ratio",
+    "batch_oom_retry_count",
+    "model_frames_per_sec",
+    "model_clips_per_sec",
     "throughput_frames_per_sec",
     "throughput_clips_per_sec",
     "video_seconds_per_compute_second",
     "preprocess_share_pct",
     "model_share_pct",
     "postprocess_share_pct",
+    "final_segments",
+    "compression_ratio",
+    "dd",
+    "mean_segment_duration",
+    "tcs",
+    "srr",
+    "sns",
+    "sdi",
 ]
 
 STAGE_RUN_FIELDS = [
@@ -458,6 +495,154 @@ def _normalized_metric_language(metrics: Dict[str, Any], run_manifest: Dict[str,
     return metrics_lang or run_lang
 
 
+_EMBEDDER_CACHE: Dict[Tuple[str, str], Tuple[Any, Optional[EmbeddingCache]]] = {}
+
+
+def _cache_rows(cache: Optional[EmbeddingCache], texts: List[str]) -> Tuple[Dict[int, np.ndarray], List[int], List[str], List[str]]:
+    """Load cached text embeddings and return unresolved positions."""
+
+    if cache is None:
+        return {}, list(range(len(texts))), [], []
+
+    import hashlib
+
+    hashes = [hashlib.sha1(text.encode("utf-8")).hexdigest() for text in texts]
+    cached_map = cache.get_many(hashes)
+    loaded: Dict[int, np.ndarray] = {}
+    missing_idx: List[int] = []
+    missing_hashes: List[str] = []
+    missing_texts: List[str] = []
+    for index, hval in enumerate(hashes):
+        cached = cached_map.get(hval)
+        if cached is None:
+            missing_idx.append(index)
+            missing_hashes.append(hval)
+            missing_texts.append(texts[index])
+            continue
+        try:
+            dim, dtype, blob = cached
+            arr = np.frombuffer(blob, dtype=np.float16 if str(dtype) == "float16" else np.float32)
+            if int(dim) and int(dim) != int(arr.shape[0]):
+                raise ValueError("dimension mismatch")
+            loaded[index] = np.asarray(arr, dtype=np.float32)
+        except Exception:
+            missing_idx.append(index)
+            missing_hashes.append(hval)
+            missing_texts.append(texts[index])
+    return loaded, missing_idx, missing_hashes, missing_texts
+
+
+def _get_embedder(profile: str, variant: Optional[str]) -> Tuple[Any, Optional[EmbeddingCache]]:
+    """Reuse one text embedder per effective config."""
+
+    key = (str(profile or "main"), str(variant or ""))
+    if key in _EMBEDDER_CACHE:
+        return _EMBEDDER_CACHE[key]
+
+    cfg, _raw = load_cfg_and_raw(profile=key[0], variant=(key[1] or None))
+    model_ref = str(select_embedding_model_ref(cfg.search, models_dir=Path(cfg.paths.models_dir)))
+    embedder = build_text_embedder(
+        model_name=model_ref,
+        device=str(getattr(cfg.model, "device", "") or ""),
+        query_prefix=str(getattr(cfg.search, "query_prefix", "query: ")),
+        passage_prefix=str(getattr(cfg.search, "passage_prefix", "passage: ")),
+        backend=str(getattr(cfg.search, "embedding_backend", "auto")),
+        fallback_model_name=str(getattr(cfg.search, "embed_model_name", "") or ""),
+    )
+    cache = EmbeddingCache(Path(cfg.paths.cache_dir), model_ref) if bool(getattr(cfg.search, "embed_cache", True)) else None
+    _EMBEDDER_CACHE[key] = (embedder, cache)
+    return embedder, cache
+
+
+def _encode_texts(profile: str, variant: Optional[str], texts: List[str]) -> List[Optional[np.ndarray]]:
+    """Encode texts with existing embedder/cache conventions."""
+
+    if not texts:
+        return []
+
+    embedder, cache = _get_embedder(profile, variant)
+    loaded, missing_idx, missing_hashes, missing_texts = _cache_rows(cache, texts)
+    out: List[Optional[np.ndarray]] = [loaded.get(index) for index in range(len(texts))]
+    if missing_texts:
+        arr = np.asarray(embedder.encode_passages(missing_texts, batch_size=16), dtype=np.float32)
+        if arr.ndim == 1:
+            arr = arr.reshape(1, -1)
+        for offset, index in enumerate(missing_idx):
+            out[index] = arr[offset]
+        if cache is not None:
+            cache_rows = {
+                hval: (int(arr[offset].shape[0]), "float16", arr[offset].astype(np.float16).tobytes())
+                for offset, hval in enumerate(missing_hashes)
+            }
+            cache.put_many(cache_rows)
+    return out
+
+
+def _merged_member_groups(segments: List[Dict[str, Any]]) -> List[List[int]]:
+    """Extract clip-member groups from persisted segments."""
+
+    groups: List[List[int]] = []
+    for index, segment in enumerate(segments):
+        extra = segment.get("extra") if isinstance(segment, dict) else None
+        merged_from = extra.get("merged_from") if isinstance(extra, dict) else None
+        if isinstance(merged_from, list):
+            members = [int(item) for item in merged_from if isinstance(item, (int, float)) or str(item).strip().isdigit()]
+            groups.append(members or [index])
+        else:
+            groups.append([index])
+    return groups
+
+
+def _timeline_metrics_for_row(
+    videos_dir: Path,
+    *,
+    video_id: str,
+    profile: str,
+    variant: Optional[str],
+    language: str,
+    video_duration_sec: Any,
+) -> Dict[str, Any]:
+    """Compute intrinsic timeline metrics from persisted canonical artifacts."""
+
+    clip_rows = read_clip_observations(clip_observations_path(videos_dir, video_id, variant=variant))
+    segment_rows = read_segments(segments_path(videos_dir, video_id, language, variant=variant))
+    if not clip_rows or not segment_rows:
+        return {
+            "final_segments": None,
+            "compression_ratio": None,
+            "dd": None,
+            "mean_segment_duration": None,
+            "tcs": None,
+            "srr": None,
+            "sns": None,
+            "sdi": None,
+        }
+
+    try:
+        texts = [str(item.get("description") or item.get("normalized_caption") or "") for item in clip_rows]
+        raw_embeddings = _encode_texts(profile, variant, texts)
+        member_groups = _merged_member_groups(segment_rows)
+        segment_embeddings = segment_embeddings_from_members(raw_embeddings, member_groups)
+        metrics = intrinsic_timeline_metrics(
+            duration_seconds=video_duration_sec,
+            raw_clips=int(len(clip_rows)),
+            merged_segments=list(segment_rows),
+            segment_embeddings=segment_embeddings,
+        )
+    except Exception:
+        metrics = {}
+    return {
+        "final_segments": metrics.get("final_segments"),
+        "compression_ratio": metrics.get("compression_ratio"),
+        "dd": metrics.get("dd"),
+        "mean_segment_duration": metrics.get("mean_segment_duration"),
+        "tcs": metrics.get("tcs"),
+        "srr": metrics.get("srr"),
+        "sns": metrics.get("sns"),
+        "sdi": metrics.get("sdi"),
+    }
+
+
 def _iter_targets(videos_dir: Path) -> Iterable[Tuple[str, Optional[str]]]:
     """Yield base and variant targets for every video folder."""
 
@@ -486,6 +671,7 @@ def _build_row(videos_dir: Path, video_id: str, variant: Optional[str]) -> Optio
     run_manifest = run_manifest or {}
     extra = metrics.get("extra") if isinstance(metrics.get("extra"), dict) else {}
     clip_stats = extra.get("clip_stats") if isinstance(extra.get("clip_stats"), dict) else {}
+    batching = extra.get("batching") if isinstance(extra.get("batching"), dict) else {}
     stage_stats = metrics.get("stage_stats_sec") if isinstance(metrics.get("stage_stats_sec"), dict) else {}
     if not stage_stats:
         stage_stats = _fallback_stage_stats_from_metrics(metrics)
@@ -500,6 +686,15 @@ def _build_row(videos_dir: Path, video_id: str, variant: Optional[str]) -> Optio
     preprocess_time_sec = _float_or_none(metrics.get("preprocess_time_sec"))
     model_time_sec = _float_or_none(metrics.get("model_time_sec"))
     postprocess_time_sec = _float_or_none(metrics.get("postprocess_time_sec"))
+    canonical_lang = str(run_manifest.get("language") or metrics.get("language") or "en").strip().lower() or "en"
+    timeline_metrics = _timeline_metrics_for_row(
+        videos_dir,
+        video_id=video_id,
+        profile=str(run_manifest.get("profile") or "main"),
+        variant=variant,
+        language=canonical_lang,
+        video_duration_sec=video_duration_sec,
+    )
 
     return {
         "video_id": video_id,
@@ -536,12 +731,26 @@ def _build_row(videos_dir: Path, video_id: str, variant: Optional[str]) -> Optio
         "index_total_time_sec": indexing_summary.get("index_total_time_sec"),
         "index_languages_count": indexing_summary.get("index_languages_count"),
         "index_languages": indexing_summary.get("index_languages"),
+        "batch_count": batching.get("actual_batches"),
+        "batch_clips_avg": batching.get("actual_clips_avg"),
+        "batch_padding_ratio": batching.get("actual_padding_ratio"),
+        "batch_oom_retry_count": batching.get("oom_retry_count"),
+        "model_frames_per_sec": batching.get("model_frames_per_sec"),
+        "model_clips_per_sec": batching.get("model_clips_per_sec"),
         "throughput_frames_per_sec": _safe_div(num_frames, total_time_sec),
         "throughput_clips_per_sec": _safe_div(num_clips, total_time_sec),
         "video_seconds_per_compute_second": _safe_div(video_duration_sec, total_time_sec),
         "preprocess_share_pct": None if total_time_sec in (None, 0.0) or preprocess_time_sec is None else float(preprocess_time_sec / total_time_sec * 100.0),
         "model_share_pct": None if total_time_sec in (None, 0.0) or model_time_sec is None else float(model_time_sec / total_time_sec * 100.0),
         "postprocess_share_pct": None if total_time_sec in (None, 0.0) or postprocess_time_sec is None else float(postprocess_time_sec / total_time_sec * 100.0),
+        "final_segments": timeline_metrics.get("final_segments"),
+        "compression_ratio": timeline_metrics.get("compression_ratio"),
+        "dd": timeline_metrics.get("dd"),
+        "mean_segment_duration": timeline_metrics.get("mean_segment_duration"),
+        "tcs": timeline_metrics.get("tcs"),
+        "srr": timeline_metrics.get("srr"),
+        "sns": timeline_metrics.get("sns"),
+        "sdi": timeline_metrics.get("sdi"),
         "stage_stats_sec": stage_stats,
     }
 

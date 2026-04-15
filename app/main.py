@@ -25,7 +25,7 @@ from app.state import UIState
 from app.view.analytics import video_analytics_tab
 from app.view.overview import overview_tab
 from app.view.reports import reports_metrics_tab
-from app.view.search_live import search_tab
+from app.view.search import search_tab
 from app.view.shared import footer, render_header, render_i18n_metrics, soft_note
 from app.view.storage import storage_tab
 from src.core.runtime import config_cache_token, load_pipeline_config

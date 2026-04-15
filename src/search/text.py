@@ -1,4 +1,3 @@
-# src/search/text.py
 """
 Search text normalization helpers for SmartCampus V2T.
 

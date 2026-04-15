@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import json
 import gc
+from functools import lru_cache
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
@@ -45,6 +46,20 @@ def _has_local_weights(path: Path) -> bool:
     return False
 
 
+def _looks_like_local_model_ref(value: str) -> bool:
+    """Detect local-path-like model refs that cannot be sent to a remote OpenAI API as-is."""
+
+    text = str(value or "").strip()
+    if not text:
+        return False
+    path = Path(text)
+    if path.exists():
+        return True
+    if text.startswith(".") or text.startswith("/") or text.startswith("\\"):
+        return True
+    return (":" in text) or ("\\" in text)
+
+
 @dataclass
 class LLMClient:
     """Thin backend-agnostic text LLM wrapper."""
@@ -61,6 +76,8 @@ class LLMClient:
     transformers_device_map: str
     transformers_compile: bool
     local_model_dir: Optional[str] = None
+    vllm_served_model_name: str = ""
+    vllm_api_key: str = ""
 
     @classmethod
     def from_config(cls, cfg: Any) -> "LLMClient":
@@ -94,6 +111,8 @@ class LLMClient:
             transformers_device_map=str(getattr(cfg.llm, "transformers_device_map", "auto")),
             transformers_compile=bool(getattr(cfg.llm, "transformers_compile", False)),
             local_model_dir=local_model_dir,
+            vllm_served_model_name=str(getattr(cfg.llm, "vllm_served_model_name", "") or ""),
+            vllm_api_key=str(getattr(cfg.llm, "vllm_api_key", "") or ""),
         )
 
     def generate_text(self, prompt: str) -> str:
@@ -150,16 +169,70 @@ class LLMClient:
         """Call a vLLM OpenAI-compatible endpoint."""
 
         url = self.vllm_base_url.rstrip("/") + "/chat/completions"
+        model_name = self._resolve_vllm_model_name()
         payload = {
-            "model": self.model_id,
+            "model": model_name,
             "messages": [{"role": "user", "content": str(prompt)}],
-            "temperature": 0,
-            "top_p": 1,
+            "temperature": float(self.temperature if self.do_sample else 0.0),
+            "top_p": float(self.top_p if self.do_sample else 1.0),
+            "max_tokens": int(self.max_new_tokens),
         }
-        response = requests.post(url, json=payload, timeout=self.timeout_sec)
+        response = self._session().post(
+            url,
+            json=payload,
+            headers=self._vllm_headers(),
+            timeout=self.timeout_sec,
+        )
         response.raise_for_status()
         data = response.json()
         return str((((data.get("choices") or [{}])[0]).get("message") or {}).get("content") or "").strip()
+
+    def is_vllm_ready(self) -> bool:
+        """Return whether the configured vLLM endpoint is reachable and exposes at least one model."""
+
+        try:
+            return bool(self._fetch_vllm_models())
+        except Exception:
+            return False
+
+    def _resolve_vllm_model_name(self) -> str:
+        """Resolve the model name that should be sent to the OpenAI-compatible vLLM API."""
+
+        configured_name = str(self.vllm_served_model_name or "").strip()
+        if configured_name:
+            return configured_name
+
+        model_id = str(self.model_id or "").strip()
+        if model_id and not _looks_like_local_model_ref(model_id):
+            return model_id
+
+        models = self._fetch_vllm_models()
+        if not models:
+            raise RuntimeError(f"No models exposed by vLLM endpoint: {self.vllm_base_url}")
+        return str(models[0])
+
+    def _vllm_headers(self) -> Dict[str, str]:
+        """Build request headers for the OpenAI-compatible vLLM API."""
+
+        headers = {"Content-Type": "application/json"}
+        token = str(self.vllm_api_key or "").strip()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        return headers
+
+    def _session(self) -> requests.Session:
+        """Return a lightweight shared HTTP session for vLLM requests."""
+
+        return _vllm_session(self.vllm_base_url)
+
+    def _fetch_vllm_models(self) -> List[str]:
+        """Fetch the list of served model IDs from the configured vLLM endpoint."""
+
+        return _vllm_models(
+            self.vllm_base_url,
+            self.timeout_sec,
+            str(self.vllm_api_key or ""),
+        )
 
     def _generate_text_transformers(self, prompt: str) -> str:
         """Run local text generation through Hugging Face transformers."""
@@ -318,3 +391,37 @@ class LLMClient:
             if isinstance(parsed, dict):
                 return parsed
         return None
+
+
+@lru_cache(maxsize=8)
+def _vllm_session(_base_url: str) -> requests.Session:
+    """Create one reusable requests session per base URL."""
+
+    return requests.Session()
+
+
+@lru_cache(maxsize=16)
+def _vllm_models(base_url: str, timeout_sec: int, api_key: str) -> List[str]:
+    """Fetch and cache the served model names from a vLLM OpenAI-compatible endpoint."""
+
+    headers: Dict[str, str] = {}
+    token = str(api_key or "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    response = _vllm_session(base_url).get(
+        base_url.rstrip("/") + "/models",
+        headers=headers,
+        timeout=max(3, int(timeout_sec or 30)),
+    )
+    response.raise_for_status()
+    payload = response.json()
+    data = payload.get("data") or []
+    out: List[str] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        model_id = str(item.get("id") or "").strip()
+        if model_id:
+            out.append(model_id)
+    return out

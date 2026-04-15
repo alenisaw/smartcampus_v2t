@@ -1,119 +1,141 @@
 # docker-compose.yml
 # Reproducible stack for API/UI and split worker roles.
+x-app-build: &app-build
+  context: .
+  dockerfile: Dockerfile
+  target: runtime
+
+x-app-env: &app-env
+  PYTHONUNBUFFERED: "1"
+  PYTHONUTF8: "1"
+  HF_HOME: /app/.cache/huggingface
+  TRANSFORMERS_CACHE: /app/.cache/huggingface
+  XDG_CACHE_HOME: /app/.cache
+  SMARTCAMPUS_PROFILE: ${SMARTCAMPUS_PROFILE:-main}
+  SMARTCAMPUS_VARIANT: ${SMARTCAMPUS_VARIANT:-}
+
+x-app-volumes: &app-volumes
+  - ./data:/app/data
+  - ./models:/app/models
+  - hf_cache:/app/.cache/huggingface
+
 services:
   api:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    build: *app-build
     command: python -m uvicorn backend.api:app --host 0.0.0.0 --port 8000
-    environment:
-      PYTHONUNBUFFERED: "1"
-      SMARTCAMPUS_PROFILE: ${SMARTCAMPUS_PROFILE:-main}
-      SMARTCAMPUS_VARIANT: ${SMARTCAMPUS_VARIANT:-}
+    environment: *app-env
+    init: true
     ports:
       - "8000:8000"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
+      test: ["CMD", "python", "/app/docker/healthcheck_http.py", "http://127.0.0.1:8000/healthz", "--expect-json-ok"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 20s
-    volumes:
-      - .:/app
+    volumes: *app-volumes
 
   worker_gpu:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    build: *app-build
     command: python -m backend.worker
+    gpus: all
     environment:
-      PYTHONUNBUFFERED: "1"
-      SMARTCAMPUS_PROFILE: ${SMARTCAMPUS_PROFILE:-main}
-      SMARTCAMPUS_VARIANT: ${SMARTCAMPUS_VARIANT:-}
+      <<: *app-env
       SMARTCAMPUS_WORKER_ROLE: gpu
     depends_on:
       api:
         condition: service_healthy
+    init: true
     restart: unless-stopped
-    volumes:
-      - .:/app
+    volumes: *app-volumes
 
   worker_cpu:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    build: *app-build
     command: python -m backend.worker
     environment:
-      PYTHONUNBUFFERED: "1"
-      SMARTCAMPUS_PROFILE: ${SMARTCAMPUS_PROFILE:-main}
-      SMARTCAMPUS_VARIANT: ${SMARTCAMPUS_VARIANT:-}
+      <<: *app-env
       SMARTCAMPUS_WORKER_ROLE: cpu
     depends_on:
       api:
         condition: service_healthy
+    init: true
     restart: unless-stopped
-    volumes:
-      - .:/app
+    volumes: *app-volumes
 
   worker_mt:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    build: *app-build
     command: python -m backend.worker
     environment:
-      PYTHONUNBUFFERED: "1"
-      SMARTCAMPUS_PROFILE: ${SMARTCAMPUS_PROFILE:-main}
-      SMARTCAMPUS_VARIANT: ${SMARTCAMPUS_VARIANT:-}
+      <<: *app-env
       SMARTCAMPUS_WORKER_ROLE: mt
     depends_on:
       api:
         condition: service_healthy
+    init: true
     restart: unless-stopped
-    volumes:
-      - .:/app
+    volumes: *app-volumes
 
   ui:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    build: *app-build
     command: python -m streamlit run app/main.py --server.address 0.0.0.0 --server.port 8501
-    environment:
-      PYTHONUNBUFFERED: "1"
-      SMARTCAMPUS_PROFILE: ${SMARTCAMPUS_PROFILE:-main}
-      SMARTCAMPUS_VARIANT: ${SMARTCAMPUS_VARIANT:-}
+    environment: *app-env
     depends_on:
       api:
         condition: service_healthy
+    init: true
     ports:
       - "8501:8501"
     restart: unless-stopped
-    volumes:
-      - .:/app
+    healthcheck:
+      test: ["CMD", "python", "/app/docker/healthcheck_http.py", "http://127.0.0.1:8501"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 25s
+    volumes: *app-volumes
 
   vllm:
     image: vllm/vllm-openai:latest
     profiles: ["with_vllm"]
+    gpus: all
     environment:
       PYTHONUNBUFFERED: "1"
+      HF_HOME: /root/.cache/huggingface
+      VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: "1"
     command: >
-      --model ${VLLM_MODEL_ID:-Qwen/Qwen3-4B-Instruct-2507}
+      --model ${VLLM_MODEL_ID:-/app/models/qwen3-4b-instruct-2507}
+      --served-model-name ${VLLM_SERVED_MODEL_NAME:-Qwen/Qwen3-4B-Instruct-2507}
       --host 0.0.0.0
       --port 8001
       --dtype ${VLLM_DTYPE:-float16}
-      --max-model-len ${VLLM_MAX_MODEL_LEN:-4096}
+      --max-model-len ${VLLM_MAX_MODEL_LEN:-512}
+      --gpu-memory-utilization ${VLLM_GPU_MEMORY_UTILIZATION:-0.86}
+      --max-num-seqs ${VLLM_MAX_NUM_SEQS:-2}
+      --max-num-batched-tokens ${VLLM_MAX_NUM_BATCHED_TOKENS:-1024}
+      --enforce-eager
     ports:
       - "8001:8001"
+    healthcheck:
+      test: ["CMD", "python3", "/app/docker/healthcheck_http.py", "http://127.0.0.1:8001/v1/models"]
+      interval: 30s
+      timeout: 10s
+      retries: 12
+      start_period: 180s
     restart: unless-stopped
     volumes:
-      - .:/app
+      - ./models:/app/models
+      - ./docker:/app/docker:ro
+      - hf_cache_text:/root/.cache/huggingface
 
   mt_service:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    build: *app-build
     profiles: ["with_ct2"]
     command: python -c "import ctranslate2, sentencepiece; print('CTranslate2 backend is available')"
     environment:
       PYTHONUNBUFFERED: "1"
     restart: "no"
+
+volumes:
+  hf_cache:
+  hf_cache_text:

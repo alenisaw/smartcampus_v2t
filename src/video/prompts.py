@@ -30,15 +30,11 @@ def build_clip_observation_prompt(lang: str) -> str:
 
     _ = lang
     return (
-        "Return only JSON with keys: description, anomaly_flag, anomaly_confidence, anomaly_notes.\n"
-        "Rules:\n"
-        "- description: 1-2 short natural English sentences about visible activity only.\n"
-        "- anomaly_flag: true only if something looks unusual, suspicious, unsafe, or out of the ordinary.\n"
-        "- anomaly_confidence: number from 0.0 to 1.0.\n"
-        "- anomaly_notes: short list of visible suspicious signals; use [] when nothing stands out.\n"
-        "- Use only visible facts about people, vehicles, objects, motion, and scene changes.\n"
-        "- Do not guess intent, identity, roles, emotions, cause, or hidden context.\n"
-        "- Do not generate event classes, risk classes, summaries, or tags."
+        'JSON only: {"description":"","anomaly_flag":false,"anomaly_confidence":0.0,"anomaly_notes":[]}\n'
+        "Describe only visible activity in 1-2 short English sentences.\n"
+        "Use anomaly_flag=true only for unusual, suspicious, or unsafe visible signals.\n"
+        "Keep anomaly_notes short. Use [] when nothing stands out.\n"
+        "Do not guess identity, intent, roles, emotions, cause, or hidden context."
     )
 
 

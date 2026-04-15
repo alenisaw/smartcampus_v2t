@@ -670,7 +670,9 @@ data/videos/<video_id>/
 
 | Скрипт | Назначение |
 | --- | --- |
-| `scripts/smoke_services.py` | быстрый smoke check доступности API и UI |
+| `scripts/runtime/smoke_services.py` | быстрый smoke check доступности API и UI |
+| `scripts/runtime/inspect_runtime.py` | печать разрешённого profile, variant и ключевых runtime-настроек |
+| `scripts/runtime/profile_vlm_path.py` | профилирование preprocess, clip build и packed VLM inference на одном видео |
 | `scripts/collect_metrics.py` | экспорт нормализованных metrics bundles из сохраненных outputs |
 | `scripts/run_experiment_matrix.py` | оркестрация повторных прогонов по profiles, variants и выбранным видео |
 | `scripts/eval_relevance.py` | offline evaluation качества retrieval |

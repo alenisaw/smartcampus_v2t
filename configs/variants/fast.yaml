@@ -5,7 +5,7 @@ runtime:
 
 video:
   target_fps: 2.0
-  analysis_fps: 2.0
+  analysis_fps: 1.25
   decode_resolution: [960, 540]
   max_frames: 2500
   min_change_threshold: 0.04
@@ -15,14 +15,16 @@ video:
 
 clips:
   window_sec: 3.0
-  stride_sec: 2.0
-  max_clip_frames: 12
+  stride_sec: 2.25
+  max_clip_frames: 10
   keyframe_policy: first
 
 model:
-  batch_size: 4
-  max_batch_frames: 72
-  max_new_tokens: 96
+  batch_size: 5
+  max_batch_clips: 5
+  max_batch_frames: 64
+  batch_frame_tolerance: 1
+  max_new_tokens: 80
 
 search:
   rerank_enabled: false

@@ -1,0 +1,18 @@
+extends: main.yaml
+
+llm:
+  backend: vllm
+  model_id: Qwen/Qwen3-4B-Instruct-2507
+  vllm:
+    base_url: http://vllm_text:8001/v1
+    timeout_sec: 45
+    served_model_name: Qwen/Qwen3-4B-Instruct-2507
+
+runtime:
+  torch_compile: false
+  metrics_store_samples: true
+
+guard:
+  enabled: true
+  query_gate: true
+  output_gate: true

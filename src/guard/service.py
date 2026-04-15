@@ -76,6 +76,8 @@ class GuardService:
                 transformers_device_map="cpu",
                 transformers_compile=False,
                 local_model_dir=model_ref or None,
+                vllm_served_model_name="",
+                vllm_api_key="",
             )
 
         return cls(

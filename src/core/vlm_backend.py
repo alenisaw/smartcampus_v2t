@@ -60,6 +60,7 @@ class QwenVLBackend:
         self.lazy_load = bool(lazy_load)
         self.model = None
         self.processor = None
+        self.resolved_attn_implementation = "unknown"
 
         if device not in {"auto", "cuda", "cpu"}:
             device = "auto"
@@ -116,6 +117,7 @@ class QwenVLBackend:
             model_kwargs["device_map"] = "auto"
 
         attn_impl = self._pick_attn_implementation(self.attn_implementation)
+        self.resolved_attn_implementation = str(attn_impl or "unknown")
         if attn_impl:
             model_kwargs["attn_implementation"] = attn_impl
         return model_kwargs
@@ -169,6 +171,36 @@ class QwenVLBackend:
 
         del model
         del processor
+        gc.collect()
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                if hasattr(torch.cuda, "ipc_collect"):
+                    torch.cuda.ipc_collect()
+        except Exception:
+            pass
+
+    @staticmethod
+    def is_memory_pressure_error(exc: Exception) -> bool:
+        """Detect common CUDA and allocator OOM failures for batch backoff."""
+
+        text = str(exc or "").strip().lower()
+        return any(
+            marker in text
+            for marker in (
+                "out of memory",
+                "cuda error: out of memory",
+                "cuda out of memory",
+                "cudnn_status_not_supported",
+                "not enough memory",
+                "allocate memory",
+            )
+        )
+
+    @staticmethod
+    def release_inference_cache() -> None:
+        """Free transient device allocations between retries when possible."""
+
         gc.collect()
         try:
             if torch.cuda.is_available():

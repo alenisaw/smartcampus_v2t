@@ -1,14 +1,15 @@
-# .dockerignore
-.git
-.idea
-__pycache__
+.agent/
+data/
+models/
+__pycache__/
 *.pyc
 *.pyo
 *.pyd
-.pytest_cache
-.mypy_cache
-.venv
-venv
-models
-data
-docs/figures
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+.git/
+.gitignore
+docs/project_guide.ru.md

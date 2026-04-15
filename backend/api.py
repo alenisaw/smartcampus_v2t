@@ -29,11 +29,13 @@ from backend.jobs.index_runtime import rebuild_index_status as _rebuild_index_st
 from backend.jobs.control import create_job as _create_job
 from backend.jobs.queue_runtime import (
     cancel_queued_job as _cancel_queued_job,
+    find_running_job as _find_running_job,
     move_job_in_queue as _move_job_in_queue,
     queue_snapshot as _queue_snapshot,
     read_job_or_404 as _read_job,
     set_queue_paused as _set_queue_paused,
 )
+from backend.jobs.store import find_queue_files_for_job as _find_queue_files_for_job, write_job as _write_job
 from backend.retrieval_runtime import (
     annotation_hits as _annotation_hits,
     resolve_request_language as _resolve_request_language,
@@ -156,9 +158,42 @@ def videos_upload(file: UploadFile = File(...)):
 @app.delete("/v1/videos/{video_id}")
 def videos_delete(video_id: str):
     context = get_api_context()
+    paths = context.paths
     vdir = Path(context.paths.videos_dir) / video_id
     if not vdir.exists():
         raise HTTPException(status_code=404, detail=f"Video not found: {video_id}")
+
+    running_job = _find_running_job(paths)
+    if isinstance(running_job, dict) and str(running_job.get("video_id") or "") == str(video_id):
+        state = str(running_job.get("state") or "running")
+        raise HTTPException(status_code=409, detail=f"Video is referenced by active job: {running_job.get('job_id')} ({state})")
+
+    job_files = sorted(paths.jobs_dir.glob("job_*.json"))
+    related_jobs: List[Dict[str, Any]] = []
+    for job_path in job_files:
+        payload = read_json(job_path, default=None)
+        if not isinstance(payload, dict):
+            continue
+        if str(payload.get("video_id") or "") != str(video_id):
+            continue
+        related_jobs.append(payload)
+
+    for job in related_jobs:
+        state = str(job.get("state") or "").strip().lower()
+        job_id = str(job.get("job_id") or "")
+        if state in {"running", "leased", "indexing"}:
+            raise HTTPException(status_code=409, detail=f"Video is referenced by active job: {job_id} ({state})")
+        if state == "queued" or _find_queue_files_for_job(paths, job_id):
+            _cancel_queued_job(paths, job_id)
+
+    for job in related_jobs:
+        job_id = str(job.get("job_id") or "")
+        if not job_id:
+            continue
+        try:
+            (paths.jobs_dir / f"{job_id}.json").unlink(missing_ok=True)
+        except Exception:
+            pass
     try:
         shutil.rmtree(vdir, ignore_errors=True)
     except Exception as e:
@@ -259,8 +294,19 @@ def jobs_cancel(job_id: str):
     context = get_api_context()
     paths = context.paths
     job = _read_job(paths, job_id)
-    if job.get("state") in {"done", "failed", "canceled"}:
-        return JobCancelResponse(job_id=job_id, state=str(job.get("state")))
+    state = str(job.get("state") or "").strip().lower()
+    if state in {"done", "failed", "canceled"}:
+        return JobCancelResponse(job_id=job_id, state=state)
+
+    if state == "queued" or _find_queue_files_for_job(paths, job_id):
+        result = _cancel_queued_job(paths, job_id)
+        return JobCancelResponse(job_id=job_id, state=str(result.get("state") or "canceled"))
+
+    if state in {"running", "leased", "indexing"}:
+        job["cancel_requested"] = True
+        job["updated_at"] = now_ts()
+        _write_job(paths, job)
+        return JobCancelResponse(job_id=job_id, state="cancel_requested")
 
     job["cancel_requested"] = True
     job["updated_at"] = now_ts()

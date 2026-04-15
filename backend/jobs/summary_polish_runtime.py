@@ -46,10 +46,10 @@ def _guard_summary_payload(cfg: Any, payload: Optional[Dict[str, Any]], guard_se
 def _estimate_duration_sec(segments: list[Dict[str, Any]], metrics: Dict[str, Any]) -> float:
     """Estimate video duration for the summary prompt without reopening the raw video."""
 
-    total_time = metrics.get("total_time_sec") if isinstance(metrics, dict) else None
+    metrics_duration = metrics.get("video_duration_sec") if isinstance(metrics, dict) else None
     try:
-        if total_time is not None and float(total_time) > 0:
-            return float(total_time)
+        if metrics_duration is not None and float(metrics_duration) > 0:
+            return float(metrics_duration)
     except Exception:
         pass
 

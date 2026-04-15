@@ -1,4 +1,4 @@
-# scripts/smoke_services.py
+# scripts/runtime/smoke_services.py
 """
 Service smoke checks for SmartCampus V2T.
 
@@ -55,15 +55,22 @@ def _check_status(url: str, timeout: float) -> bool:
         return False
 
 
+def _check_vllm(url: str, timeout: float) -> bool:
+    endpoint = str(url).rstrip("/") + "/v1/models"
+    return _check_status(endpoint, timeout)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Smoke checks for API/UI services.")
     parser.add_argument("--api", default="http://127.0.0.1:8000", help="Base URL for FastAPI service")
     parser.add_argument("--ui", default="", help="Base URL for Streamlit UI (optional)")
+    parser.add_argument("--llm", default="", help="Base URL for vLLM service (optional)")
     parser.add_argument("--timeout", type=float, default=3.0, help="HTTP timeout seconds")
     args = parser.parse_args()
 
     api = str(args.api).rstrip("/")
     ui = str(args.ui).rstrip("/")
+    llm = str(args.llm).rstrip("/")
     timeout = float(args.timeout)
 
     checks = [
@@ -75,6 +82,8 @@ def main() -> int:
 
     if ui:
         checks.append(_check_status(ui, timeout))
+    if llm:
+        checks.append(_check_vllm(llm, timeout))
 
     ok = all(checks)
     if ok:

@@ -44,6 +44,7 @@ from src.utils.video_store import (
     outputs_manifest_path,
     segments_path,
     summary_path,
+    validate_process_outputs,
     update_metrics,
     update_outputs_manifest,
     write_clip_observations,
@@ -332,16 +333,24 @@ def _reuse_existing_process_outputs(
     base_lang: str,
     force_overwrite: bool,
     job_extra: Dict[str, Any],
-) -> bool:
+) -> tuple[bool, bool]:
     """Short-circuit processing when reusable base outputs already exist."""
 
-    base_segments_path = segments_path(Path(cfg.paths.videos_dir), video_id, base_lang, variant=variant_id)
-    if not (base_segments_path.exists() and not force_overwrite):
-        return False
+    if force_overwrite:
+        return False, False
 
-    set_state(paths, job_id, "done", stage="skip", progress=1.0, message="Outputs already exist")
+    videos_dir = Path(cfg.paths.videos_dir)
+    health = validate_process_outputs(videos_dir, video_id, base_lang, variant=variant_id)
+    if not bool(health.get("complete")):
+        return False, bool(
+            health.get("manifest_status") == "ready"
+            or health.get("missing_artifacts")
+            or health.get("corrupted_artifacts")
+        )
+
+    set_state(paths, job_id, "done", stage="skip", progress=1.0, message="Reused complete outputs")
     update_batch_variant_status(
-        Path(cfg.paths.videos_dir),
+        videos_dir,
         video_id,
         variant_id,
         "done",
@@ -359,7 +368,7 @@ def _reuse_existing_process_outputs(
         job_extra=job_extra,
     )
     remove_lock_if_exists(paths, job_id)
-    return True
+    return True, False
 
 
 def _build_process_context(
@@ -382,8 +391,6 @@ def _build_process_context(
         raise RuntimeError(f"Video not found for job video_id={video_id}")
 
     base_lang = str(cfg.translation.source_lang or cfg.model.language or "en").strip().lower()
-    cfg.model.device = str(device)
-    cfg.model.language = base_lang
 
     return _ProcessJobContext(
         cfg=cfg,
@@ -401,6 +408,19 @@ def _build_process_context(
         webhook_cfg=webhook_cfg,
         services=services,
         job_extra=dict(job.get("extra") or {}),
+    )
+
+
+def _mark_process_repair(context: _ProcessJobContext) -> None:
+    """Persist a compact repair marker before reprocessing incomplete outputs."""
+
+    set_state(
+        context.paths,
+        context.job_id,
+        "running",
+        stage="repair",
+        progress=0.02,
+        message="Repairing incomplete outputs",
     )
 
 
@@ -469,6 +489,7 @@ def _run_clip_build_stage(
         stride_sec=context.cfg.clips.stride_sec,
         min_clip_frames=context.cfg.clips.min_clip_frames,
         max_clip_frames=context.cfg.clips.max_clip_frames,
+        analysis_fps=float(getattr(context.cfg.video, "analysis_fps", 0.0) or 0.0),
         keyframe_policy=str(getattr(context.cfg.clips, "keyframe_policy", "middle")),
         return_keyframes=True,
     )
@@ -671,7 +692,7 @@ def _persist_process_outputs(
     return base_segments_path
 
 
-def _run_optional_index(context: _ProcessJobContext, metric_payload: Dict[str, Any]) -> Optional[float]:
+def _run_optional_index(context: _ProcessJobContext, metric_payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not context.auto_index:
         return None
 
@@ -685,10 +706,16 @@ def _run_optional_index(context: _ProcessJobContext, metric_payload: Dict[str, A
 
     set_state(context.paths, context.job_id, "indexing", stage="indexing", progress=0.92, message="Index update")
     index_started = time.perf_counter()
-    index_time = _run_index_build(cfg=context.cfg, cfg_fp=context.cfg_fp, language=context.base_lang)
+    index_payload = _run_index_build(cfg=context.cfg, cfg_fp=context.cfg_fp, language=context.base_lang)
     _record_stage(metric_payload, "index_build", time.perf_counter() - index_started)
-    _write_index_state(context.paths, built=True, last_error=None)
-    return index_time
+    _write_index_state(
+        context.paths,
+        built=True,
+        last_error=None,
+        language=context.base_lang,
+        payload=index_payload,
+    )
+    return index_payload
 
 
 def _enqueue_process_translations(context: _ProcessJobContext, metric_payload: Dict[str, Any]) -> None:
@@ -710,7 +737,7 @@ def _persist_process_metrics(
     metric_payload: Dict[str, Any],
     *,
     process_started_at: float,
-    index_time: Optional[float],
+    index_payload: Optional[Dict[str, Any]],
 ) -> Path:
     _record_stage(metric_payload, "process_total", time.perf_counter() - process_started_at)
     _finalize_stage_stats(metric_payload, keep_samples=runtime_keep_samples(context.cfg))
@@ -722,13 +749,13 @@ def _persist_process_metrics(
     _finalize_stage_stats(metric_payload, keep_samples=runtime_keep_samples(context.cfg))
     write_metrics(metrics_target, metric_payload or {})
 
-    if context.auto_index and index_time is not None:
+    if context.auto_index and index_payload is not None:
         _write_index_metrics(
             cfg=context.cfg,
             video_id=context.video_id,
             language=context.base_lang,
             variant=context.variant_id,
-            index_time=index_time,
+            index_payload=index_payload,
         )
     return metrics_target
 
@@ -786,7 +813,7 @@ def run_process_job(
         services=services,
     )
 
-    if _reuse_existing_process_outputs(
+    reused_existing, repair_needed = _reuse_existing_process_outputs(
         cfg=context.cfg,
         paths=context.paths,
         job_id=context.job_id,
@@ -795,8 +822,11 @@ def run_process_job(
         base_lang=context.base_lang,
         force_overwrite=context.force_overwrite,
         job_extra=context.job_extra,
-    ):
+    )
+    if reused_existing:
         return
+    if repair_needed:
+        _mark_process_repair(context)
 
     _mark_process_running(context)
     metric_payload = _build_process_metric_payload(context)
@@ -826,13 +856,13 @@ def run_process_job(
         metric_payload=metric_payload,
     )
 
-    index_time = _run_optional_index(context, metric_payload)
+    index_payload = _run_optional_index(context, metric_payload)
     _enqueue_process_translations(context, metric_payload)
     metrics_target = _persist_process_metrics(
         context,
         metric_payload,
         process_started_at=process_started_at,
-        index_time=index_time,
+        index_payload=index_payload,
     )
     _finalize_process_success(context, metrics_target)
     _enqueue_summary_polish_job(context)

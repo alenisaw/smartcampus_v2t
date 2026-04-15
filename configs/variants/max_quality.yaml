@@ -13,6 +13,13 @@ clips:
   max_clip_frames: 20
   keyframe_policy: sharpest
 
+model:
+  batch_size: 3
+  max_batch_clips: 3
+  max_batch_frames: 48
+  batch_frame_tolerance: 1
+  max_new_tokens: 128
+
 search:
   candidate_k_sparse: 260
   candidate_k_dense: 260

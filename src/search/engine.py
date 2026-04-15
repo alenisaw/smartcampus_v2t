@@ -35,13 +35,11 @@ from .rank import (
     build_reranker as _build_reranker,
     dedupe_time_hits_bucket as _dedupe_time_hits_bucket,
     dedupe_time_hits_overlap_nms as _dedupe_time_hits_overlap_nms,
-    dense_scores_for_indices as _dense_scores_for_indices,
     heuristic_rerank_bonus as _heuristic_rerank_bonus,
     in_sorted as _in_sorted,
     minmax_norm_from_dict as _minmax_norm_from_dict,
     minmax_norm_on_indices as _minmax_norm_on_indices,
     rrf_fuse as _rrf_fuse,
-    topk_dense_over_indices as _topk_dense_over_indices,
     topn_indices as _topn_indices,
 )
 from .text import tokenize as _tokenize
@@ -320,8 +318,7 @@ class QueryEngine:
             in_dv = _in_sorted(dense_valid_idx, v)
             dense_valid_indices = v[in_dv].tolist()
 
-        top_dense = _topk_dense_over_indices(
-            emb=self.index.embeddings,
+        top_dense = self.index.ann_index.topk(
             q_vec=q_vec,
             valid_indices=dense_valid_indices,
             k=self.candidate_k_dense,
@@ -345,11 +342,7 @@ class QueryEngine:
             cand = np.asarray(candidate_indices, dtype=np.int64)
             is_dv = _in_sorted(dense_valid_idx, cand)
             dense_cand = cand[is_dv].tolist()
-            dense_raw = _dense_scores_for_indices(
-                emb=self.index.embeddings,
-                q_vec=q_vec,
-                indices=dense_cand,
-            )
+            dense_raw = self.index.ann_index.scores(q_vec=q_vec, indices=dense_cand)
         return sparse_raw, dense_raw, (time.perf_counter() - t_dense_cand0) * 1000.0
 
     def _fuse_candidate_scores(

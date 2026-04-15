@@ -21,7 +21,7 @@ timeout /t 2 >nul
 echo ======================================
 echo Starting worker
 echo ======================================
-start "worker" cmd /k "set SMARTCAMPUS_WORKER_ROLE=%SMARTCAMPUS_WORKER_ROLE% && ""%PYTHON_EXE%"" -m backend.worker"
+start "worker" cmd /k "set SMARTCAMPUS_WORKER_ROLE=%SMARTCAMPUS_WORKER_ROLE% && " "%PYTHON_EXE%"" -m backend.worker"
 
 timeout /t 2 >nul
 

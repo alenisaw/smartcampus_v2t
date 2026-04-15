@@ -179,11 +179,22 @@ def resolve_worker_context(
         job_variant = default_variant
     if job_variant is not None:
         job_variant = str(job_variant).strip().lower() or None
+    device_override = str(extra.get("device") or "").strip().lower() or None
+    active_device = str(getattr(context.cfg.model, "device", "") or "").strip().lower() or None
+    canonical_device = str(((context.raw.get("model") or {}).get("device")) or getattr(context.cfg.model, "device", "") or "").strip().lower() or None
+    needs_fresh_context = bool(device_override and device_override != active_device)
 
-    if job_profile == context.cfg.active_profile and job_variant == context.cfg.active_variant:
+    if (
+        not needs_fresh_context
+        and job_profile == context.cfg.active_profile
+        and job_variant == context.cfg.active_variant
+        and active_device == (device_override or canonical_device)
+    ):
         return context
 
     cfg, raw = load_cfg_and_raw(profile=job_profile, variant=job_variant)
+    if device_override:
+        cfg.model.device = str(device_override)
     return build_worker_context(cfg, raw)
 
 

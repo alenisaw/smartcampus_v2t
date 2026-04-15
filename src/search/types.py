@@ -113,6 +113,7 @@ class HybridIndex:
     bm25: BM25Index
     embeddings: Any
     dense_valid: Any
+    ann_index: Any
     meta: Dict[str, Any]
 
 
