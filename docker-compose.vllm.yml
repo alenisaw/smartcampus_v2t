@@ -1,0 +1,79 @@
+# docker-compose.vllm.yml
+# Override stack that routes text LLM workloads through a dedicated vLLM service.
+services:
+  api:
+    environment:
+      SMARTCAMPUS_PROFILE: ${SMARTCAMPUS_PROFILE:-container_vllm}
+    depends_on:
+      vllm_text:
+        condition: service_healthy
+
+  worker_gpu:
+    environment:
+      SMARTCAMPUS_PROFILE: ${SMARTCAMPUS_PROFILE:-container_vllm}
+    depends_on:
+      api:
+        condition: service_healthy
+      vllm_text:
+        condition: service_healthy
+
+  worker_cpu:
+    environment:
+      SMARTCAMPUS_PROFILE: ${SMARTCAMPUS_PROFILE:-container_vllm}
+    depends_on:
+      api:
+        condition: service_healthy
+      vllm_text:
+        condition: service_healthy
+
+  worker_mt:
+    environment:
+      SMARTCAMPUS_PROFILE: ${SMARTCAMPUS_PROFILE:-container_vllm}
+    depends_on:
+      api:
+        condition: service_healthy
+      vllm_text:
+        condition: service_healthy
+
+  ui:
+    environment:
+      SMARTCAMPUS_PROFILE: ${SMARTCAMPUS_PROFILE:-container_vllm}
+    depends_on:
+      api:
+        condition: service_healthy
+
+  vllm_text:
+    image: vllm/vllm-openai:latest
+    init: true
+    gpus: all
+    environment:
+      PYTHONUNBUFFERED: "1"
+      HF_HOME: /root/.cache/huggingface
+      VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: "1"
+    command: >
+      --model ${VLLM_MODEL_ID:-/app/models/qwen3-4b-instruct-2507}
+      --served-model-name ${VLLM_SERVED_MODEL_NAME:-Qwen/Qwen3-4B-Instruct-2507}
+      --host 0.0.0.0
+      --port 8001
+      --dtype ${VLLM_DTYPE:-float16}
+      --max-model-len ${VLLM_MAX_MODEL_LEN:-512}
+      --gpu-memory-utilization ${VLLM_GPU_MEMORY_UTILIZATION:-0.86}
+      --max-num-seqs ${VLLM_MAX_NUM_SEQS:-2}
+      --max-num-batched-tokens ${VLLM_MAX_NUM_BATCHED_TOKENS:-1024}
+      --enforce-eager
+    ports:
+      - "8001:8001"
+    healthcheck:
+      test: ["CMD", "python3", "/app/docker/healthcheck_http.py", "http://127.0.0.1:8001/v1/models"]
+      interval: 30s
+      timeout: 10s
+      retries: 12
+      start_period: 180s
+    restart: unless-stopped
+    volumes:
+      - ./models:/app/models
+      - hf_cache_text:/root/.cache/huggingface
+      - ./docker:/app/docker:ro
+
+volumes:
+  hf_cache_text:

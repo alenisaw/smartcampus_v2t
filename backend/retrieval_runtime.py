@@ -153,6 +153,11 @@ def _grounded_prompt(task: str, user_input: str, context: str) -> str:
         "You are a grounded surveillance analytics assistant.\n"
         f"Task: {task}.\n"
         "Use only the context below. Do not invent facts. Preserve time ranges and segment ids when relevant.\n"
+        "Answer as a concise analytic summary in plain text, not as a conversation.\n"
+        "Do not output code, bash commands, shell steps, JSON, markdown tables, or fenced code blocks.\n"
+        "Do not say you are unsure unless the context truly lacks grounded evidence.\n"
+        "If evidence is limited, say exactly what is supported and what is not supported by the retrieved segments.\n"
+        "When possible, mention the key episodes with video id and time range.\n"
         f"User input: {user_input}\n"
         f"Context:\n{context}\n"
         "Return only the final answer text."
@@ -161,6 +166,28 @@ def _grounded_prompt(task: str, user_input: str, context: str) -> str:
 
 def _fallback_grounded_result(fallback_text: str, context: str) -> Tuple[str, str, str]:
     return fallback_text, "deterministic", context
+
+
+def _looks_like_bad_grounded_output(text: str) -> bool:
+    normalized = str(text or "").strip().lower()
+    if not normalized:
+        return True
+    banned_fragments = (
+        "```",
+        "#!/bin/bash",
+        "#!/usr/bin/env bash",
+        "apt-get ",
+        "pip install ",
+        "curl ",
+        "wget ",
+        "chmod +x",
+        "bash script",
+        "shell script",
+        "i'm not sure",
+        "i am not sure",
+        "not sure this",
+    )
+    return any(fragment in normalized for fragment in banned_fragments)
 
 
 def _index_version(index_dir: Path) -> float:
@@ -499,7 +526,7 @@ def generate_grounded_text(
         generated = str(client.generate_text(prompt) or "").strip()
     except Exception:
         return _fallback_grounded_result(fallback_text, context)
-    if not generated:
+    if _looks_like_bad_grounded_output(generated):
         return _fallback_grounded_result(fallback_text, context)
     return generated, "llm", context
 
@@ -528,17 +555,29 @@ def hit_to_schema(hit: Any) -> SearchHit:
     )
 
 
-def _hit_identity(hit: Any) -> Tuple[str, float, float, str]:
+def _hit_identity(hit: Any) -> Tuple[str, str, str, float, float]:
+    """Return the canonical dedupe key for one hit across synchronized language layers."""
+
+    segment_id = str(getattr(hit, "segment_id", "") or "").strip()
+    if segment_id:
+        return (
+            str(getattr(hit, "video_id", "") or ""),
+            str(getattr(hit, "variant", "") or ""),
+            segment_id,
+            0.0,
+            0.0,
+        )
     return (
         str(getattr(hit, "video_id", "") or ""),
+        str(getattr(hit, "variant", "") or ""),
+        "",
         float(getattr(hit, "start_sec", 0.0) or 0.0),
         float(getattr(hit, "end_sec", 0.0) or 0.0),
-        str(getattr(hit, "language", "") or ""),
     )
 
 
 def append_unique_hits(out: List[SearchHit], seen: set, hits: List[Any], *, limit: int) -> None:
-    """Append serialized hits while deduplicating by video/time/language."""
+    """Append serialized hits while deduplicating synchronized language copies."""
 
     max_items = max(0, int(limit))
     for hit in hits:
@@ -603,20 +642,18 @@ def qa_text_from_hits(_question: str, hits: List[Any]) -> str:
     """Build a grounded answer from the top retrieved evidence only."""
 
     if not hits:
-        return "I do not have grounded evidence to answer that question."
+        return "No grounded evidence was found for this question in the retrieved search scope."
 
-    lead = hits[0]
-    lead_text = str(getattr(lead, "description", "") or "").strip()
-    if len(hits) == 1:
-        return f"Based on the top retrieved segment: {lead_text}"
-
-    extras = []
-    for hit in hits[1:3]:
-        extras.append(str(getattr(hit, "description", "") or "").strip())
-    joined = " ".join(x for x in extras if x)
-    if joined:
-        return f"Based on the retrieved evidence: {lead_text} Additional context: {joined}"
-    return f"Based on the retrieved evidence: {lead_text}"
+    lines = ["Grounded answer based on retrieved evidence:"]
+    for idx, hit in enumerate(hits[:3], start=1):
+        video_id = str(getattr(hit, "video_id", "") or "-")
+        start_sec = float(getattr(hit, "start_sec", 0.0) or 0.0)
+        end_sec = float(getattr(hit, "end_sec", 0.0) or 0.0)
+        description = str(getattr(hit, "description", "") or "").strip()
+        lines.append(f"{idx}. {video_id} [{start_sec:.1f}-{end_sec:.1f}s]: {description}")
+    if len(hits) > 3:
+        lines.append(f"Additional grounded segments available: {len(hits) - 3}.")
+    return "\n".join(lines)
 
 
 def metrics_summary_from_outputs(video_id: str, language: str, outputs: Dict[str, Any]) -> MetricsSummaryResponse:

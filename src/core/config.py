@@ -62,6 +62,11 @@ class SearchConfig:
     embed_model_name: str
     embedding_model_id: str
     embedding_backend: str
+    ann_backend: str
+    ann_index_type: str
+    ann_hnsw_m: int
+    ann_ef_construction: int
+    ann_ef_search: int
     reranker_model_id: str
     reranker_backend: str
     query_prefix: str
@@ -132,6 +137,7 @@ class ModelConfig:
     dtype: str
     language: str
     batch_size: int
+    max_batch_clips: int
     max_new_tokens: int
     temperature: float
     top_p: float
@@ -140,6 +146,7 @@ class ModelConfig:
     do_sample: bool
     attn_implementation: str
     max_batch_frames: int
+    batch_frame_tolerance: int
     timeout_sec: int
 
 
@@ -159,6 +166,8 @@ class LlmConfig:
     transformers_compile: bool
     vllm_base_url: str
     vllm_timeout_sec: int
+    vllm_served_model_name: str
+    vllm_api_key: str
 
 
 @dataclass

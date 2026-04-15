@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import pickle
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -23,6 +24,7 @@ except Exception:
     zstd = None
 
 from .embed import MODEL_NAME_DEFAULT, sanitize_tag
+from .ann import load_ann_bundle
 from .types import HybridIndex, normalize_loaded_doc
 
 
@@ -198,6 +200,7 @@ def load_manifest(index_dir: Path) -> Dict[str, Any]:
     manifest.setdefault("variant", None)
     manifest.setdefault("dense_input_mode", "text")
     manifest.setdefault("has_dense_valid", True)
+    manifest.setdefault("ann_backend", "exact")
     return manifest
 
 
@@ -250,7 +253,10 @@ def load_prev_embeddings(index_dir: Path) -> Tuple[List[str], Optional[Any]]:
         return [], None
     try:
         old_doc_ids = read_json(doc_ids_path)
-        old_emb = np.load(emb_path, mmap_mode="r")
+        # Windows keeps a stronger lock on memory-mapped files. The builder later
+        # overwrites the same embeddings file during incremental updates, so avoid
+        # mmap there to prevent save-time `OSError: [Errno 22] Invalid argument`.
+        old_emb = np.load(emb_path, mmap_mode=None if os.name == "nt" else "r")
         if not isinstance(old_doc_ids, list):
             return [], None
         if int(old_emb.shape[0]) != len(old_doc_ids):
@@ -312,11 +318,15 @@ def load_index(index_dir: Path) -> HybridIndex:
     else:
         dense_valid = np.ones((int(embeddings.shape[0]),), dtype=np.bool_)
 
+    ann_meta = meta.get("ann") if isinstance(meta.get("ann"), dict) else {"backend": manifest.get("ann_backend", "exact")}
+    ann_index = load_ann_bundle(index_dir, embeddings=embeddings, dense_valid=dense_valid, meta=ann_meta)
+
     return HybridIndex(
         docs=docs,
         doc_ids=doc_ids,
         bm25=bm25,
         embeddings=embeddings,
         dense_valid=dense_valid,
+        ann_index=ann_index,
         meta={**manifest, **meta},
     )

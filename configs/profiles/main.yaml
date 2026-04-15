@@ -27,6 +27,11 @@ search:
   embed_model_name: BAAI/bge-m3
   embedding_model_id: models/qwen3-vl-embedding-2b
   embedding_backend: auto
+  ann_backend: auto
+  ann_index_type: hnsw
+  ann_hnsw_m: 32
+  ann_ef_construction: 80
+  ann_ef_search: 64
   reranker_model_id: models/qwen3-vl-reranker-2b
   reranker_backend: transformers
   query_prefix: "query: "
@@ -85,9 +90,11 @@ model:
   device: cuda
   dtype: fp16
   language: en
-  batch_size: 3
-  max_batch_frames: 64
-  max_new_tokens: 128
+  batch_size: 4
+  max_batch_clips: 4
+  max_batch_frames: 72
+  batch_frame_tolerance: 2
+  max_new_tokens: 96
   temperature: 0.0
   top_p: 1.0
   top_k: 40

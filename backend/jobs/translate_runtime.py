@@ -35,6 +35,7 @@ from src.utils.video_store import (
     summary_path,
     update_metrics,
     update_outputs_manifest,
+    validate_translation_outputs,
     write_segments,
     write_summary,
 )
@@ -363,6 +364,17 @@ def _mark_translation_running(context: _TranslateJobContext) -> None:
     )
 
 
+def _mark_translation_repair(context: _TranslateJobContext) -> None:
+    """Persist a compact repair marker before retranslating incomplete outputs."""
+
+    _set_translate_stage(
+        context,
+        stage="repair",
+        progress=0.02,
+        message="Repairing incomplete translation outputs",
+    )
+
+
 def _build_translation_metric_payload(context: _TranslateJobContext) -> Dict[str, Any]:
     return build_runtime_metric_payload(
         context.cfg,
@@ -497,15 +509,21 @@ def _run_optional_translation_index(
         message="Index update",
     )
     index_started = time.perf_counter()
-    index_time = _run_index_build(cfg=context.cfg, cfg_fp=context.cfg_fp, language=context.tgt_lang)
+    index_payload = _run_index_build(cfg=context.cfg, cfg_fp=context.cfg_fp, language=context.tgt_lang)
     _record_stage(metric_payload, "index_build", time.perf_counter() - index_started)
-    _write_index_state(context.paths, built=False, last_error=None)
+    _write_index_state(
+        context.paths,
+        built=False,
+        last_error=None,
+        language=context.tgt_lang,
+        payload=index_payload,
+    )
     _write_index_metrics(
         cfg=context.cfg,
         video_id=context.video_id,
         language=context.tgt_lang,
         variant=context.variant_id,
-        index_time=index_time,
+        index_payload=index_payload,
     )
 
 
@@ -602,10 +620,21 @@ def run_translate_job(
         _complete_translation_job(context.paths, context.job_id, "Source equals target")
         return
 
-    target_path = segments_path(context.videos_dir, context.video_id, context.tgt_lang, variant=context.variant_id)
-    if target_path.exists() and not context.force_overwrite:
+    health = validate_translation_outputs(
+        context.videos_dir,
+        context.video_id,
+        context.tgt_lang,
+        variant=context.variant_id,
+    )
+    if not context.force_overwrite and bool(health.get("complete")):
         _complete_translation_job(context.paths, context.job_id, "Already translated")
         return
+    if not context.force_overwrite and (
+        health.get("manifest_status") == "ready"
+        or health.get("missing_artifacts")
+        or health.get("corrupted_artifacts")
+    ):
+        _mark_translation_repair(context)
 
     _mark_translation_running(context)
     translate_started_at = time.perf_counter()

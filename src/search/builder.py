@@ -40,6 +40,7 @@ from .embed import (
     build_text_embedder,
     select_embedding_model_ref,
 )
+from .ann import save_ann_bundle
 from .store import (
     compute_dense_valid_mask as _compute_dense_valid_mask,
     config_tag_from_fingerprint,
@@ -240,6 +241,11 @@ def _build_no_change_meta(
     normalize_text: bool,
     lemmatize: bool,
     dense_input_mode: str,
+    ann_backend: str,
+    ann_index_type: str,
+    ann_hnsw_m: int,
+    ann_ef_construction: int,
+    ann_ef_search: int,
     docs_by_id: Dict[str, Doc],
     files: List[Path],
     scan_stats: Dict[str, Any],
@@ -263,6 +269,11 @@ def _build_no_change_meta(
         "normalize_text": bool(normalize_text),
         "lemmatize": bool(lemmatize),
         "dense_input_mode": dense_input_mode,
+        "ann_backend": ann_backend,
+        "ann_index_type": ann_index_type,
+        "ann_hnsw_m": int(ann_hnsw_m),
+        "ann_ef_construction": int(ann_ef_construction),
+        "ann_ef_search": int(ann_ef_search),
         "has_dense_valid": True,
         "runtime": {
             "note": "No changes detected. Index not rebuilt.",
@@ -294,6 +305,11 @@ def search_config_fingerprint(cfg: Any) -> str:
             "passage_prefix": str(getattr(s, "passage_prefix", "passage: ")),
             "embedding_model_id": str(getattr(s, "embedding_model_id", "")),
             "embedding_backend": str(getattr(s, "embedding_backend", "auto")),
+            "ann_backend": str(getattr(s, "ann_backend", "auto")),
+            "ann_index_type": str(getattr(s, "ann_index_type", "hnsw")),
+            "ann_hnsw_m": int(getattr(s, "ann_hnsw_m", 32)),
+            "ann_ef_construction": int(getattr(s, "ann_ef_construction", 80)),
+            "ann_ef_search": int(getattr(s, "ann_ef_search", 64)),
             "reranker_model_id": str(getattr(s, "reranker_model_id", "")),
             "reranker_backend": str(getattr(s, "reranker_backend", "auto")),
             "normalize_text": bool(getattr(s, "normalize_text", True)),
@@ -339,6 +355,11 @@ def build_or_update_index(
     dense_input_mode: str = "text",
     cache_dir: Optional[Path] = None,
     use_embed_cache: bool = True,
+    ann_backend: str = "auto",
+    ann_index_type: str = "hnsw",
+    ann_hnsw_m: int = 32,
+    ann_ef_construction: int = 80,
+    ann_ef_search: int = 64,
 ) -> Path:
 
     t_total0 = time.perf_counter()
@@ -351,6 +372,8 @@ def build_or_update_index(
     embed_store_dtype = _normalize_embed_store_dtype(embed_store_dtype)
     embedding_backend = str(embedding_backend or "auto").strip().lower() or "auto"
     dense_input_mode = str(dense_input_mode or "text").strip().lower() or "text"
+    ann_backend = str(ann_backend or "auto").strip().lower() or "auto"
+    ann_index_type = str(ann_index_type or "hnsw").strip().lower() or "hnsw"
     manifest = _load_manifest(real_index_dir)
     prev_manifest_version = int(manifest.get("version", 0) or 0)
     schema_changed = prev_manifest_version < 5
@@ -372,6 +395,7 @@ def build_or_update_index(
 
     manifest["bm25"] = {"k1": float(bm25_k1), "b": float(bm25_b)}
     _configure_manifest_layout(manifest, variant=variant, language=language, dense_input_mode=dense_input_mode)
+    manifest["ann_backend"] = ann_backend
 
     files = _iter_segment_files(videos_root, language=language, variant=variant)
     if not files:
@@ -408,6 +432,11 @@ def build_or_update_index(
             normalize_text=normalize_text,
             lemmatize=lemmatize,
             dense_input_mode=dense_input_mode,
+            ann_backend=ann_backend,
+            ann_index_type=ann_index_type,
+            ann_hnsw_m=ann_hnsw_m,
+            ann_ef_construction=ann_ef_construction,
+            ann_ef_search=ann_ef_search,
             docs_by_id=docs_by_id,
             files=files,
             scan_stats=scan_stats,
@@ -614,6 +643,16 @@ def build_or_update_index(
     _write_json(real_index_dir / "doc_ids.json", doc_ids)
     np.save(real_index_dir / "embeddings.npy", emb_arr)
     np.save(real_index_dir / "dense_valid.npy", dense_valid.astype(np.bool_, copy=False))
+    ann_meta = save_ann_bundle(
+        real_index_dir,
+        embeddings=np.asarray(emb_arr, dtype=np.float32),
+        dense_valid=dense_valid,
+        backend=ann_backend,
+        index_type=ann_index_type,
+        hnsw_m=ann_hnsw_m,
+        ef_construction=ann_ef_construction,
+        ef_search=ann_ef_search,
+    )
     t_write_ms = (time.perf_counter() - t_write0) * 1000.0
 
     embed_dim = int(emb_arr.shape[1]) if int(emb_arr.shape[0]) else 0
@@ -638,8 +677,14 @@ def build_or_update_index(
         "normalize_text": bool(normalize_text),
         "lemmatize": bool(lemmatize),
         "dense_input_mode": dense_input_mode,
+        "ann_backend": str((ann_meta or {}).get("backend", ann_backend)),
+        "ann_index_type": str((ann_meta or {}).get("index_type", ann_index_type)),
+        "ann_hnsw_m": int((ann_meta or {}).get("hnsw_m", ann_hnsw_m)),
+        "ann_ef_construction": int((ann_meta or {}).get("ef_construction", ann_ef_construction)),
+        "ann_ef_search": int((ann_meta or {}).get("ef_search", ann_ef_search)),
         "has_dense_valid": True,
         "dense_valid_count": dense_valid_n,
+        "ann": ann_meta,
         "runtime": {
             "timings_ms": {
                 "scan": float(t_scan_ms),

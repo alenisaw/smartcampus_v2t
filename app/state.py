@@ -43,7 +43,7 @@ class UIState:
                 "queue_selected_remove": None,
                 # search
                 "search_query": "",
-                "search_topk": 10,
+                "search_topk": 5,
                 "search_video_filter": "(all)",
                 "search_selected_hit_index": 0,
                 "selected_hit": None,

@@ -482,6 +482,13 @@ def read_metrics(path: Path) -> Optional[Dict[str, Any]]:
     return obj if isinstance(obj, dict) else None
 
 
+def read_run_manifest(path: Path) -> Optional[Dict[str, Any]]:
+    """Read the persisted per-run manifest payload."""
+
+    obj = _read_json(path, default=None)
+    return obj if isinstance(obj, dict) else None
+
+
 def write_metrics(path: Path, metrics: Dict[str, Any]) -> None:
     """Write metrics JSON."""
 
@@ -603,3 +610,169 @@ def update_outputs_manifest(
         root_manifest["updated_at"] = now_ts()
         root_manifest["variants"] = variants
         _write_json(root_manifest_path, root_manifest)
+
+
+def manifest_language_status(
+    videos_dir: Path,
+    video_id: str,
+    lang: str,
+    *,
+    variant: Optional[str] = None,
+) -> Optional[str]:
+    """Return the normalized manifest status for one language."""
+
+    manifest = _read_json(outputs_manifest_path(videos_dir, video_id, variant=variant), default=None)
+    if not isinstance(manifest, dict):
+        return None
+    languages = manifest.get("languages")
+    if not isinstance(languages, dict):
+        return None
+    payload = languages.get(str(lang))
+    if not isinstance(payload, dict):
+        return None
+    status = str(payload.get("status") or "").strip().lower()
+    return status or None
+
+
+def _segments_readable(path: Path) -> bool:
+    """Return whether one segments artifact can be parsed without fallback ambiguity."""
+
+    if not path.exists():
+        return False
+    try:
+        if path.suffix == ".zst":
+            _read_jsonl_zst(path)
+        elif path.suffix == ".gz":
+            _read_jsonl_gz(path)
+        else:
+            return False
+    except Exception:
+        return False
+    return True
+
+
+def _summary_readable(path: Path) -> bool:
+    """Return whether one summary artifact is present and valid."""
+
+    return path.exists() and isinstance(read_summary(path), dict)
+
+
+def _metrics_readable(path: Path) -> bool:
+    """Return whether one metrics artifact is present and valid."""
+
+    return path.exists() and isinstance(read_metrics(path), dict)
+
+
+def _run_manifest_readable(path: Path) -> bool:
+    """Return whether one run-manifest artifact is present and valid."""
+
+    return path.exists() and isinstance(read_run_manifest(path), dict)
+
+
+def _clip_observations_readable(path: Path) -> bool:
+    """Return whether one clip-observations artifact is present and valid."""
+
+    if not path.exists():
+        return False
+    obj = _read_json(path, default=None)
+    return isinstance(obj, list)
+
+
+def _artifact_integrity_row(name: str, path: Path, valid: bool) -> Dict[str, Any]:
+    """Build a compact machine-readable artifact status row."""
+
+    return {
+        "name": str(name),
+        "path": str(path),
+        "exists": bool(path.exists()),
+        "valid": bool(valid),
+    }
+
+
+def validate_process_outputs(
+    videos_dir: Path,
+    video_id: str,
+    lang: str,
+    *,
+    variant: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Validate the full base process artifact set for one video/language."""
+
+    clip_path = clip_observations_path(videos_dir, video_id, variant=variant)
+    seg_path = segments_path(videos_dir, video_id, lang, variant=variant)
+    sum_path = summary_path(videos_dir, video_id, lang, variant=variant)
+    met_path = metrics_path(videos_dir, video_id, variant=variant)
+    run_path = run_manifest_path(videos_dir, video_id, variant=variant)
+    manifest_path = outputs_manifest_path(videos_dir, video_id, variant=variant)
+    manifest_status = manifest_language_status(videos_dir, video_id, lang, variant=variant)
+
+    artifacts = [
+        _artifact_integrity_row("clip_observations", clip_path, _clip_observations_readable(clip_path)),
+        _artifact_integrity_row("segments", seg_path, _segments_readable(seg_path)),
+        _artifact_integrity_row("summary", sum_path, _summary_readable(sum_path)),
+        _artifact_integrity_row("metrics", met_path, _metrics_readable(met_path)),
+        _artifact_integrity_row("run_manifest", run_path, _run_manifest_readable(run_path)),
+    ]
+    missing = [item["name"] for item in artifacts if not item["exists"]]
+    corrupted = [item["name"] for item in artifacts if item["exists"] and not item["valid"]]
+    complete = manifest_status == "ready" and not missing and not corrupted
+    classification = "complete" if complete else (
+        "missing_manifest" if not manifest_path.exists() else (
+            "manifest_ready_but_incomplete" if manifest_status == "ready" else (
+                "corrupted_artifact" if corrupted else "incomplete_process"
+            )
+        )
+    )
+    return {
+        "scope": "process",
+        "video_id": str(video_id),
+        "variant": _normalize_variant(variant),
+        "language": str(lang),
+        "manifest_status": manifest_status,
+        "complete": bool(complete),
+        "classification": classification,
+        "missing_artifacts": missing,
+        "corrupted_artifacts": corrupted,
+        "artifacts": artifacts,
+    }
+
+
+def validate_translation_outputs(
+    videos_dir: Path,
+    video_id: str,
+    lang: str,
+    *,
+    variant: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Validate the translated artifact set for one target language."""
+
+    seg_path = segments_path(videos_dir, video_id, lang, variant=variant)
+    sum_path = summary_path(videos_dir, video_id, lang, variant=variant)
+    manifest_path = outputs_manifest_path(videos_dir, video_id, variant=variant)
+    manifest_status = manifest_language_status(videos_dir, video_id, lang, variant=variant)
+    artifacts = [
+        _artifact_integrity_row("segments", seg_path, _segments_readable(seg_path)),
+        _artifact_integrity_row("summary", sum_path, _summary_readable(sum_path)),
+    ]
+    missing = [item["name"] for item in artifacts if not item["exists"]]
+    corrupted = [item["name"] for item in artifacts if item["exists"] and not item["valid"]]
+    complete = manifest_status == "ready" and not missing and not corrupted
+    classification = "complete" if complete else (
+        "missing_manifest" if not manifest_path.exists() else (
+            "manifest_ready_but_incomplete" if manifest_status == "ready" else (
+                "corrupted_artifact" if corrupted else "incomplete_translation"
+            )
+        )
+    )
+    return {
+        "scope": "translation",
+        "video_id": str(video_id),
+        "variant": _normalize_variant(variant),
+        "language": str(lang),
+        "manifest_status": manifest_status,
+        "complete": bool(complete),
+        "classification": classification,
+        "missing_artifacts": missing,
+        "corrupted_artifacts": corrupted,
+        "artifacts": artifacts,
+    }

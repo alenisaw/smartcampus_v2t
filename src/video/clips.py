@@ -57,12 +57,38 @@ def _pick_keyframe_path(paths_list: List[str], policy: str) -> Optional[str]:
     return str(paths_list[len(paths_list) // 2])
 
 
+def _downsample_frames_by_fps(frames: List[_FrameLike], analysis_fps: float) -> List[_FrameLike]:
+    """Reduce clip frame density to the target analysis FPS while preserving endpoints."""
+
+    if len(frames) <= 1 or float(analysis_fps) <= 0.0:
+        return list(frames)
+
+    min_interval = 1.0 / float(analysis_fps)
+    selected: List[_FrameLike] = [frames[0]]
+    last_kept_ts = float(frames[0].timestamp_sec)
+
+    for frame in frames[1:-1]:
+        if float(frame.timestamp_sec) - last_kept_ts + 1e-9 >= min_interval:
+            selected.append(frame)
+            last_kept_ts = float(frame.timestamp_sec)
+
+    tail = frames[-1]
+    if str(tail.path) == str(selected[-1].path):
+        return selected
+    if float(tail.timestamp_sec) - last_kept_ts + 1e-9 >= min_interval:
+        selected.append(tail)
+    else:
+        selected[-1] = tail
+    return selected
+
+
 def build_clips_from_video_meta(
     video_meta: Any,
     window_sec: float,
     stride_sec: float,
     min_clip_frames: int,
     max_clip_frames: int,
+    analysis_fps: float = 0.0,
     keyframe_policy: str = "middle",
     return_keyframes: bool = False,
 ):
@@ -110,14 +136,18 @@ def build_clips_from_video_meta(
         while right < total_frames and timestamps[right] <= window_end:
             right += 1
 
-        count = right - left
+        window_frames = frames[left:right]
+        if analysis_fps > 0:
+            window_frames = _downsample_frames_by_fps(window_frames, float(analysis_fps))
+
+        count = len(window_frames)
         if count >= int(min_clip_frames):
-            window_paths = paths[left:right]
+            window_paths = [str(item.path) for item in window_frames]
             if len(window_paths) > int(max_clip_frames):
                 step = len(window_paths) / float(max_clip_frames)
                 indices = [min(len(window_paths) - 1, int(index * step)) for index in range(int(max_clip_frames))]
                 window_paths = [window_paths[index] for index in indices]
-            last_ts = timestamps[right - 1] if right - 1 >= left else window_end
+            last_ts = float(window_frames[-1].timestamp_sec) if window_frames else window_end
             clips.append(window_paths)
             clip_timestamps.append((float(current_time), float(last_ts)))
             clip_keyframes.append(_pick_keyframe_path(window_paths, keyframe_policy))
