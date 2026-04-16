@@ -110,17 +110,25 @@ class SummaryService:
     polish_enabled: bool = False
 
     @classmethod
-    def from_config(cls, cfg: Any) -> "SummaryService":
+    def from_config(
+        cls,
+        cfg: Any,
+        *,
+        allow_llm: Optional[bool] = None,
+    ) -> "SummaryService":
         """Build the service and attach an LLM client when possible."""
 
-        client: Optional[LLMClient] = None
-        try:
-            client = LLMClient.from_config(cfg)
-        except Exception:
-            client = None
         runtime_cfg = getattr(cfg, "runtime", None)
         mode = str(getattr(runtime_cfg, "summary_mode", "deterministic")).strip().lower() or "deterministic"
         polish_enabled = bool(getattr(runtime_cfg, "summary_polish_enabled", False))
+        if allow_llm is None:
+            allow_llm = mode == "llm" or polish_enabled
+        client: Optional[LLMClient] = None
+        if allow_llm:
+            try:
+                client = LLMClient.from_config(cfg)
+            except Exception:
+                client = None
         return cls(cfg=cfg, llm_client=client, mode=mode, polish_enabled=polish_enabled)
 
     def build_summary(

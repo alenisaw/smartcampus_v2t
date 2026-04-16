@@ -15,11 +15,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from backend.jobs.experimental import update_batch_variant_status
-from backend.jobs.index_runtime import (
-    build_index_for_language as _run_index_build,
-    write_index_metrics as _write_index_metrics,
-    write_index_state as _write_index_state,
-)
 from backend.jobs.control import check_cancel, create_job, remove_lock_if_exists, set_state
 from backend.jobs.runtime_common import (
     WorkerServices,
@@ -692,30 +687,48 @@ def _persist_process_outputs(
     return base_segments_path
 
 
-def _run_optional_index(context: _ProcessJobContext, metric_payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _enqueue_followup_index_job(context: _ProcessJobContext, metric_payload: Dict[str, Any]) -> Optional[str]:
     if not context.auto_index:
         return None
 
-    for service_name in ("pipeline", "summary_service", "guard_service"):
-        service = getattr(context.services, service_name, None)
-        if service is not None and hasattr(service, "release"):
-            try:
-                service.release()
-            except Exception:
-                pass
+    enqueue_started = time.perf_counter()
+    followup_job_id: Optional[str] = None
+    followup_error: Optional[str] = None
+    try:
+        child = create_job(
+            context.paths,
+            video_id=context.video_id,
+            job_type="index",
+            profile=context.cfg.active_profile,
+            variant=context.variant_id,
+            language=context.base_lang,
+            source_language=None,
+            extra={
+                "profile": context.cfg.active_profile,
+                "variant": context.variant_id,
+                "trigger_job_id": context.job_id,
+                "trigger_job_type": "process",
+            },
+            priority="030",
+        )
+        followup_job_id = str(child.get("job_id") or "")
+    except Exception as exc:
+        followup_error = str(exc)
+    _record_stage(metric_payload, "enqueue_index_job", time.perf_counter() - enqueue_started)
 
-    set_state(context.paths, context.job_id, "indexing", stage="indexing", progress=0.92, message="Index update")
-    index_started = time.perf_counter()
-    index_payload = _run_index_build(cfg=context.cfg, cfg_fp=context.cfg_fp, language=context.base_lang)
-    _record_stage(metric_payload, "index_build", time.perf_counter() - index_started)
-    _write_index_state(
-        context.paths,
-        built=True,
-        last_error=None,
-        language=context.base_lang,
-        payload=index_payload,
-    )
-    return index_payload
+    indexing_payload = metric_payload.get("indexing")
+    if not isinstance(indexing_payload, dict):
+        indexing_payload = {}
+    indexing_payload[context.base_lang] = {
+        "status": "queued" if followup_job_id else "queue_failed",
+        "job_id": followup_job_id,
+        "trigger_job_id": context.job_id,
+        "trigger_job_type": "process",
+        "config_tag": str(context.cfg.config_fingerprint),
+        "error": followup_error,
+    }
+    metric_payload["indexing"] = indexing_payload
+    return followup_job_id
 
 
 def _enqueue_process_translations(context: _ProcessJobContext, metric_payload: Dict[str, Any]) -> None:
@@ -737,7 +750,6 @@ def _persist_process_metrics(
     metric_payload: Dict[str, Any],
     *,
     process_started_at: float,
-    index_payload: Optional[Dict[str, Any]],
 ) -> Path:
     _record_stage(metric_payload, "process_total", time.perf_counter() - process_started_at)
     _finalize_stage_stats(metric_payload, keep_samples=runtime_keep_samples(context.cfg))
@@ -749,14 +761,6 @@ def _persist_process_metrics(
     _finalize_stage_stats(metric_payload, keep_samples=runtime_keep_samples(context.cfg))
     write_metrics(metrics_target, metric_payload or {})
 
-    if context.auto_index and index_payload is not None:
-        _write_index_metrics(
-            cfg=context.cfg,
-            video_id=context.video_id,
-            language=context.base_lang,
-            variant=context.variant_id,
-            index_payload=index_payload,
-        )
     return metrics_target
 
 
@@ -856,13 +860,12 @@ def run_process_job(
         metric_payload=metric_payload,
     )
 
-    index_payload = _run_optional_index(context, metric_payload)
     _enqueue_process_translations(context, metric_payload)
+    _enqueue_followup_index_job(context, metric_payload)
     metrics_target = _persist_process_metrics(
         context,
         metric_payload,
         process_started_at=process_started_at,
-        index_payload=index_payload,
     )
     _finalize_process_success(context, metrics_target)
     _enqueue_summary_polish_job(context)

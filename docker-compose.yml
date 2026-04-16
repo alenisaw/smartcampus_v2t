@@ -1,5 +1,5 @@
 # docker-compose.yml
-# Reproducible stack for API/UI and split worker roles.
+# Canonical local stack for API/UI and split worker roles.
 x-app-build: &app-build
   context: .
   dockerfile: Dockerfile
@@ -43,6 +43,7 @@ services:
     environment:
       <<: *app-env
       SMARTCAMPUS_WORKER_ROLE: gpu
+      CUDA_VISIBLE_DEVICES: ${SMARTCAMPUS_WORKER_GPU_DEVICES:-0}
     depends_on:
       api:
         condition: service_healthy
@@ -95,47 +96,5 @@ services:
       start_period: 25s
     volumes: *app-volumes
 
-  vllm:
-    image: vllm/vllm-openai:latest
-    profiles: ["with_vllm"]
-    gpus: all
-    environment:
-      PYTHONUNBUFFERED: "1"
-      HF_HOME: /root/.cache/huggingface
-      VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: "1"
-    command: >
-      --model ${VLLM_MODEL_ID:-/app/models/qwen3-4b-instruct-2507}
-      --served-model-name ${VLLM_SERVED_MODEL_NAME:-Qwen/Qwen3-4B-Instruct-2507}
-      --host 0.0.0.0
-      --port 8001
-      --dtype ${VLLM_DTYPE:-float16}
-      --max-model-len ${VLLM_MAX_MODEL_LEN:-512}
-      --gpu-memory-utilization ${VLLM_GPU_MEMORY_UTILIZATION:-0.86}
-      --max-num-seqs ${VLLM_MAX_NUM_SEQS:-2}
-      --max-num-batched-tokens ${VLLM_MAX_NUM_BATCHED_TOKENS:-1024}
-      --enforce-eager
-    ports:
-      - "8001:8001"
-    healthcheck:
-      test: ["CMD", "python3", "/app/docker/healthcheck_http.py", "http://127.0.0.1:8001/v1/models"]
-      interval: 30s
-      timeout: 10s
-      retries: 12
-      start_period: 180s
-    restart: unless-stopped
-    volumes:
-      - ./models:/app/models
-      - ./docker:/app/docker:ro
-      - hf_cache_text:/root/.cache/huggingface
-
-  mt_service:
-    build: *app-build
-    profiles: ["with_ct2"]
-    command: python -c "import ctranslate2, sentencepiece; print('CTranslate2 backend is available')"
-    environment:
-      PYTHONUNBUFFERED: "1"
-    restart: "no"
-
 volumes:
   hf_cache:
-  hf_cache_text:

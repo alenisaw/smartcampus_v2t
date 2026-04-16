@@ -287,6 +287,20 @@ class TransformersReranker:
                 logits = logits.reshape(-1)
         return [float(x) for x in logits.detach().cpu().tolist()]
 
+    def release(self) -> None:
+        """Best-effort release of the transformers reranker backend."""
+
+        model = getattr(self, "model", None)
+        tokenizer = getattr(self, "tokenizer", None)
+        self.model = None
+        self.tokenizer = None
+        try:
+            if model is not None and hasattr(model, "cpu"):
+                model.cpu()
+        except Exception:
+            pass
+        del tokenizer
+
 
 def build_reranker(model_name: str, backend: str, device: Optional[str], looks_like_transformers_model) -> Optional[TransformersReranker]:
     """Build a model reranker when possible, otherwise return None for heuristic fallback."""

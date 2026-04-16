@@ -360,7 +360,7 @@ SmartCampus V2T состоит из трех основных runtime-повер
 | `all` | все типы jobs |
 | `gpu` | `process` jobs |
 | `mt` | `translate` jobs |
-| `cpu` | `index` jobs |
+| `cpu` | `index` and `summary_polish` jobs |
 
 Это позволяет локально разделять GPU-нагруженную обработку, перевод и индексную работу.
 
@@ -701,7 +701,9 @@ data/videos/<video_id>/
 
 ```powershell
 python -m uvicorn backend.api:app --host 127.0.0.1 --port 8000
-python -m backend.worker
+$env:SMARTCAMPUS_WORKER_ROLE="gpu"; python -m backend.worker
+$env:SMARTCAMPUS_WORKER_ROLE="cpu"; python -m backend.worker
+$env:SMARTCAMPUS_WORKER_ROLE="mt"; python -m backend.worker
 python -m streamlit run app/main.py --server.port 8501
 ```
 
@@ -716,14 +718,20 @@ run_all.bat
 ### 16.3 Docker-старт
 
 ```powershell
-docker compose up --build
+docker compose -f docker-compose.yml up --build -d
 ```
 
 Поддерживаются и дополнительные compose profiles:
 
+```text
+api + ui + worker_gpu + worker_cpu + worker_mt
+```
+
 ```powershell
-docker compose --profile with_vllm up --build
-docker compose --profile with_ct2 up --build
+$env:SMARTCAMPUS_PROFILE="container_vllm"
+$env:SMARTCAMPUS_WORKER_GPU_DEVICES="0"
+$env:SMARTCAMPUS_VLLM_DEVICES="1"
+docker compose -f docker-compose.yml -f docker-compose.vllm.yml up --build -d
 ```
 
 ## 17. Архитектурные характеристики

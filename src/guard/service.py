@@ -53,7 +53,12 @@ class GuardService:
     client: Optional[LLMClient] = None
 
     @classmethod
-    def from_config(cls, cfg: Any) -> "GuardService":
+    def from_config(
+        cls,
+        cfg: Any,
+        *,
+        load_client: bool = True,
+    ) -> "GuardService":
         """Build the guard service from config and local model paths."""
 
         enabled = bool(getattr(cfg.guard, "enabled", False))
@@ -61,7 +66,7 @@ class GuardService:
         output_gate = bool(getattr(cfg.guard, "output_gate", False))
         client: Optional[LLMClient] = None
 
-        if enabled:
+        if enabled and load_client:
             model_ref = str(getattr(cfg.guard, "model_id", "") or "").strip()
             client = LLMClient(
                 backend="transformers",

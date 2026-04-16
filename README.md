@@ -38,7 +38,9 @@ docs/      Project documentation
 
 ```powershell
 python -m uvicorn backend.api:app --host 127.0.0.1 --port 8000
-python -m backend.worker
+$env:SMARTCAMPUS_WORKER_ROLE="gpu"; python -m backend.worker
+$env:SMARTCAMPUS_WORKER_ROLE="cpu"; python -m backend.worker
+$env:SMARTCAMPUS_WORKER_ROLE="mt"; python -m backend.worker
 python -m streamlit run app/main.py --server.port 8501
 ```
 
@@ -48,33 +50,46 @@ python -m streamlit run app/main.py --server.port 8501
 run_all.bat
 ```
 
+Optional worker toggles for Windows:
+
+```powershell
+$env:SMARTCAMPUS_START_GPU="1"
+$env:SMARTCAMPUS_START_CPU="1"
+$env:SMARTCAMPUS_START_MT="0"
+run_all.bat
+```
+
 ### Docker
 
 ```powershell
 docker compose up --build
 ```
 
-Optional compose profiles:
+Single-GPU local stack:
 
 ```powershell
-docker compose --profile with_vllm up --build
-docker compose --profile with_ct2 up --build
+docker compose -f docker-compose.yml up --build -d
 ```
 
-Service-oriented text LLM stack through `vLLM`:
+Dual-GPU-preferred text-LLM stack through `vLLM`:
 
 ```powershell
-docker compose -f docker-compose.yml -f docker-compose.vllm.yml up --build
+$env:SMARTCAMPUS_PROFILE="container_vllm"
+$env:SMARTCAMPUS_WORKER_GPU_DEVICES="0"
+$env:SMARTCAMPUS_VLLM_DEVICES="1"
+docker compose -f docker-compose.yml -f docker-compose.vllm.yml up --build -d
 ```
 
-This stack uses the `container_vllm` runtime profile and expects local assets under:
+The base compose file is the canonical local and single-GPU stack. The `docker-compose.vllm.yml` override is for the full Docker runtime and is safest when `worker_gpu` and `vllm_text` do not compete for the same GPU.
+
+Both Docker paths expect local assets under:
 
 ```text
 ./data
 ./models
 ```
 
-Compose already has safe defaults for this stack.
+Compose already has safe defaults for these stacks.
 If you need Docker-level overrides such as `VLLM_*`, set them in the shell or a local untracked `.env`.
 Application behavior should live in `configs/profiles/*.yaml` and `configs/variants/*.yaml`.
 The Docker image also installs `faiss-cpu` from `requirements-faiss.txt`, so `search.ann_backend: auto` resolves to a real FAISS index inside containers.
@@ -100,19 +115,29 @@ $env:VLLM_MAX_NUM_SEQS="2"
 $env:VLLM_MAX_NUM_BATCHED_TOKENS="1024"
 ```
 
-3. Inspect the resolved runtime before startup:
+3. For a single-GPU local container run, inspect the base runtime:
+
+```powershell
+python scripts/runtime/inspect_runtime.py --profile main
+docker compose -f docker-compose.yml up --build -d
+```
+
+4. For the full dual-GPU-preferred stack, inspect the resolved runtime before startup:
 
 ```powershell
 python scripts/runtime/inspect_runtime.py --profile container_vllm
 ```
 
-4. Start the full service stack:
+5. Start the full service stack:
 
 ```powershell
+$env:SMARTCAMPUS_PROFILE="container_vllm"
+$env:SMARTCAMPUS_WORKER_GPU_DEVICES="0"
+$env:SMARTCAMPUS_VLLM_DEVICES="1"
 docker compose -f docker-compose.yml -f docker-compose.vllm.yml up --build -d
 ```
 
-5. Watch logs while the text model warms up:
+6. Watch logs while the text model warms up:
 
 ```powershell
 docker compose -f docker-compose.yml -f docker-compose.vllm.yml logs -f vllm_text api worker_gpu worker_cpu worker_mt ui
@@ -121,19 +146,19 @@ docker compose -f docker-compose.yml -f docker-compose.vllm.yml logs -f vllm_tex
 The `vllm_text` service now starts from the local `./models/qwen3-4b-instruct-2507` path by default.
 On a first run under Docker Desktop / WSL, `vLLM` may spend several minutes loading weights and compiling before `/v1/models` becomes ready.
 
-6. Run the smoke check:
+7. Run the smoke check:
 
 ```powershell
 python scripts/runtime/smoke_services.py --api http://127.0.0.1:8000 --ui http://127.0.0.1:8501 --llm http://127.0.0.1:8001
 ```
 
-7. Rebuild the index if needed:
+8. Rebuild the index if needed:
 
 ```powershell
 curl -X POST http://127.0.0.1:8000/v1/index/rebuild
 ```
 
-8. Inspect the resolved backend:
+9. Inspect the resolved backend:
 
 ```powershell
 curl http://127.0.0.1:8000/v1/index/status
@@ -146,7 +171,9 @@ The language payload now includes `ann_backend`, `ann_index_type`, `dense_valid_
 Useful checks when the stack is up:
 
 ```powershell
+docker compose -f docker-compose.yml ps
 docker compose -f docker-compose.yml -f docker-compose.vllm.yml ps
+docker compose -f docker-compose.yml logs --tail=200 api worker_gpu worker_cpu worker_mt ui
 docker compose -f docker-compose.yml -f docker-compose.vllm.yml logs --tail=200 api worker_gpu worker_cpu worker_mt ui vllm_text
 python scripts/runtime/inspect_runtime.py --profile container_vllm --variant throughput
 python scripts/runtime/smoke_services.py --api http://127.0.0.1:8000 --ui http://127.0.0.1:8501 --llm http://127.0.0.1:8001

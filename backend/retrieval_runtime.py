@@ -43,6 +43,32 @@ def _translation_service_key(cfg: Any) -> str:
     return f"{cfg.translation.backend}::{cfg.config_fingerprint}"
 
 
+def _release_if_possible(service: Any) -> None:
+    """Release one cached service when it exposes a release hook."""
+
+    if service is None or not hasattr(service, "release"):
+        return
+    try:
+        service.release()
+    except Exception:
+        return
+
+
+def release_cached_retrieval_services() -> None:
+    """Release and clear cached retrieval-side services."""
+
+    for entry in list(_ENGINE_CACHE.values()):
+        if not isinstance(entry, dict):
+            continue
+        _release_if_possible(entry.get("qe"))
+    _ENGINE_CACHE.clear()
+
+    for cache in (_TRANS_CACHE, _LLM_CACHE, _GUARD_CACHE):
+        for service in list(cache.values()):
+            _release_if_possible(service)
+        cache.clear()
+
+
 def _search_with_engine(
     engine: "QueryEngine",
     *,
@@ -229,9 +255,16 @@ def get_engine(cfg: Any, language: str, variant: Optional[str] = None) -> Option
     version = _index_version(idx_dir)
     if version <= 0:
         return None
-    cache_key = f"{lang}::{resolved_variant or 'base'}"
+    cache_suffix = f"{lang}::{resolved_variant or 'base'}"
+    cache_key = f"{cfg_fp}::{cache_suffix}"
+    stale_keys = [key for key in list(_ENGINE_CACHE.keys()) if key.endswith(cache_suffix) and key != cache_key]
+    for stale_key in stale_keys:
+        stale_entry = _ENGINE_CACHE.pop(stale_key, None)
+        if isinstance(stale_entry, dict):
+            _release_if_possible(stale_entry.get("qe"))
     cache = _ENGINE_CACHE.setdefault(cache_key, {"ver": None, "qe": None, "dir": None})
     if cache["qe"] is None or cache["ver"] != version or cache["dir"] != str(idx_dir):
+        _release_if_possible(cache.get("qe"))
         cache["qe"] = QueryEngine(
             index_dir=Path(cfg.paths.indexes_dir),
             config_fingerprint=cfg_fp,
