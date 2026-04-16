@@ -119,6 +119,17 @@ class SentenceTransformerEmbedder:
     def encode_query(self, text: str):
         return self.model.encode([self.prep_query(text)], normalize_embeddings=True, show_progress_bar=False)[0]
 
+    def release(self) -> None:
+        """Best-effort release of the sentence-transformers model."""
+
+        model = getattr(self, "model", None)
+        self.model = None
+        try:
+            if model is not None and hasattr(model, "cpu"):
+                model.cpu()
+        except Exception:
+            pass
+
 
 class TransformersTextEmbedder:
     """Embed text with a generic transformers model using masked mean pooling."""
@@ -209,6 +220,20 @@ class TransformersTextEmbedder:
         arr = self._encode([self.prep_query(text)], batch_size=1)
         return arr[0] if len(arr) else np.zeros((0,), dtype=np.float32)
 
+    def release(self) -> None:
+        """Best-effort release of the transformers embedding backend."""
+
+        model = getattr(self, "model", None)
+        tokenizer = getattr(self, "tokenizer", None)
+        self.model = None
+        self.tokenizer = None
+        try:
+            if model is not None and hasattr(model, "cpu"):
+                model.cpu()
+        except Exception:
+            pass
+        del tokenizer
+
 
 class QwenVLTextEmbedder:
     """Embed text with the local Qwen3-VL embedding wrapper shipped with the model."""
@@ -235,6 +260,7 @@ class QwenVLTextEmbedder:
             raise RuntimeError(f"Qwen3-VL embedding model path not found: {self.model_name}")
 
         cache_key = f"{model_path.resolve()}::{str(device or '').strip().lower() or 'auto'}"
+        self._cache_key = cache_key
         backend = _QWEN_VL_EMBEDDER_CACHE.get(cache_key)
         if backend is None:
             try:
@@ -397,6 +423,20 @@ class QwenVLTextEmbedder:
             ]
         )
         return arr[0] if len(arr) else np.zeros((0,), dtype=np.float32)
+
+    def release(self) -> None:
+        """Best-effort release of the cached local Qwen3-VL embedding backend."""
+
+        cache_key = str(getattr(self, "_cache_key", "") or "")
+        backend = _QWEN_VL_EMBEDDER_CACHE.pop(cache_key, None) if cache_key else None
+        model = (backend or {}).get("model") if isinstance(backend, dict) else getattr(self, "model", None)
+        self.model = None
+        self.tokenizer = None
+        try:
+            if model is not None and hasattr(model, "cpu"):
+                model.cpu()
+        except Exception:
+            pass
 
 
 def looks_like_transformers_model(model_name: str) -> bool:

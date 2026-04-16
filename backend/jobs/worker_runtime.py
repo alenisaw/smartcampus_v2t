@@ -35,6 +35,7 @@ from src.utils.video_store import update_outputs_manifest, write_batch_manifest
 class WorkerContext:
     """Resolved runtime dependencies for one effective config."""
 
+    role: str
     cfg: Any
     raw: Dict[str, Any]
     cfg_fp: str
@@ -135,8 +136,54 @@ def _cleanup_services_after_job(services: WorkerServices) -> None:
     _release_inactive_services(services, keep=set())
 
 
-def _build_services(cfg: Any) -> WorkerServices:
-    """Build the service bundle for the current effective config."""
+def _worker_role_tag(role: Optional[str]) -> str:
+    """Normalize the runtime worker role into one stable tag."""
+
+    token = str(role or "all").strip().lower() or "all"
+    if token in {"worker_gpu", "gpu"}:
+        return "gpu"
+    if token in {"worker_cpu", "cpu"}:
+        return "cpu"
+    if token in {"worker_mt", "mt"}:
+        return "mt"
+    return "all"
+
+
+def _worker_guard_uses_model(cfg: Any) -> bool:
+    """Return whether worker-side output guard should keep a model-backed client."""
+
+    if not bool(getattr(cfg.guard, "enabled", False)):
+        return False
+    if not bool(getattr(cfg.guard, "output_gate", False)):
+        return False
+    backend_pref = str(getattr(getattr(cfg, "runtime", None), "worker_output_guard_backend", "rules") or "rules")
+    return backend_pref.strip().lower() not in {"", "rules"}
+
+
+def _build_services(cfg: Any, *, role: str) -> WorkerServices:
+    """Build only the service bundle required by the current worker role."""
+
+    role_tag = _worker_role_tag(role)
+    guard_service = GuardService.from_config(cfg, load_client=_worker_guard_uses_model(cfg))
+
+    if role_tag == "gpu":
+        return WorkerServices(
+            pipeline=VideoToTextPipeline(cfg),
+            structuring_service=StructuringService.from_config(cfg, allow_llm=False),
+            summary_service=SummaryService.from_config(cfg, allow_llm=False),
+            guard_service=guard_service,
+        )
+
+    if role_tag == "cpu":
+        return WorkerServices(
+            summary_service=SummaryService.from_config(cfg),
+            guard_service=guard_service,
+        )
+
+    if role_tag == "mt":
+        return WorkerServices(
+            translation_service=TranslationService(cfg),
+        )
 
     return WorkerServices(
         pipeline=VideoToTextPipeline(cfg),
@@ -147,16 +194,17 @@ def _build_services(cfg: Any) -> WorkerServices:
     )
 
 
-def build_worker_context(cfg: Any, raw: Dict[str, Any]) -> WorkerContext:
+def build_worker_context(cfg: Any, raw: Dict[str, Any], *, role: str = "all") -> WorkerContext:
     """Build a runtime context from an already loaded config bundle."""
 
     return WorkerContext(
+        role=_worker_role_tag(role),
         cfg=cfg,
         raw=raw,
         cfg_fp=search_config_fingerprint(cfg),
         auto_index=bool((raw.get("index") or {}).get("auto_update_on_done", True)),
         webhook_cfg=raw.get("webhook") or {},
-        services=_build_services(cfg),
+        services=_build_services(cfg, role=role),
     )
 
 
@@ -195,7 +243,7 @@ def resolve_worker_context(
     cfg, raw = load_cfg_and_raw(profile=job_profile, variant=job_variant)
     if device_override:
         cfg.model.device = str(device_override)
-    return build_worker_context(cfg, raw)
+    return build_worker_context(cfg, raw, role=context.role)
 
 
 def mark_job_canceled(paths: Any, job_id: str, webhook_cfg: Dict[str, Any], message: str) -> None:

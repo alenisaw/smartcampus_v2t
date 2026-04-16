@@ -23,11 +23,11 @@ from scripts.collect_metrics import export_metrics_bundle
 class WorkerServices:
     """Service bundle reused across worker job executors."""
 
-    pipeline: Any
-    structuring_service: Any
-    summary_service: Any
-    translation_service: Any
-    guard_service: Any
+    pipeline: Any = None
+    structuring_service: Any = None
+    summary_service: Any = None
+    translation_service: Any = None
+    guard_service: Any = None
 
 
 def finalize_job_state(
@@ -110,13 +110,27 @@ def run_index_job(
     paths: Any,
     cfg_fp: str,
     job_id: str,
+    language: Optional[str],
     webhook_cfg: Dict[str, Any],
 ) -> None:
     """Execute a standalone index rebuild job."""
 
     set_state(paths, job_id, "indexing", stage="indexing", progress=0.2, message="Index rebuild")
-    status = _rebuild_index_status(cfg=cfg, cfg_fp=cfg_fp)
-    atomic_write_json(paths.index_state_path, status)
+    target_language = str(language or "").strip().lower() or None
+    if target_language:
+        from backend.jobs.index_runtime import build_index_for_language, write_index_state
+
+        payload = build_index_for_language(cfg=cfg, cfg_fp=cfg_fp, language=target_language)
+        status = write_index_state(
+            paths,
+            built=True,
+            last_error=None,
+            language=target_language,
+            payload=payload,
+        )
+    else:
+        status = _rebuild_index_status(cfg=cfg, cfg_fp=cfg_fp)
+        atomic_write_json(paths.index_state_path, status)
     finalize_job_state(
         paths,
         job_id,

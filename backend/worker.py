@@ -61,12 +61,38 @@ def _job_allowed_for_role(job_type: str, role: str) -> bool:
     if rr in {"", "all", "any"}:
         return True
     if rr in {"gpu", "worker_gpu"}:
-        return jt in {"process", "summary_polish"}
+        return jt == "process"
     if rr in {"mt", "worker_mt"}:
         return jt == "translate"
     if rr in {"cpu", "worker_cpu"}:
         return jt in {"index", "summary_polish"}
     return True
+
+
+def _assert_required_services(job_type: str, services: Any) -> None:
+    """Fail fast when a worker context is missing services required for one job type."""
+
+    jt = str(job_type or "").strip().lower()
+    if jt == "process":
+        required = {
+            "pipeline": getattr(services, "pipeline", None),
+            "structuring_service": getattr(services, "structuring_service", None),
+            "summary_service": getattr(services, "summary_service", None),
+        }
+    elif jt == "translate":
+        required = {
+            "translation_service": getattr(services, "translation_service", None),
+        }
+    elif jt == "summary_polish":
+        required = {
+            "summary_service": getattr(services, "summary_service", None),
+        }
+    else:
+        required = {}
+
+    missing = [name for name, value in required.items() if value is None]
+    if missing:
+        raise RuntimeError(f"Worker context is missing required services for job_type={jt}: {', '.join(missing)}")
 
 
 def _priority_for_job_type(job_type: str) -> str:
@@ -248,6 +274,7 @@ def _dispatch_job(
                 paths=paths,
                 cfg_fp=context.cfg_fp,
                 job_id=job_id,
+                language=language,
                 webhook_cfg=context.webhook_cfg,
             )
             return context
@@ -257,6 +284,7 @@ def _dispatch_job(
             raise RuntimeError("Missing video_id in job")
 
         if job_type == "translate":
+            _assert_required_services(job_type, context.services)
             run_translate_job(
                 cfg=cfg,
                 paths=paths,
@@ -273,6 +301,7 @@ def _dispatch_job(
             return context
 
         if job_type == "summary_polish":
+            _assert_required_services(job_type, context.services)
             run_summary_polish_job(
                 cfg=cfg,
                 paths=paths,
@@ -284,6 +313,7 @@ def _dispatch_job(
             )
             return context
 
+        _assert_required_services(job_type, context.services)
         run_process_job(
             cfg=cfg,
             paths=paths,
@@ -319,7 +349,7 @@ def worker_main() -> None:
     heartbeat_sec = float(worker_cfg.get("heartbeat_sec", 5))
     role = _worker_role()
     owner = host_id()
-    context = build_worker_context(cfg, raw)
+    context = build_worker_context(cfg, raw, role=role)
 
     print(
         f"[worker] owner={owner} role={role} jobs={paths.jobs_dir} "

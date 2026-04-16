@@ -15,11 +15,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from backend.jobs.index_runtime import (
-    build_index_for_language as _run_index_build,
-    write_index_metrics as _write_index_metrics,
-    write_index_state as _write_index_state,
 )
-from backend.jobs.control import set_state
+from backend.jobs.control import create_job, set_state
 from backend.jobs.runtime_common import (
     build_runtime_metric_payload,
     finalize_job_state,
@@ -487,44 +484,54 @@ def _persist_translated_outputs(
     return summary_text, summary_post_edited
 
 
-def _run_optional_translation_index(
+def _enqueue_followup_translation_index(
     context: _TranslateJobContext,
     metric_payload: Dict[str, Any],
-) -> None:
+) -> Optional[str]:
     if not context.auto_index:
-        return
+        return None
 
-    service = getattr(context, "translation_service", None)
-    if service is not None and hasattr(service, "release"):
-        try:
-            service.release()
-        except Exception:
-            pass
+    enqueue_started = time.perf_counter()
+    followup_job_id: Optional[str] = None
+    followup_error: Optional[str] = None
+    try:
+        child = create_job(
+            context.paths,
+            video_id=context.video_id,
+            job_type="index",
+            profile=context.cfg.active_profile,
+            variant=context.variant_id,
+            language=context.tgt_lang,
+            source_language=None,
+            extra={
+                "profile": context.cfg.active_profile,
+                "variant": context.variant_id,
+                "trigger_job_id": context.job_id,
+                "trigger_job_type": "translate",
+            },
+            priority="030",
+        )
+        followup_job_id = str(child.get("job_id") or "")
+    except Exception as exc:
+        followup_error = str(exc)
+    _record_stage(metric_payload, "enqueue_index_job", time.perf_counter() - enqueue_started)
 
-    _set_translate_stage(
-        context,
-        state="indexing",
-        stage="indexing",
-        progress=0.9,
-        message="Index update",
+    update_metrics(
+        metrics_path(context.videos_dir, context.video_id, variant=context.variant_id),
+        {
+            "indexing": {
+                context.tgt_lang: {
+                    "status": "queued" if followup_job_id else "queue_failed",
+                    "job_id": followup_job_id,
+                    "trigger_job_id": context.job_id,
+                    "trigger_job_type": "translate",
+                    "config_tag": str(context.cfg.config_fingerprint),
+                    "error": followup_error,
+                }
+            }
+        },
     )
-    index_started = time.perf_counter()
-    index_payload = _run_index_build(cfg=context.cfg, cfg_fp=context.cfg_fp, language=context.tgt_lang)
-    _record_stage(metric_payload, "index_build", time.perf_counter() - index_started)
-    _write_index_state(
-        context.paths,
-        built=False,
-        last_error=None,
-        language=context.tgt_lang,
-        payload=index_payload,
-    )
-    _write_index_metrics(
-        cfg=context.cfg,
-        video_id=context.video_id,
-        language=context.tgt_lang,
-        variant=context.variant_id,
-        index_payload=index_payload,
-    )
+    return followup_job_id
 
 
 def _persist_translation_metrics(
@@ -653,7 +660,7 @@ def run_translate_job(
         selected_post_edit_edited_indices=selected_post_edit_edited_indices,
         metric_payload=metric_payload,
     )
-    _run_optional_translation_index(context, metric_payload)
+    _enqueue_followup_translation_index(context, metric_payload)
     _persist_translation_metrics(
         context,
         metric_payload=metric_payload,

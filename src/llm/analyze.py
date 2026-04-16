@@ -196,15 +196,23 @@ class SegmentAnalysisService:
     mode: str = "rules"
 
     @classmethod
-    def from_config(cls, cfg: Any) -> "SegmentAnalysisService":
+    def from_config(
+        cls,
+        cfg: Any,
+        *,
+        allow_llm: Optional[bool] = None,
+    ) -> "SegmentAnalysisService":
         """Build the service and attach an LLM client when configured."""
 
-        client: Optional[LLMClient] = None
-        try:
-            client = LLMClient.from_config(cfg)
-        except Exception:
-            client = None
         mode = str(getattr(getattr(cfg, "runtime", None), "structuring_mode", "rules")).strip().lower() or "rules"
+        if allow_llm is None:
+            allow_llm = mode == "llm"
+        client: Optional[LLMClient] = None
+        if allow_llm:
+            try:
+                client = LLMClient.from_config(cfg)
+            except Exception:
+                client = None
         return cls(cfg=cfg, llm_client=client, mode=mode)
 
     def enrich_segments(self, segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

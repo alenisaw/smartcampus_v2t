@@ -9,6 +9,7 @@ Purpose:
 
 from __future__ import annotations
 
+import gc
 import logging
 import sys
 import time
@@ -168,20 +169,47 @@ class QueryEngine:
         reranker_backend_name = str(
             reranker_backend if reranker_backend is not None else getattr(s, "reranker_backend", "auto")
         ).strip().lower() or "auto"
-        self.reranker = _build_reranker(
-            reranker_name,
-            reranker_backend_name,
-            device=device,
-            looks_like_transformers_model=_looks_like_transformers_model,
-        )
-        self.reranker_backend = (
-            "transformers"
-            if self.reranker is not None
-            else ("heuristic" if self.rerank_enabled else "disabled")
-        )
+        self.reranker = None
+        self.reranker_backend = "disabled" if not self.rerank_enabled else "heuristic"
+        if self.rerank_enabled:
+            self.reranker = _build_reranker(
+                reranker_name,
+                reranker_backend_name,
+                device=device,
+                looks_like_transformers_model=_looks_like_transformers_model,
+            )
+            self.reranker_backend = "transformers" if self.reranker is not None else "heuristic"
         self.last_stats: Dict[str, Any] = {}
 
         self._dense_valid_indices_cache: Optional[np.ndarray] = None
+
+    def release(self) -> None:
+        """Best-effort release of retrieval-side model backends."""
+
+        embedder = getattr(self, "embedder", None)
+        reranker = getattr(self, "reranker", None)
+        self.embedder = None
+        self.reranker = None
+        self._dense_valid_indices_cache = None
+
+        for service in (embedder, reranker):
+            if service is None or not hasattr(service, "release"):
+                continue
+            try:
+                service.release()
+            except Exception:
+                pass
+
+        gc.collect()
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                if hasattr(torch.cuda, "ipc_collect"):
+                    torch.cuda.ipc_collect()
+        except Exception:
+            pass
 
     def get_last_stats(self) -> Dict[str, Any]:
         return dict(self.last_stats or {})

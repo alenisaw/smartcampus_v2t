@@ -360,7 +360,7 @@ The project does not depend on an external broker such as Redis, RabbitMQ, or Ce
 | `all` | all job types |
 | `gpu` | `process` jobs |
 | `mt` | `translate` jobs |
-| `cpu` | `index` jobs |
+| `cpu` | `index` and `summary_polish` jobs |
 
 This allows local separation of heavy GPU-bound work, translation work, and index work when needed.
 
@@ -701,7 +701,9 @@ Metrics and experiment flows can produce:
 
 ```powershell
 python -m uvicorn backend.api:app --host 127.0.0.1 --port 8000
-python -m backend.worker
+$env:SMARTCAMPUS_WORKER_ROLE="gpu"; python -m backend.worker
+$env:SMARTCAMPUS_WORKER_ROLE="cpu"; python -m backend.worker
+$env:SMARTCAMPUS_WORKER_ROLE="mt"; python -m backend.worker
 python -m streamlit run app/main.py --server.port 8501
 ```
 
@@ -711,26 +713,30 @@ python -m streamlit run app/main.py --server.port 8501
 run_all.bat
 ```
 
-`run_all.bat` is the convenience local launcher. Manual sanity scripts remain available, but they are not mandatory for startup.
+`run_all.bat` is the convenience local launcher. It now starts role-specific workers and accepts `SMARTCAMPUS_START_GPU`, `SMARTCAMPUS_START_CPU`, and `SMARTCAMPUS_START_MT` toggles. Manual sanity scripts remain available, but they are not mandatory for startup.
 
 ### 16.3 Docker startup
 
 ```powershell
-docker compose up --build
+docker compose -f docker-compose.yml up --build -d
 ```
 
-Optional compose profiles currently include:
+For a single local GPU, this base stack is the supported default. It starts:
 
-```powershell
-docker compose --profile with_vllm up --build
-docker compose --profile with_ct2 up --build
+```text
+api + ui + worker_gpu + worker_cpu + worker_mt
 ```
 
-The recommended text-LLM-through-`vLLM` stack is:
+The recommended text-LLM-through-`vLLM` stack is the override below and is dual-GPU preferred:
 
 ```powershell
+$env:SMARTCAMPUS_PROFILE="container_vllm"
+$env:SMARTCAMPUS_WORKER_GPU_DEVICES="0"
+$env:SMARTCAMPUS_VLLM_DEVICES="1"
 docker compose -f docker-compose.yml -f docker-compose.vllm.yml up --build -d
 ```
+
+In this mode `worker_gpu` and `vllm_text` should not contend for the same GPU.
 
 `.env` is optional and should stay untracked. Runtime behavior should stay in `configs/profiles/*.yaml` and `configs/variants/*.yaml`; Docker-level overrides like `VLLM_*` can be set directly in the shell when needed.
 

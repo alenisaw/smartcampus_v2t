@@ -1,5 +1,5 @@
 # docker-compose.vllm.yml
-# Override stack that routes text LLM workloads through a dedicated vLLM service.
+# Dual-GPU-preferred override that routes text LLM workloads through a dedicated vLLM service.
 services:
   api:
     environment:
@@ -14,8 +14,6 @@ services:
     depends_on:
       api:
         condition: service_healthy
-      vllm_text:
-        condition: service_healthy
 
   worker_cpu:
     environment:
@@ -23,16 +21,12 @@ services:
     depends_on:
       api:
         condition: service_healthy
-      vllm_text:
-        condition: service_healthy
 
   worker_mt:
     environment:
       SMARTCAMPUS_PROFILE: ${SMARTCAMPUS_PROFILE:-container_vllm}
     depends_on:
       api:
-        condition: service_healthy
-      vllm_text:
         condition: service_healthy
 
   ui:
@@ -46,10 +40,12 @@ services:
     image: vllm/vllm-openai:latest
     init: true
     gpus: all
+    shm_size: ${VLLM_SHM_SIZE:-8gb}
     environment:
       PYTHONUNBUFFERED: "1"
       HF_HOME: /root/.cache/huggingface
       VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: "1"
+      CUDA_VISIBLE_DEVICES: ${SMARTCAMPUS_VLLM_DEVICES:-1}
     command: >
       --model ${VLLM_MODEL_ID:-/app/models/qwen3-4b-instruct-2507}
       --served-model-name ${VLLM_SERVED_MODEL_NAME:-Qwen/Qwen3-4B-Instruct-2507}
