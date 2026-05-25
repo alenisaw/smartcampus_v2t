@@ -14,8 +14,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from backend.jobs.index_runtime import (
-)
 from backend.jobs.control import create_job, set_state
 from backend.jobs.runtime_common import (
     build_runtime_metric_payload,

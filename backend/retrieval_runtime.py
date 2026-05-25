@@ -503,6 +503,8 @@ def guard_query_text(cfg: Any, text: str, *, endpoint: str) -> None:
 
     normalized = re.sub(r"\s+", " ", str(text or "").strip())
     if not normalized:
+        if endpoint == "Search":
+            return
         raise HTTPException(status_code=400, detail=f"{endpoint} query is empty.")
     service = get_guard_service(cfg)
     if service is None or not bool(getattr(cfg.guard, "query_gate", False)):

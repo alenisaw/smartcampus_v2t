@@ -599,11 +599,11 @@ class QueryEngine:
         n_docs = len(docs) if docs else 0
 
         q = (query or "").strip()
-        if not docs or not q:
+        if not docs:
             return self._empty_search_result(
                 query=q,
                 n_docs=n_docs,
-                reason="empty_docs_or_query",
+                reason="empty_docs",
                 return_stats=return_stats,
                 extra={"total_ms": float((time.perf_counter() - t0) * 1000.0)},
             )
@@ -628,6 +628,54 @@ class QueryEngine:
                 },
             )
 
+        if not q:
+            # Filter-only search (no query text)
+            # Pack all matching valid docs, sort by start time or default order, and return.
+            results: List[SearchResult] = []
+            take = max(int(top_k) * 5, int(top_k))
+            for i in valid_indices[:take]:
+                d = docs[int(i)]
+                results.append(
+                    SearchResult(
+                        score=1.0,
+                        sparse_score=1.0,
+                        dense_score=1.0,
+                        video_id=d.video_id,
+                        language=self.language,
+                        start_sec=float(d.start_sec),
+                        end_sec=float(d.end_sec),
+                        description=str(getattr(d, "display_text", None) or d.text),
+                        source_id=d.doc_id,
+                        segment_id=str((d.extra or {}).get("segment_id") or "") or None,
+                        event_type=str((d.extra or {}).get("event_type") or "") or None,
+                        risk_level=str((d.extra or {}).get("risk_level") or "") or None,
+                        tags=list((d.extra or {}).get("tags") or []),
+                        objects=list((d.extra or {}).get("objects") or []),
+                        people_count_bucket=str((d.extra or {}).get("people_count_bucket") or "") or None,
+                        motion_type=str((d.extra or {}).get("motion_type") or "") or None,
+                        anomaly_flag=bool((d.extra or {}).get("anomaly_flag", False)),
+                        variant=str((d.extra or {}).get("variant") or "") or None,
+                        extra=d.extra,
+                    )
+                )
+            results, pre_dedupe_n, t_dedupe_ms = self._apply_dedupe(results, dedupe=dedupe)
+            results = results[:int(top_k)]
+            if return_stats:
+                stats = {
+                    "ok": True,
+                    "query": "",
+                    "query_tokens": 0,
+                    "filters": {"video_id": video_id, "language": self.language, **active_filters},
+                    "timings_ms": {
+                        "filter_ms": float(t_filter_ms),
+                        "dedupe_ms": float(t_dedupe_ms),
+                        "total_ms": float((time.perf_counter() - t0) * 1000.0),
+                    },
+                    "returned": {"top_k": int(top_k), "n_returned": len(results)},
+                }
+                self.last_stats = stats
+                return results, stats
+            return results
         q_tokens, bm25_all, top_sparse, t_sparse_ms = self._compute_sparse_stage(
             q,
             valid_indices=valid_indices,

@@ -382,9 +382,8 @@ def search(req: SearchRequest):
     context = get_api_context()
     cfg = context.cfg
     lang = _resolve_request_language(cfg, req.language)
-    _guard_query_text(cfg, req.query, endpoint="Search")
-
-    query = req.query.strip()
+    query = str(req.query or "").strip()
+    _guard_query_text(cfg, query, endpoint="Search")
     search_filters = {
         "start_sec": req.start_sec,
         "end_sec": req.end_sec,
