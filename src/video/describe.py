@@ -482,7 +482,16 @@ class VideoToTextPipeline:
         model_time = time.perf_counter() - generation_started
 
         post_started = time.perf_counter()
-        merged = smooth_annotations(observations)
+        merge_enabled = bool(getattr(self.cfg.postprocess, "merge_enabled", True))
+        merge_method = str(getattr(self.cfg.postprocess, "merge_method", "semantic"))
+        merge_tau = float(getattr(self.cfg.postprocess, "merge_tau", 0.90))
+        gap_tolerance = float(getattr(self.cfg.postprocess, "gap_tolerance_sec", 1.0))
+
+        if merge_enabled:
+            merged = smooth_annotations(observations, sim_threshold=merge_tau, gap_tolerance=gap_tolerance)
+        else:
+            merged = list(observations)
+
         post_time = time.perf_counter() - post_started
 
         flagged_count = sum(1 for ann in observations if bool(getattr(ann, "anomaly_flag", False)))
@@ -549,6 +558,15 @@ class VideoToTextPipeline:
                     "flagged_clips": int(flagged_count),
                     "flag_rate": float(flagged_count / max(1, len(observations))),
                     "confidence_mean": float(confidence_mean),
+                },
+                "postprocess": {
+                    "merge_enabled": bool(merge_enabled),
+                    "merge_method": str(merge_method),
+                    "merge_tau": float(merge_tau),
+                    "gap_tolerance_sec": float(gap_tolerance),
+                    "raw_clips": int(num_clips),
+                    "final_segments": int(len(merged)),
+                    "compression_ratio": float(num_clips / len(merged)) if len(merged) > 0 else 1.0,
                 },
             },
         )

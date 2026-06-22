@@ -170,7 +170,8 @@ class QueryEngine:
             reranker_backend if reranker_backend is not None else getattr(s, "reranker_backend", "auto")
         ).strip().lower() or "auto"
         self.reranker = None
-        self.reranker_backend = "disabled" if not self.rerank_enabled else "heuristic"
+        explicit_heuristic = reranker_backend_name in {"heuristic", "mock"}
+        self.reranker_backend = "disabled" if not self.rerank_enabled else ("heuristic" if explicit_heuristic else "loading")
         if self.rerank_enabled:
             self.reranker = _build_reranker(
                 reranker_name,
@@ -477,7 +478,7 @@ class QueryEngine:
             rerank_n = min(len(results), max(int(top_k), self.rerank_top_k))
             prefix = list(results[:rerank_n])
             suffix = list(results[rerank_n:])
-            rerank_mode = "heuristic"
+            rerank_mode = self.reranker_backend
             if self.reranker is not None:
                 try:
                     pair_scores = self.reranker.score_pairs(query, [hit.description for hit in prefix])
@@ -491,16 +492,12 @@ class QueryEngine:
                         prefix = [hit for _, hit in scored_prefix]
                         rerank_mode = "transformers"
                     else:
-                        prefix.sort(
-                            key=lambda hit: float(hit.score) + _heuristic_rerank_bonus(q_tokens, hit, _tokenize),
-                            reverse=True,
-                        )
-                except Exception:
-                    prefix.sort(
-                        key=lambda hit: float(hit.score) + _heuristic_rerank_bonus(q_tokens, hit, _tokenize),
-                        reverse=True,
-                    )
+                        raise RuntimeError("Reranker returned a different score count than the input pair count")
+                except Exception as exc:
+                    raise RuntimeError("Requested model reranking failed") from exc
             else:
+                if self.reranker_backend != "heuristic":
+                    raise RuntimeError("Reranking is enabled but no model reranker is available")
                 prefix.sort(
                     key=lambda hit: float(hit.score) + _heuristic_rerank_bonus(q_tokens, hit, _tokenize),
                     reverse=True,
@@ -676,19 +673,37 @@ class QueryEngine:
                 self.last_stats = stats
                 return results, stats
             return results
-        q_tokens, bm25_all, top_sparse, t_sparse_ms = self._compute_sparse_stage(
-            q,
-            valid_indices=valid_indices,
-        )
+        sparse_enabled = bool(int(self.candidate_k_sparse) > 0 and float(self.w_bm25) > 0.0)
+        dense_enabled = bool(int(self.candidate_k_dense) > 0 and float(self.w_dense) > 0.0)
+        emb = None
 
-        t_qemb0 = time.perf_counter()
-        q_vec = np.asarray(self.embedder.encode_query(q), dtype=np.float32)
-        t_qemb_ms = (time.perf_counter() - t_qemb0) * 1000.0
-        emb = self.index.embeddings
-        dense_valid_idx, dense_valid_indices, top_dense, t_dense_topk_ms = self._compute_dense_stage(
-            q_vec,
-            valid_indices=valid_indices,
-        )
+        if sparse_enabled:
+            q_tokens, bm25_all, top_sparse, t_sparse_ms = self._compute_sparse_stage(
+                q,
+                valid_indices=valid_indices,
+            )
+        else:
+            q_tokens = []
+            bm25_all = np.zeros(n_docs, dtype=np.float32)
+            top_sparse = []
+            t_sparse_ms = "disabled"
+
+        if dense_enabled:
+            t_qemb0 = time.perf_counter()
+            q_vec = np.asarray(self.embedder.encode_query(q), dtype=np.float32)
+            t_qemb_ms = (time.perf_counter() - t_qemb0) * 1000.0
+            emb = self.index.embeddings
+            dense_valid_idx, dense_valid_indices, top_dense, t_dense_topk_ms = self._compute_dense_stage(
+                q_vec,
+                valid_indices=valid_indices,
+            )
+        else:
+            q_vec = np.zeros(1, dtype=np.float32)
+            t_qemb_ms = "disabled"
+            dense_valid_idx = np.array([], dtype=np.int64)
+            dense_valid_indices = []
+            top_dense = []
+            t_dense_topk_ms = "disabled"
 
         cand_set: Set[int] = set(top_sparse) | set(top_dense)
         if not cand_set:
@@ -701,21 +716,26 @@ class QueryEngine:
                     "n_valid": int(len(valid_indices)),
                     "n_dense_valid": int(len(dense_valid_indices)),
                     "filter_ms": float(t_filter_ms),
-                    "sparse_ms": float(t_sparse_ms),
-                    "q_embed_ms": float(t_qemb_ms),
-                    "dense_topk_ms": float(t_dense_topk_ms),
+                    "sparse_ms": t_sparse_ms,
+                    "q_embed_ms": t_qemb_ms,
+                    "dense_topk_ms": t_dense_topk_ms,
                     "total_ms": float((time.perf_counter() - t0) * 1000.0),
                 },
             )
 
         candidate_indices = list(cand_set)
-        sparse_raw, dense_raw, t_dense_cand_ms = self._collect_candidate_scores(
-            bm25_all=bm25_all,
-            q_vec=q_vec,
-            candidate_indices=candidate_indices,
-            dense_valid_idx=dense_valid_idx,
-            include_dense=bool(top_dense),
-        )
+        if dense_enabled:
+            sparse_raw, dense_raw, t_dense_cand_ms = self._collect_candidate_scores(
+                bm25_all=bm25_all,
+                q_vec=q_vec,
+                candidate_indices=candidate_indices,
+                dense_valid_idx=dense_valid_idx,
+                include_dense=bool(top_dense),
+            )
+        else:
+            sparse_raw = {int(i): float(bm25_all[int(i)]) for i in candidate_indices}
+            dense_raw = {}
+            t_dense_cand_ms = "disabled"
 
         ranked, fused, sparse_used, dense_used, t_fuse_ms = self._fuse_candidate_scores(
             bm25_all=bm25_all,
@@ -758,10 +778,10 @@ class QueryEngine:
             dedupe=dedupe,
             timings_ms={
                 "filter": float(t_filter_ms),
-                "sparse": float(t_sparse_ms),
-                "q_embed": float(t_qemb_ms),
-                "dense_topk": float(t_dense_topk_ms),
-                "dense_candidates": float(t_dense_cand_ms),
+                "sparse": t_sparse_ms if t_sparse_ms == "disabled" else float(t_sparse_ms),
+                "q_embed": t_qemb_ms if t_qemb_ms == "disabled" else float(t_qemb_ms),
+                "dense_topk": t_dense_topk_ms if t_dense_topk_ms == "disabled" else float(t_dense_topk_ms),
+                "dense_candidates": t_dense_cand_ms if t_dense_cand_ms == "disabled" else float(t_dense_cand_ms),
                 "fuse": float(t_fuse_ms),
                 "pack": float(t_pack_ms),
                 "dedupe": float(t_dedupe_ms),

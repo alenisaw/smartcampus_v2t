@@ -1,0 +1,199 @@
+backend:
+  host: 127.0.0.1
+  port: 8000
+  scheme: http
+clips:
+  keyframe_policy: middle
+  max_clip_frames: 12
+  min_clip_frames: 2
+  stride_sec: 2.0
+  window_sec: 4.0
+experiment:
+  compare_on_single_video: false
+  mode: main
+  variant_ids:
+  - fast
+  - throughput
+  - max_quality
+guard:
+  enabled: true
+  model_id: models/qwen3guard-gen-0.6b
+  output_gate: true
+  query_gate: true
+index:
+  auto_update_on_done: true
+jobs:
+  dir: data/jobs
+llm:
+  backend: transformers
+  do_sample: false
+  max_new_tokens: 512
+  model_id: models/qwen3-4b-instruct-2507
+  temperature: 0.0
+  timeout_sec: 60
+  top_p: 1.0
+  transformers:
+    compile: false
+    device_map: auto
+    dtype: float16
+  vllm:
+    base_url: http://127.0.0.1:8001/v1
+    timeout_sec: 30
+locks:
+  dir: data/locks
+model:
+  attn_implementation: auto
+  batch_frame_tolerance: 2
+  batch_size: 10
+  device: cuda
+  do_sample: false
+  dtype: fp16
+  language: en
+  max_batch_clips: 10
+  max_batch_frames: 160
+  max_new_tokens: 80
+  model_name_or_path: models/qwen3-vl-2b-instruct
+  repetition_penalty: 1.05
+  temperature: 0.0
+  timeout_sec: 60
+  top_k: 40
+  top_p: 1.0
+paths:
+  cache_dir: data/cache
+  data_dir: data
+  dnn_face_model: models/face_detector/res10_300x300_ssd_iter_140000.caffemodel
+  dnn_face_proto: models/face_detector/deploy.prototxt
+  indexes_dir: data/indexes
+  models_dir: models
+  root_dir: ../..
+  thumbs_dir: data/thumbs
+  videos_dir: data/videos
+queue:
+  dir: data/queue
+runtime:
+  autocast_infer: true
+  cuda_tf32: true
+  log_level: INFO
+  matmul_precision: high
+  metrics_repeats: 1
+  metrics_store_samples: true
+  num_workers: 4
+  overwrite_existing: false
+  seed: 42
+  strict_paths: false
+  structuring_mode: rules
+  summary_mode: deterministic
+  summary_polish_enabled: true
+  summary_polish_priority: '025'
+  torch_compile: false
+  torch_compile_fullgraph: false
+  torch_compile_mode: reduce-overhead
+  torch_threads: 0
+  worker_output_guard_backend: rules
+search:
+  ann_backend: auto
+  ann_ef_construction: 80
+  ann_ef_search: 64
+  ann_hnsw_m: 32
+  ann_index_type: hnsw
+  candidate_k_dense: 200
+  candidate_k_sparse: 200
+  dedupe_mode: overlap
+  dedupe_overlap_thr: 0.7
+  dedupe_tol_sec: 1.0
+  dense_input_mode: text
+  embed_cache: true
+  embed_model_name: models/bge-m3
+  embedding_backend: auto
+  embedding_dim: 1024
+  embedding_model_id: models/qwen3-embedding-4b
+  fallback_langs:
+  - en
+  fusion: rrf
+  lemmatize: true
+  normalize_text: true
+  passage_prefix: 'passage: '
+  query_prefix: 'query: '
+  rerank_enabled: false
+  rerank_top_k: 30
+  reranker_backend: transformers
+  reranker_model_id: models/qwen3-vl-reranker-2b
+  rrf_k: 60
+  translate_queries: true
+  w_bm25: 0.45
+  w_dense: 0.55
+translation:
+  backend: ctranslate2
+  batch_size: 8
+  cache_enabled: true
+  cache_version: v2
+  ctranslate2:
+    compute_type: int8
+    device: cpu
+    inter_threads: 2
+    intra_threads: 0
+  device: cpu
+  dtype: float32
+  max_new_tokens: 128
+  model_name_or_path: ct2://router
+  offline_translation: true
+  post_edit_max_items: 64
+  post_edit_targets:
+  - reports
+  - qa
+  query_time_translation: true
+  routes:
+    en_ru_model_id: models/opus-mt-en-ru
+    kk_ru_model_id: models/kazrush-kk-ru
+    ru_en_model_id: models/opus-mt-ru-en
+    ru_kk_model_id: models/kazrush-ru-kk
+  source_lang: en
+  target_langs:
+  - ru
+  - kz
+ui:
+  assets_dir: app/assets
+  cache_ttl_sec: 2
+  default_lang: ru
+  langs:
+  - ru
+  - kz
+  - en
+  logo_path: app/assets/logo.png
+  styles_path: app/assets/styles.css
+  ui_text_path: app/assets/ui_text.json
+video:
+  analysis_fps: 2.0
+  anonymization_enabled: false
+  blur_threshold: 35.0
+  dark_threshold: 30.0
+  decode_resolution:
+  - 1024
+  - 576
+  face_blur: false
+  lazy_motion_threshold: 0.02
+  max_frames: 20000
+  min_change_threshold: 0.03
+  model_input_size:
+  - 256
+  - 256
+  pixel_format: yuv420p
+  save_small_frames: false
+  target_fps: 3.0
+video_io:
+  face_blur_strength: 31
+  face_conf_threshold: 0.5
+  face_detect_every_saved: 6
+  face_detect_force_on_scenecut: true
+  jpeg_quality_frames: 82
+  jpeg_quality_small: 75
+webhook:
+  enabled: false
+  timeout_sec: 5
+  url: ''
+worker:
+  heartbeat_sec: 5
+  lease_sec: 30
+  max_concurrent_jobs: 1
+  poll_interval_sec: 1
+  short_first: true

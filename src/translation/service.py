@@ -103,6 +103,7 @@ class TranslationService:
         self._post_edit_max_items = int(getattr(self.cfg.translation, "post_edit_max_items", 64) or 64)
         self._llm_client = None
         self._llm_client_ready = False
+        self._allow_mock = bool(getattr(cfg.runtime, "allow_mock_backends", False))
 
     def route_for(self, src_lang: str, tgt_lang: str) -> List[TranslationRoute]:
         """Resolve the chain of bilingual routes for one requested pair."""
@@ -291,12 +292,18 @@ class TranslationService:
             miss_texts = list(texts)
 
         if miss_texts:
-            miss_translated = self._translate_via_ct2(
-                miss_texts,
-                model_id=route.model_id,
-                batch_size=batch_size,
-                max_new_tokens=max_new_tokens,
-            )
+            try:
+                miss_translated = self._translate_via_ct2(
+                    miss_texts,
+                    model_id=route.model_id,
+                    batch_size=batch_size,
+                    max_new_tokens=max_new_tokens,
+                )
+            except Exception as e:
+                if not self._allow_mock:
+                    raise RuntimeError(f"Translation failed for model {route.model_id!r}") from e
+                print(f"Warning: Translation failed for model {route.model_id} ({e}). Explicit mock translation enabled.")
+                miss_translated = [f"[{route.tgt_lang.upper()}] {t}" for t in miss_texts]
             for idx, text in zip(miss_idx, miss_translated):
                 translated[idx] = text
             if use_cache:

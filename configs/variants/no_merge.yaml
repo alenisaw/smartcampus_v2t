@@ -1,0 +1,3 @@
+# configs/variants/no_merge.yaml
+postprocess:
+  merge_enabled: false

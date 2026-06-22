@@ -62,12 +62,16 @@ def build_index_for_language(
     """Build or refresh the search index for one language and return runtime metadata."""
 
     started_at = time.perf_counter()
+    import torch
+    device_val = getattr(cfg.search, "device", None) or getattr(cfg.model, "device", None) or ("cuda" if torch.cuda.is_available() else "cpu")
+
     result_path = build_or_update_index(
         videos_root=Path(cfg.paths.videos_dir),
         index_dir=Path(cfg.paths.indexes_dir),
         model_name=select_embedding_model_ref(cfg.search, models_dir=Path(cfg.paths.models_dir)),
         embedding_backend=str(getattr(cfg.search, "embedding_backend", "auto")),
         fallback_model_name=str(cfg.search.embed_model_name),
+        device=str(device_val),
         config_fingerprint=cfg_fp,
         variant=cfg.active_variant,
         language=str(language),

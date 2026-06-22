@@ -201,8 +201,30 @@ def _metrics_for_query(
     labels: Sequence[Dict[str, Any]],
     ks: Sequence[int],
 ) -> Dict[str, Any]:
-    total_relevant_labels = len([x for x in labels if float(x.get("grade") or 0.0) > 0.0])
-    ideal_grades = sorted([float(x.get("grade") or 0.0) for x in labels if float(x.get("grade") or 0.0) > 0.0], reverse=True)
+    relevant_by_label: Dict[str, float] = {}
+    for idx, label in enumerate(labels, start=1):
+        grade = float(label.get("grade") or 0.0)
+        if grade <= 0.0:
+            continue
+        label_id = str(label.get("label_id") or f"rel_{idx:03d}")
+        relevant_by_label[label_id] = max(float(relevant_by_label.get(label_id, 0.0)), grade)
+
+    total_relevant_labels = len(relevant_by_label)
+    ideal_grades = sorted(relevant_by_label.values(), reverse=True)
+
+    unique_hit_grades: List[float] = []
+    unique_matched_ids: List[Optional[str]] = []
+    seen_labels: set[str] = set()
+    for grade, label_id in zip(hit_grades, matched_label_ids):
+        grade_f = float(grade or 0.0)
+        label_key = str(label_id or "").strip()
+        if grade_f > 0.0 and label_key and label_key not in seen_labels:
+            seen_labels.add(label_key)
+            unique_hit_grades.append(grade_f)
+            unique_matched_ids.append(label_key)
+        else:
+            unique_hit_grades.append(0.0)
+            unique_matched_ids.append(None)
 
     metrics: Dict[str, Any] = {
         "relevant_total": int(total_relevant_labels),
@@ -210,7 +232,7 @@ def _metrics_for_query(
     }
 
     first_rel_rank: Optional[int] = None
-    for rank, grade in enumerate(hit_grades, start=1):
+    for rank, grade in enumerate(unique_hit_grades, start=1):
         if float(grade) > 0.0:
             first_rel_rank = rank
             break
@@ -218,8 +240,8 @@ def _metrics_for_query(
 
     for k in ks:
         kk = int(k)
-        top_grades = [float(x) for x in hit_grades[:kk]]
-        top_label_ids = [x for x in matched_label_ids[:kk] if x]
+        top_grades = [float(x) for x in unique_hit_grades[:kk]]
+        top_label_ids = [x for x in unique_matched_ids[:kk] if x]
 
         relevant_hits = sum(1 for g in top_grades if float(g) > 0.0)
         precision = float(relevant_hits / float(kk)) if kk > 0 else 0.0
@@ -230,6 +252,11 @@ def _metrics_for_query(
         dcg = _dcg(top_grades, kk)
         idcg = _dcg(ideal_grades, kk)
         ndcg = float(dcg / idcg) if idcg > 0 else 0.0
+        if ndcg < -1e-12 or ndcg > 1.0 + 1e-9:
+            raise RuntimeError(
+                f"Invalid nDCG@{kk}: {ndcg:.12f}. "
+                "Check duplicate relevance matching and IDCG computation."
+            )
 
         mrr_k = 0.0
         for rank, grade in enumerate(top_grades, start=1):

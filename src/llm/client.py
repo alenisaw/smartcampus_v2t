@@ -78,6 +78,7 @@ class LLMClient:
     local_model_dir: Optional[str] = None
     vllm_served_model_name: str = ""
     vllm_api_key: str = ""
+    allow_mock: bool = False
 
     @classmethod
     def from_config(cls, cfg: Any) -> "LLMClient":
@@ -113,6 +114,11 @@ class LLMClient:
             local_model_dir=local_model_dir,
             vllm_served_model_name=str(getattr(cfg.llm, "vllm_served_model_name", "") or ""),
             vllm_api_key=str(getattr(cfg.llm, "vllm_api_key", "") or ""),
+            allow_mock=bool(
+                getattr(cfg.runtime, "allow_mock_backends", False)
+                or str(getattr(cfg.llm, "backend", "")).strip().lower() == "mock"
+                or str(getattr(cfg.llm, "model_id", "")).strip().lower() == "mock"
+            ),
         )
 
     def generate_text(self, prompt: str) -> str:
@@ -238,6 +244,23 @@ class LLMClient:
         """Run local text generation through Hugging Face transformers."""
 
         tokenizer, model = self._load_transformers_backend()
+        if tokenizer == "mock" or model == "mock":
+            # Generate appropriate mock response based on prompt contents
+            p_lower = prompt.lower()
+            if "allowed" in p_lower or "guard" in p_lower:
+                return json.dumps({"allowed": True, "labels": [], "reason": "mock_guard_allow"})
+            elif "summary" in p_lower or "structured" in p_lower:
+                return json.dumps({
+                    "summary": "This video shows campus scenes with people walking.",
+                    "anomalies": [],
+                    "events": []
+                })
+            else:
+                return json.dumps({
+                    "objects": ["person"],
+                    "tags": ["walkway"],
+                    "risk_level": "normal"
+                })
 
         try:
             import torch
@@ -315,6 +338,12 @@ class LLMClient:
     def _load_transformers_backend(self) -> Tuple[Any, Any]:
         """Load and cache tokenizer/model for the local transformers backend."""
 
+        if self.allow_mock and (
+            str(self.backend).strip().lower() == "mock"
+            or str(self.model_id).strip().lower() == "mock"
+        ):
+            return "mock", "mock"
+
         cache_key = self.local_model_dir or self.model_id
         cached = _TRANSFORMERS_CACHE.get(cache_key)
         if cached is not None:
@@ -345,21 +374,28 @@ class LLMClient:
         if device_map:
             load_kwargs["device_map"] = device_map
 
-        tokenizer = AutoTokenizer.from_pretrained(source, trust_remote_code=True)
         try:
-            model = AutoModelForCausalLM.from_pretrained(source, **load_kwargs)
-        except TypeError:
-            if "dtype" not in load_kwargs:
-                raise
-            fallback_kwargs = dict(load_kwargs)
-            fallback_kwargs["torch_dtype"] = fallback_kwargs.pop("dtype")
-            model = AutoModelForCausalLM.from_pretrained(source, **fallback_kwargs)
-
-        if bool(self.transformers_compile) and hasattr(torch, "compile"):
+            tokenizer = AutoTokenizer.from_pretrained(source, trust_remote_code=True)
             try:
-                model = torch.compile(model)
-            except Exception:
-                pass
+                model = AutoModelForCausalLM.from_pretrained(source, **load_kwargs)
+            except TypeError:
+                if "dtype" not in load_kwargs:
+                    raise
+                fallback_kwargs = dict(load_kwargs)
+                fallback_kwargs["torch_dtype"] = fallback_kwargs.pop("dtype")
+                model = AutoModelForCausalLM.from_pretrained(source, **fallback_kwargs)
+
+            if bool(self.transformers_compile) and hasattr(torch, "compile"):
+                try:
+                    model = torch.compile(model)
+                except Exception:
+                    pass
+        except Exception as exc:
+            if not self.allow_mock:
+                raise RuntimeError(f"Failed to load LLM model {source!r}") from exc
+            print(f"Warning: Failed to load real LLM model ({exc}). Explicit mock LLM backend enabled.")
+            tokenizer = "mock"
+            model = "mock"
 
         _TRANSFORMERS_CACHE[cache_key] = (tokenizer, model)
         return tokenizer, model

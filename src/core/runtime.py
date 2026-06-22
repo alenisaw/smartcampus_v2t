@@ -138,13 +138,18 @@ def resolve_config_selection(
     profiles_dir = provided_path.parent if provided_path.parent.name == "profiles" else default_path.parent
 
     inferred_profile = provided_path.stem if provided_path.suffix.lower() in {".yaml", ".yml"} else "main"
-    resolved_profile = (profile or os.environ.get(PROFILE_ENV_NAME) or inferred_profile or "main")
-    resolved_profile = str(resolved_profile).strip().lower() or "main"
+    profile_value = profile or os.environ.get(PROFILE_ENV_NAME) or inferred_profile or "main"
+    profile_candidate = Path(str(profile_value)).expanduser()
+    if profile_candidate.suffix.lower() in {".yaml", ".yml"} and profile_candidate.exists():
+        profile_path = profile_candidate.resolve()
+        resolved_profile = profile_path.stem.lower()
+    else:
+        resolved_profile = str(profile_value).strip().lower() or "main"
+        profile_path = (profiles_dir / f"{resolved_profile}.yaml").resolve()
 
     resolved_variant = variant if variant is not None else os.environ.get(VARIANT_ENV_NAME)
     resolved_variant = (str(resolved_variant).strip().lower() or None) if resolved_variant else None
 
-    profile_path = (profiles_dir / f"{resolved_profile}.yaml").resolve()
     if not profile_path.exists() and provided_path.exists():
         profile_path = provided_path
     return profile_path, resolved_profile, resolved_variant
@@ -473,6 +478,7 @@ def _build_runtime_config(runtime_raw: Dict[str, Any]) -> RuntimeConfig:
         log_level=str(runtime_raw.get("log_level", "INFO")),
         overwrite_existing=_to_bool(runtime_raw.get("overwrite_existing", False)),
         strict_paths=_to_bool(runtime_raw.get("strict_paths", True)),
+        allow_mock_backends=_to_bool(runtime_raw.get("allow_mock_backends", False)),
         torch_threads=int(runtime_raw.get("torch_threads", 0)),
         cuda_tf32=_to_bool(runtime_raw.get("cuda_tf32", True)),
         matmul_precision=str(runtime_raw.get("matmul_precision", "high")),
@@ -521,6 +527,15 @@ def _build_translation_config(root_dir: Path, translation_raw: Dict[str, Any]) -
         ru_en_model_id=_resolve_reference_or_path(root_dir, routes_raw.get("ru_en_model_id"), "Helsinki-NLP/opus-mt-ru-en"),
         kk_ru_model_id=_resolve_reference_or_path(root_dir, routes_raw.get("kk_ru_model_id"), "deepvk/kazRush-kk-ru"),
         ru_kk_model_id=_resolve_reference_or_path(root_dir, routes_raw.get("ru_kk_model_id"), "deepvk/kazRush-ru-kk"),
+    )
+def _build_postprocess_config(postprocess_raw: Dict[str, Any]) -> PostprocessConfig:
+    """Build the post-processing (annotation merging) section of the typed config."""
+    from src.core.config import PostprocessConfig
+    return PostprocessConfig(
+        merge_enabled=_to_bool(postprocess_raw.get("merge_enabled", True)),
+        merge_method=str(postprocess_raw.get("merge_method", "semantic")).strip().lower() or "semantic",
+        merge_tau=float(postprocess_raw.get("merge_tau", 0.90)),
+        gap_tolerance_sec=float(postprocess_raw.get("gap_tolerance_sec", 1.0)),
     )
 
 
@@ -636,6 +651,9 @@ def load_pipeline_bundle(
     translation_raw = effective_raw.get("translation") or {}
     translation = _build_translation_config(root_dir, translation_raw)
 
+    postprocess_raw = effective_raw.get("postprocess") or {}
+    postprocess = _build_postprocess_config(postprocess_raw)
+
     jobs_raw = effective_raw.get("jobs") or {}
     queue_raw = effective_raw.get("queue") or {}
     locks_raw = effective_raw.get("locks") or {}
@@ -668,6 +686,7 @@ def load_pipeline_bundle(
         guard=guard,
         runtime=runtime,
         translation=translation,
+        postprocess=postprocess,
         jobs=jobs,
         queue=queue,
         locks=locks,

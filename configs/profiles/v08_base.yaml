@@ -1,3 +1,4 @@
+# configs/profiles/v08_base.yaml
 paths:
   root_dir: ../..
   data_dir: data
@@ -57,18 +58,18 @@ search:
 
 video:
   target_fps: 3.0
-  analysis_fps: 3.0
+  analysis_fps: 2.0
   model_input_size: [256, 256]
-  decode_resolution: [1280, 720]
+  decode_resolution: [1024, 576]
   pixel_format: yuv420p
   min_change_threshold: 0.03
   dark_threshold: 30.0
   blur_threshold: 35.0
   lazy_motion_threshold: 0.02
   save_small_frames: false
-  face_blur: true
-  anonymization_enabled: true
-  max_frames: 5000
+  face_blur: false
+  anonymization_enabled: false
+  max_frames: 20000
 
 video_io:
   jpeg_quality_frames: 82
@@ -82,7 +83,7 @@ clips:
   window_sec: 4.0
   stride_sec: 2.0
   min_clip_frames: 2
-  max_clip_frames: 16
+  max_clip_frames: 12
   keyframe_policy: middle
 
 model:
@@ -90,11 +91,11 @@ model:
   device: cuda
   dtype: fp16
   language: en
-  batch_size: 4
-  max_batch_clips: 4
-  max_batch_frames: 72
+  batch_size: 6
+  max_batch_clips: 6
+  max_batch_frames: 96
   batch_frame_tolerance: 2
-  max_new_tokens: 96
+  max_new_tokens: 80
   temperature: 0.0
   top_p: 1.0
   top_k: 40
@@ -156,7 +157,7 @@ runtime:
   num_workers: 4
   log_level: INFO
   overwrite_existing: false
-  strict_paths: true
+  strict_paths: false
   torch_threads: 0
   cuda_tf32: true
   matmul_precision: high
@@ -200,3 +201,9 @@ experiment:
   mode: main
   compare_on_single_video: false
   variant_ids: [fast, throughput, max_quality]
+
+postprocess:
+  merge_enabled: true
+  merge_method: semantic
+  merge_tau: 0.90
+  gap_tolerance_sec: 1.0

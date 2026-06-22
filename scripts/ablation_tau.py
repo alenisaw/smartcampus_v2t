@@ -105,20 +105,22 @@ def _iter_video_dirs(root: Path) -> List[Path]:
     return out
 
 
-def _build_target(video_dir: Path) -> TargetRun:
-    """Resolve the canonical persisted artifacts for one video directory."""
+def _build_target(video_dir: Path, variant_name: str = "") -> TargetRun:
+    """Resolve the canonical persisted artifacts for one video directory and variant."""
 
     outputs_dir = video_dir / "outputs"
+    if variant_name:
+        outputs_dir = outputs_dir / "variants" / variant_name
     clip_observations_path = outputs_dir / "clip_observations.json"
     metrics_path = outputs_dir / "metrics.json"
     run_manifest_path = outputs_dir / "run_manifest.json"
     missing = [str(path) for path in [clip_observations_path, metrics_path, run_manifest_path] if not path.exists()]
     if missing:
-        raise RuntimeError(f"Missing required artifacts for {video_dir.name}: {', '.join(missing)}")
+        raise RuntimeError(f"Missing required artifacts for {video_dir.name} (variant={variant_name}): {', '.join(missing)}")
     return TargetRun(
         video_id=str(video_dir.name),
-        variant="",
-        run_id=str(video_dir.name),
+        variant=variant_name,
+        run_id=f"{video_dir.name}_{variant_name}" if variant_name else str(video_dir.name),
         video_dir=video_dir,
         outputs_dir=outputs_dir,
         clip_observations_path=clip_observations_path,
@@ -128,14 +130,27 @@ def _build_target(video_dir: Path) -> TargetRun:
 
 
 def _load_targets(root: Path, *, video_ids: Sequence[str]) -> List[TargetRun]:
-    """Load all requested target runs from the resolved root."""
+    """Load all requested target runs from the resolved root, checking for variants."""
 
     allowed = {str(item).strip() for item in video_ids if str(item).strip()}
     targets: List[TargetRun] = []
     for video_dir in _iter_video_dirs(root):
         if allowed and video_dir.name not in allowed:
             continue
-        targets.append(_build_target(video_dir))
+        variants_dir = video_dir / "outputs" / "variants"
+        if variants_dir.is_dir():
+            variant_dirs = [d.name for d in variants_dir.iterdir() if d.is_dir()]
+            if variant_dirs:
+                for vname in sorted(variant_dirs):
+                    try:
+                        targets.append(_build_target(video_dir, variant_name=vname))
+                    except Exception as e:
+                        print(f"Warning: {e}")
+                continue
+        try:
+            targets.append(_build_target(video_dir))
+        except Exception as e:
+            print(f"Warning: {e}")
     if not targets:
         suffix = f" for video_ids={sorted(allowed)}" if allowed else ""
         raise RuntimeError(f"No eligible persisted runs found under {root}{suffix}")

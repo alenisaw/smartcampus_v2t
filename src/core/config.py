@@ -189,6 +189,7 @@ class RuntimeConfig:
     log_level: str
     overwrite_existing: bool
     strict_paths: bool
+    allow_mock_backends: bool
     torch_threads: int
     cuda_tf32: bool
     matmul_precision: str
@@ -291,6 +292,16 @@ class ExperimentConfig:
 
 
 @dataclass
+class PostprocessConfig:
+    """Post-processing and annotations merging settings."""
+
+    merge_enabled: bool
+    merge_method: str
+    merge_tau: float
+    gap_tolerance_sec: float
+
+
+@dataclass
 class PipelineConfig:
     """The fully merged application config resolved for one profile and optional variant."""
 
@@ -305,6 +316,7 @@ class PipelineConfig:
     guard: GuardConfig
     runtime: RuntimeConfig
     translation: TranslationConfig
+    postprocess: PostprocessConfig
     jobs: JobsConfig
     queue: QueueConfig
     locks: LocksConfig

@@ -46,7 +46,17 @@ def atomic_write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(path)
+    
+    # Retry replacing to handle Windows file locking race conditions
+    retries = 20
+    for i in range(retries):
+        try:
+            tmp.replace(path)
+            return
+        except (PermissionError, OSError):
+            if i == retries - 1:
+                raise
+            time.sleep(0.05)
 
 
 @dataclass(frozen=True)

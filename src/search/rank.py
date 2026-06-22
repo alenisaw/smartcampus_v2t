@@ -229,27 +229,61 @@ def heuristic_rerank_bonus(query_tokens: Sequence[str], hit: Any, tokenize) -> f
 
 
 class TransformersReranker:
-    """Score query-document pairs with a transformers sequence-classification model."""
+    """Score query-document pairs with a supported CrossEncoder reranker."""
 
     def __init__(self, model_name: str, device: Optional[str] = None):
-        try:
-            import torch
-            from transformers import AutoModelForSequenceClassification, AutoTokenizer
-        except Exception as exc:
-            raise RuntimeError("transformers reranker dependencies are not installed.") from exc
+        import torch
+        from pathlib import Path
+        import json
+        from transformers import AutoTokenizer, AutoConfig
 
         self.model_name = str(model_name)
-        self._torch = torch
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, trust_remote_code=True)
-        self.model = AutoModelForSequenceClassification.from_pretrained(self.model_name, trust_remote_code=True)
-        self.model.eval()
+        self.device = str(device or "").strip()
+        if not self.device:
+            self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        device_name = str(device or "").strip()
-        if device_name:
-            try:
-                self.model.to(device_name)
-            except Exception:
-                pass
+        # Load config to determine model type
+        config = AutoConfig.from_pretrained(self.model_name, trust_remote_code=True)
+        self.model_type = getattr(config, "model_type", "").lower()
+        
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, trust_remote_code=True)
+        
+        # Load the model depending on model type
+        dtype = torch.float16 if self.device.startswith("cuda") else torch.float32
+        
+        if self.model_type == "qwen3_vl":
+            from transformers import Qwen3VLForConditionalGeneration
+            self.model = Qwen3VLForConditionalGeneration.from_pretrained(
+                self.model_name,
+                trust_remote_code=True,
+                torch_dtype=dtype
+            )
+            # Find logit score parameters from 1_LogitScore/config.json if it exists
+            # default to Qwen3 values if config not found
+            self.true_token_id = 9693
+            self.false_token_id = 2152
+            logit_cfg_path = Path(self.model_name) / "1_LogitScore" / "config.json"
+            if logit_cfg_path.exists():
+                try:
+                    with open(logit_cfg_path, "r") as f:
+                        cfg_data = json.load(f)
+                        self.true_token_id = int(cfg_data.get("true_token_id", 9693))
+                        self.false_token_id = int(cfg_data.get("false_token_id", 2152))
+                except Exception:
+                    pass
+        else:
+            # Fallback for standard sequence classification cross encoders
+            from transformers import AutoModelForSequenceClassification
+            self.model = AutoModelForSequenceClassification.from_pretrained(
+                self.model_name,
+                trust_remote_code=True,
+                torch_dtype=dtype
+            )
+            self.true_token_id = None
+            self.false_token_id = None
+
+        self.model = self.model.to(self.device)
+        self.model.eval()
 
     def score_pairs(self, query: str, passages: Sequence[str]) -> List[float]:
         """Return one rerank score per passage."""
@@ -257,60 +291,50 @@ class TransformersReranker:
         if not passages:
             return []
 
-        model_device = None
-        try:
-            model_device = next(self.model.parameters()).device
-        except Exception:
-            model_device = None
-
-        encoded = self.tokenizer(
-            [str(query or "")] * len(passages),
-            [str(p or "") for p in passages],
-            padding=True,
-            truncation=True,
-            max_length=512,
-            return_tensors="pt",
-        )
-        if model_device is not None:
-            for key, value in encoded.items():
-                try:
-                    encoded[key] = value.to(model_device)
-                except Exception:
-                    pass
-
-        with self._torch.inference_mode():
-            outputs = self.model(**encoded)
-            logits = getattr(outputs, "logits", outputs[0])
-            if len(getattr(logits, "shape", ())) > 1 and int(logits.shape[-1]) > 1:
-                logits = logits[:, 0]
-            else:
-                logits = logits.reshape(-1)
-        return [float(x) for x in logits.detach().cpu().tolist()]
+        import torch
+        scores = []
+        for p in passages:
+            inputs = self.tokenizer(query, str(p), padding=True, truncation=True, return_tensors='pt')
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            
+            with torch.no_grad():
+                outputs = self.model(**inputs)
+                if self.model_type == "qwen3_vl":
+                    logits = outputs.logits  # [batch_size, seq_len, vocab_size]
+                    last_token_logits = logits[0, -1, :]
+                    true_score = last_token_logits[self.true_token_id].item()
+                    false_score = last_token_logits[self.false_token_id].item()
+                    scores.append(true_score - false_score)
+                else:
+                    logits = outputs.logits  # [batch_size, num_classes]
+                    val = logits[0].cpu().numpy()
+                    scores.append(float(val[0] if val.ndim > 0 else val))
+        return scores
 
     def release(self) -> None:
         """Best-effort release of the transformers reranker backend."""
-
         model = getattr(self, "model", None)
-        tokenizer = getattr(self, "tokenizer", None)
         self.model = None
-        self.tokenizer = None
         try:
             if model is not None and hasattr(model, "cpu"):
                 model.cpu()
         except Exception:
             pass
-        del tokenizer
 
 
 def build_reranker(model_name: str, backend: str, device: Optional[str], looks_like_transformers_model) -> Optional[TransformersReranker]:
-    """Build a model reranker when possible, otherwise return None for heuristic fallback."""
+    """Build a requested reranker; heuristic fallback must be explicit."""
 
     backend_name = str(backend or "auto").strip().lower() or "auto"
-    if backend_name not in {"auto", "transformers"}:
+    if backend_name in {"heuristic", "mock"}:
         return None
+    if backend_name not in {"auto", "transformers", "cross_encoder"}:
+        raise ValueError(f"Unsupported reranker backend: {backend_name!r}")
+    if not model_name:
+        raise ValueError("rerank_enabled requires reranker_model_id or explicit heuristic backend")
     if backend_name == "auto" and not looks_like_transformers_model(model_name):
-        return None
+        raise ValueError(f"Cannot infer a model reranker backend for {model_name!r}")
     try:
         return TransformersReranker(model_name=model_name, device=device)
-    except Exception:
-        return None
+    except Exception as exc:
+        raise RuntimeError(f"Failed to initialize requested reranker {model_name!r}") from exc

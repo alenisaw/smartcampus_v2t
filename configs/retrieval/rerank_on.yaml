@@ -1,0 +1,3 @@
+# configs/retrieval/rerank_on.yaml
+search:
+  rerank_enabled: true
